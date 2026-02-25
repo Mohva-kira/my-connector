@@ -1,0 +1,35 @@
+{
+  "CHAPSHAP": {
+    "nb_emails": 12,
+    "nb_participants": 7,
+    "participants": [
+      "allassane.kamara@mediasoftci.net",
+      "zie.coulibaly@mediasoftci.net",
+      "fulbert.koffi@mediasoftci.net",
+      "michee.teki@mediasoftci.net",
+      "mohamed.tandjigora@mediasoftci.net",
+      "lamine.komou@mediasoftci.net",
+      "didier.ouattara@mediasoftci.net"
+    ],
+    "periode": "19/09/2025",
+    "mots_cles_principaux": {
+      "test": 193,
+      "développement": 61,
+      "deadline": 30,
+      "projet": 28,
+      "appel": 18,
+      "solution": 12,
+      "issue": 11,
+      "étape": 8,
+      "terminé": 8,
+      "urgent": 4
+    },
+    "sujets_recents": [
+      "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+      "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+      "Re: OBSERVATION CHAPCHAP BACK OFFICE"
+    ],
+    "activite_recente": true,
+    "score_activite": 22
+  }
+}

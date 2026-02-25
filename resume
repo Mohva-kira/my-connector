@@ -1,0 +1,63 @@
+{
+  "CHAPSHAP": {
+    "nb_emails": 25,
+    "nb_participants": 11,
+    "participants": [
+      "mohamed.tandjigora@mediasoftci.net",
+      "lamine.komou@mediasoftci.net",
+      "armand.liboue@mediasoftci.net",
+      "fulbert.koffi@mediasoftci.net",
+      "dpo@mediasoftci.net",
+      "anselme.kouame@mediasoftci.net",
+      "zie.coulibaly@mediasoftci.net",
+      "allassane.kamara@mediasoftci.net",
+      "flatene.sangare@mediasoftci.net",
+      "didier.ouattara@mediasoftci.net",
+      "michee.teki@mediasoftci.net"
+    ],
+    "periode": "Dates non analysables",
+    "mots_cles_principaux": {
+      "test": 229,
+      "développement": 73,
+      "projet": 61,
+      "deadline": 44,
+      "appel": 23,
+      "solution": 15,
+      "urgent": 12,
+      "issue": 11,
+      "étape": 9,
+      "terminé": 8
+    },
+    "sujets_recents": [
+      "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+      "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+      "Re: OBSERVATION CHAPCHAP BACK OFFICE"
+    ],
+    "activite_recente": true,
+    "score_activite": 35
+  },
+  "AGENCY_BANKING": {
+    "nb_emails": 1,
+    "nb_participants": 5,
+    "participants": [
+      "mohamed.tandjigora@mediasoftci.net",
+      "lamine.komou@mediasoftci.net",
+      "kader.kamara@mediasoftci.net",
+      "sacha.ogou@mediasoftci.net",
+      "annabelle.kouame@mediasoftci.net"
+    ],
+    "periode": "17/09/2025",
+    "mots_cles_principaux": {
+      "projet": 6,
+      "développement": 5,
+      "livraison": 2,
+      "important": 1,
+      "terminé": 1
+    },
+    "sujets_recents": [
+      "RE: [AGENCY BANKING] - MISE A JOUR PLANNING"
+    ],
+    "activite_recente": true,
+    "score_activite": 6
+  }
+}

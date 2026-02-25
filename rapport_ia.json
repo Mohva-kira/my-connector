@@ -1,0 +1,374 @@
+{
+  "Agency banking": {
+    "nb_emails": 29,
+    "nb_participants": 31,
+    "participants": [
+      "stephanie.coulibaly@mediasoftci.net",
+      "judicael.kobenan@mediasoftci.net",
+      "cedric.yao@mediasoftci.net",
+      "michee.teki@mediasoftci.net",
+      "armand.liboue@mediasoftci.net",
+      "flatene.sangare@mediasoftci.net",
+      "guy.mahan@mediasoftci.net",
+      "valley.diomande@sotels.ci",
+      "aida.coulibaly@banquepostale.bf",
+      "dpo@mediasoftci.net"
+    ],
+    "analyse_sentiment": {
+      "emails_analysés": 29,
+      "sentiment_positif": 0,
+      "sentiment_négatif": 0,
+      "sentiment_neutre": 29,
+      "confiance_moyenne": 0.85,
+      "détails": [
+        {
+          "subject": "RE: [AGENCY BANKING] - TRAVAUX DE TEST",
+          "sentiment": "neutral",
+          "confidence": 0.8671900629997253,
+          "date": "Fri, 26 Sep 2025 09:47:13 -0000",
+          "method": "ML"
+        },
+        {
+          "subject": "RE: [AGENCY BANKING] - TRAVAUX DE TEST",
+          "sentiment": "neutral",
+          "confidence": 0.8385067582130432,
+          "date": "Fri, 26 Sep 2025 11:02:12 -0000",
+          "method": "ML"
+        },
+        {
+          "subject": "Transmission des statistiques de clients abonnés par site et critères de priorisation – Plan de migration VITBANK 24 → VITBANK 25",
+          "sentiment": "neutral",
+          "confidence": 0.8491755723953247,
+          "date": "Mon, 29 Sep 2025 09:13:11 -0000",
+          "method": "ML"
+        }
+      ],
+      "tendance": "Neutre",
+      "méthode": "ML"
+    },
+    "entités_extraites": {
+      "personnes": [
+        "difficult",
+        "charles kouame",
+        "Wallet",
+        "Atelier Marketing & Communication",
+        "Mobile Wallet\r\n\r\nTransfert Wallet",
+        "Anselme Kouam",
+        "Mettre",
+        "francis zago'",
+        "Bonjour Anselme",
+        "Bonjour Monsieur Anselme"
+      ],
+      "organisations": [
+        "Lot 1",
+        "METHOD",
+        "CEDRIC YAO KOUADIO",
+        "mailto:agency-banking@mediasoftci.net",
+        "BBCI",
+        "mailto:joseph.ndayishimiye@bbcibank.com",
+        "Banque pour garantir une haute",
+        "KAMARA",
+        "Mediasoft Lafayette",
+        "TZID"
+      ],
+      "lieux": [
+        "Cte d'ivoire",
+        "Monea",
+        "SANOGO'\";RSVP=TRUE:mailto:oumar.sanogo@mediasoftci.net",
+        "BBCI",
+        "Wallet",
+        "Lacquisition",
+        "Aude TOYI",
+        "Portemonnaie",
+        "Email",
+        "Merci"
+      ],
+      "emails": [
+        "e@mediasoftci.net",
+        "stephanie.coulibaly@mediasoftci.net",
+        "assamy.gansore@banquepostale.bf",
+        "steven.mea@mediasoftci.net",
+        "lionel.irambona@bbcibank.com",
+        "abdoul.diabagate@mediasoftci.net",
+        "ngodjigui.cisse@mediasoftci.net",
+        "cedric.yao@mediasoftci.net",
+        "michee.teki@mediasoftci.net",
+        "armand.liboue@mediasoftci.net"
+      ],
+      "montants": [],
+      "technologies": [
+        "REST",
+        "API",
+        "VUE",
+        "GIT"
+      ],
+      "urls": [
+        "https://teams.microsoft.com/meetingOptions/?organizerId=3a039bbf-7360-4d7",
+        "https://play.google.com/apps/internaltest/4701443838262932184",
+        "https://teams.microsoft.com/meetingOptions/?organizerId=273a0266-720d-4589-8a3c-2326113e27e3&tenantId=d5ffad06-edd5-4e98-be19-0f890375121f&threadId=19_meeting_ZmYyMDk0ZWMtMzUxMi00MzdhLTllODgtYTBiOTYyNTdjOTg2@thread.v2&messageId=0&language=fr-FR",
+        "http://www.mediasoft.ci/",
+        "http://www.mediasoftci.com/",
+        "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MmIyYzcyNmItZmE4Yi00",
+        "https://teams.microsoft.com/meetingOptions/?organizerId=",
+        "https://www.figma.com/proto/jF4XgjS5rjILXix8vK6fDN/Agency_Banking_Marchand?page-id=0%3A1",
+        "http://www.mediasoft.ci",
+        "https://mldoc.mediasoftci.net/Products/Files/DocEditor.aspx?fileid=7870&doc=V0J2UXpubkcwMTErRGEwYkM4UzkycmFMbHRoYlc1RDQzcjRLQ3RoMkpiTT0_IntcImVudHJ5XCI6XCI3ODcwXCIsXCJsaW5rXCI6XCI5MDA1MGU1OS0zZTYwLTQ0MDktYmJlMS0wOTg2OTg3ODI1NDNcIn0i0"
+      ]
+    },
+    "résumé_automatique": {
+      "résumé_automatique": "Aussi, bien quil y ait diffrents APK, il serait aussi important de faire la diffrence entre les deux interfaces. Aussi   lutilisateur final de faire the diffrenceEntre les Deux interfaces en dehors des fonctionnalits qui y sont exposes.",
+      "emails_analysés": 3,
+      "méthode": "ML",
+      "taux_compression": 0.29
+    },
+    "évaluation_risque": {
+      "score_risque": 100,
+      "niveau_risque": "CRITIQUE",
+      "facteurs_risque": [
+        "28 mots-clés de risque détectés"
+      ],
+      "recommandation": "⚠️ ATTENTION IMMÉDIATE - Réviser le projet, contacter l'équipe"
+    },
+    "emails_critiques": [
+      {
+        "subject": "RE: PLANNING DE MISE EN ŒUVRE D’UNE PLATEFORME DIGITALE BANCAIRE A LA BBCI",
+        "from": "\"anselme.kouame\" <anselme.kouame@mediasoftci.net>",
+        "date": "Tue, 9 Sep 2025 10:21:24 -0000",
+        "criticality_score": 9,
+        "flags": [
+          "échéance",
+          "erreur",
+          "urgent_immédiat"
+        ],
+        "preview": "Bonjour Miss  <mailto:stephanie.coulibaly@mediasoftci.net> @Coulibaly , \r\n\r\n \r\n\r\nNous vous remercions pour votre retour.\r\n\r\n \r\n\r\nConcernant le point «..."
+      },
+      {
+        "subject": "Re: PLANNING DE MISE EN ŒUVRE D’UNE PLATEFORME DIGITALE BANCAIRE A LA BBCI",
+        "from": "Coulibaly <stephanie.coulibaly@mediasoftci.net>",
+        "date": "Tue, 9 Sep 2025 12:05:30 +0000 (GMT)",
+        "criticality_score": 9,
+        "flags": [
+          "échéance",
+          "erreur",
+          "urgent_immédiat"
+        ],
+        "preview": "Bien reçu M. Anselme. \r\n\r\nMerci pour votre prompt retour. \r\n\r\nBien cordialement \r\n\r\n\r\n\r\n\r\nDe: \"Anselme KOUAME\" <anselme.kouame@mediasoftci.net> \r\nÀ: \"..."
+      },
+      {
+        "subject": "Plan d’action et accès serveurs pour configuration Mobile Banking et Agency Bank",
+        "from": "Anselme Kouamé <anselme.kouame@mediasoftci.net>",
+        "date": "Wed, 24 Sep 2025 13:38:12 -0000",
+        "criticality_score": 9,
+        "flags": [
+          "échéance",
+          "erreur",
+          "urgent_immédiat"
+        ],
+        "preview": "Bonjour Monsieur  <mailto:alex.beda@mediasoftci.net> @'Alex BEDA' , \r\n\r\n \r\n\r\nSuite à nos échanges de ce jour, veuillez trouver ci-joint les identifian..."
+      },
+      {
+        "subject": "Re: PLANNING DE MISE EN ŒUVRE D’UNE PLATEFORME DIGITALE BANCAIRE A LA BBCI",
+        "from": "Bah YACOUBA <bah.yacouba@mediasoftci.net>",
+        "date": "Mon, 8 Sep 2025 17:09:22 +0000 (GMT)",
+        "criticality_score": 7,
+        "flags": [
+          "erreur",
+          "urgent_immédiat"
+        ],
+        "preview": "Bonjour Anselme, \r\n\r\nPourrai-je avoir le planning en format *.xls ou autres je n'ai pas MS-Project installé. \r\n\r\n\r\n\r\nBien cordialement, \r\n\r\n\r\n\r\nDe: \"A..."
+      },
+      {
+        "subject": "Re: PLANNING DE MISE EN ŒUVRE D’UNE PLATEFORME DIGITALE BANCAIRE A LA BBCI",
+        "from": "Bah YACOUBA <bah.yacouba@mediasoftci.net>",
+        "date": "Mon, 8 Sep 2025 17:20:17 +0000 (GMT)",
+        "criticality_score": 7,
+        "flags": [
+          "erreur",
+          "urgent_immédiat"
+        ],
+        "preview": "Bonjour Anselme, \r\n\r\nOK, pour moi. \r\n\r\n\r\nBien cordialement, \r\n\r\n\r\nDe: \"Anselme Kouamé\" <anselme.kouame@mediasoftci.net> \r\nÀ: \"BAH YACOUBA\" <bah.yacoub..."
+      }
+    ],
+    "score_activité": 33,
+    "priorité_attention": "HAUTE"
+  },
+  "chapchap": {
+    "nb_emails": 32,
+    "nb_participants": 9,
+    "participants": [
+      "fulbert.koffi@mediasoftci.net",
+      "didier.ouattara@mediasoftci.net",
+      "sacha.ogou@mediasoftci.net",
+      "lamine.komou@mediasoftci.net",
+      "zie.coulibaly@mediasoftci.net",
+      "michee.teki@mediasoftci.net",
+      "mohamed.tandjigora@mediasoftci.net",
+      "allassane.kamara@mediasoftci.net",
+      "valley.diomande@sotels.ci"
+    ],
+    "analyse_sentiment": {
+      "emails_analysés": 32,
+      "sentiment_positif": 0,
+      "sentiment_négatif": 0,
+      "sentiment_neutre": 32,
+      "confiance_moyenne": 0.83,
+      "détails": [
+        {
+          "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+          "sentiment": "neutral",
+          "confidence": 0.7926068902015686,
+          "date": "Fri, 19 Sep 2025 19:24:29 +0000 (GMT)",
+          "method": "ML"
+        },
+        {
+          "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+          "sentiment": "neutral",
+          "confidence": 0.8602840304374695,
+          "date": "Fri, 19 Sep 2025 19:39:23 +0000 (GMT)",
+          "method": "ML"
+        },
+        {
+          "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+          "sentiment": "neutral",
+          "confidence": 0.8603906035423279,
+          "date": "Mon, 22 Sep 2025 09:28:45 +0000 (GMT)",
+          "method": "ML"
+        }
+      ],
+      "tendance": "Neutre",
+      "méthode": "ML"
+    },
+    "entités_extraites": {
+      "personnes": [
+        "Deadline",
+        "Anselme KOUAME",
+        "mailto:michee.teki@mediasoftci.net",
+        "n’",
+        "jeanne kwah",
+        "N’",
+        "lamine komou",
+        "mohamed tandjigora",
+        "Cedric YAO",
+        "qu’"
+      ],
+      "organisations": [
+        "PDV",
+        "ZIE",
+        "Le développement",
+        "CHAPCHAP CANAL WEB",
+        "ALLASSANE",
+        "GESTION",
+        "ACTIVER",
+        "CEDRIC YAO",
+        "CP",
+        "ACTIVE"
+      ],
+      "lieux": [
+        "Exple",
+        "zie.coulibaly@mediasoftci.net",
+        "michee.teki@mediasoftci.net",
+        "mailto:michee.teki@mediasoftci.net",
+        "Merci",
+        "Peux-tu",
+        "mailto:mohamed.tandjigora@mediasoftci.net",
+        "Cdt",
+        "A",
+        "S.I"
+      ],
+      "emails": [
+        "didier.ouattara@mediasoftci.net",
+        "sacha.ogou@mediasoftci.net",
+        "anselme.kouame@mediasoftci.net",
+        "cedric.yao@mediasoftci.net",
+        "zie.coulibaly@mediasoftci.net",
+        "michee.teki@mediasoftci.net",
+        "allassane.kamara@mediasoftci.net",
+        "valley.diomande@sotels.ci",
+        "dpo@mediasoftci.net",
+        "guy.mahan@mediasoftci.net"
+      ],
+      "montants": [],
+      "technologies": [
+        "REST",
+        "API",
+        "GIT"
+      ],
+      "urls": [
+        "http://www.mediasoft.ci/"
+      ]
+    },
+    "résumé_automatique": {
+      "résumé_automatique": "Bonsoir Mohamed,   constaté que plusieurs éléments n'ont pas encore été considérés (voir le fichier ci-joint) Le type de compte sélectionné reste inchangé après la modification. Nous n'avons aucune colonne date.",
+      "emails_analysés": 3,
+      "méthode": "ML",
+      "taux_compression": 0.26
+    },
+    "évaluation_risque": {
+      "score_risque": 63,
+      "niveau_risque": "CRITIQUE",
+      "facteurs_risque": [
+        "8 mots-clés de risque détectés"
+      ],
+      "recommandation": "⚠️ ATTENTION IMMÉDIATE - Réviser le projet, contacter l'équipe"
+    },
+    "emails_critiques": [
+      {
+        "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+        "from": "MICHEE TEKI <michee.teki@mediasoftci.net>",
+        "date": "Fri, 19 Sep 2025 17:02:38 +0000 (GMT)",
+        "criticality_score": 8,
+        "flags": [
+          "urgent",
+          "urgent_urgent"
+        ],
+        "preview": "@TANDJIGORA \r\n@KOMOU \r\n@KADER \r\n@DIDIER, \r\nmerci de mettre à jour le rapport de test transmis par ZIE. \r\nNous aurons besoin de votre retour urgent ce ..."
+      },
+      {
+        "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+        "from": "MICHEE TEKI <michee.teki@mediasoftci.net>",
+        "date": "Fri, 19 Sep 2025 17:28:37 +0000 (GMT)",
+        "criticality_score": 8,
+        "flags": [
+          "urgent",
+          "urgent_urgent"
+        ],
+        "preview": "Merci TANDJIGORA. \r\nCordialement. \r\n\r\n\r\nDe: \"mohamed tandjigora\" <mohamed.tandjigora@mediasoftci.net> \r\nÀ: \"MICHEE TEKI\" <michee.teki@mediasoftci.net>..."
+      },
+      {
+        "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+        "from": "ZIE COULIBALY <zie.coulibaly@mediasoftci.net>",
+        "date": "Fri, 19 Sep 2025 19:24:29 +0000 (GMT)",
+        "criticality_score": 8,
+        "flags": [
+          "urgent",
+          "urgent_urgent"
+        ],
+        "preview": "\r\nBonsoir Mohamed, \r\nSuite à l'examen de ton retour, j'ai constaté que plusieurs éléments n'ont pas encore été considérés (voir le fichier ci-joint) ;..."
+      },
+      {
+        "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+        "from": "MICHEE TEKI <michee.teki@mediasoftci.net>",
+        "date": "Fri, 19 Sep 2025 19:39:23 +0000 (GMT)",
+        "criticality_score": 8,
+        "flags": [
+          "urgent",
+          "urgent_urgent"
+        ],
+        "preview": "M. ZIE, merci pour ce retour. mais je souhaite que tu reparcours les points en faisant tes tests. \r\n@Tandjigora, merci de prendre en compte ses points..."
+      },
+      {
+        "subject": "Re: OBSERVATION CHAPCHAP BACK OFFICE",
+        "from": "ZIE COULIBALY <zie.coulibaly@mediasoftci.net>",
+        "date": "Mon, 22 Sep 2025 09:28:45 +0000 (GMT)",
+        "criticality_score": 8,
+        "flags": [
+          "urgent",
+          "urgent_urgent"
+        ],
+        "preview": "Bonjour Mohamed, \r\nJe procède à la vérification. \r\n\r\nCdt. \r\n\r\n\r\nDe: \"Mohamed TANDJIGORA\" <mohamed.tandjigora@mediasoftci.net> \r\nÀ: \"ZIE COULIBALY\" <zi..."
+      }
+    ],
+    "score_activité": 35,
+    "priorité_attention": "HAUTE"
+  }
+}

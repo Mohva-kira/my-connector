@@ -1,0 +1,90 @@
+{
+  "Agency Banking": {
+    "nb_emails": 4,
+    "nb_participants": 4,
+    "participants": [
+      "annabelle.kouame@mediasoftci.net",
+      "youanandre.gbadje@mediasoftci.net",
+      "cedric.yao@mediasoftci.net",
+      "anselme.kouame@mediasoftci.net"
+    ],
+    "analyse_sentiment": {
+      "emails_analysés": 4,
+      "sentiment_positif": 1,
+      "sentiment_négatif": 0,
+      "sentiment_neutre": 3,
+      "confiance_moyenne": 0.55,
+      "détails": [
+        {
+          "subject": "RE: RAPPORT COMITÉ PROJET DU 13 OCTOBRE 2025",
+          "sentiment": "NEUTRAL",
+          "confidence": 0.5,
+          "date": "Thu, 16 Oct 2025 11:47:45 -0000",
+          "method": "Basic"
+        },
+        {
+          "subject": "RE: [AGENCY BANKING] - TRAVAUX DE TEST",
+          "sentiment": "NEUTRAL",
+          "confidence": 0.5,
+          "date": "Thu, 16 Oct 2025 16:15:26 -0000",
+          "method": "Basic"
+        },
+        {
+          "subject": "RE: [AGENCY BANKING] - TRAVAUX DE TEST",
+          "sentiment": "POSITIVE",
+          "confidence": 0.7,
+          "date": "Thu, 16 Oct 2025 18:28:45 -0000",
+          "method": "Basic"
+        }
+      ],
+      "tendance": "Positive",
+      "méthode": "Mots-clés"
+    },
+    "entités_extraites": {
+      "personnes": [],
+      "organisations": [],
+      "lieux": [],
+      "emails": [
+        "olivier.nda@mediasoftci.net",
+        "jmartial.kassi@mediasoftci.net",
+        "dpo@mediasoftci.net",
+        "benjamin.godo@mediasoftci.net",
+        "ana.fofana@mediasoftci.net",
+        "alex.beda@mediasoftci.net",
+        "bah.yacouba@mediasoftci.net",
+        "kevin.zago@mediasoftci.net",
+        "oumar.kamara@mediasoftci.net",
+        "stephanie.coulibaly@mediasoftci.net"
+      ],
+      "montants": [],
+      "technologies": [
+        "VUE",
+        "REST",
+        "API"
+      ],
+      "urls": [
+        "https://lc.cx/FD1BtW",
+        "https://play.google.com/apps/internaltest/4701627129570717617",
+        "https://play.google.com/apps/internaltest/4701443838262932184",
+        "http://www.mediasoft.ci",
+        "http://www.mediasoft.ci/"
+      ]
+    },
+    "résumé_automatique": {
+      "résumé_automatique": "Sujet: RE: RAPPORT COMITÉ PROJET DU 13 OCTOBRE 2025. Bonjour Monsieur, \r\n\r\n \r\n\r\nVeuillez trouver en surbrillance bleu nos lments de rponse. Sujet: RE: [AGENCY BANKING] - TRAVAUX DE TEST. Bonsoir Monsieur  <mailto:youanandre. Sujet: RE: [AGENCY BANKING] - TRAVAUX DE TEST",
+      "emails_analysés": 3,
+      "méthode": "Extraction basique"
+    },
+    "évaluation_risque": {
+      "score_risque": 12,
+      "niveau_risque": "FAIBLE",
+      "facteurs_risque": [
+        "2 mots-clés de risque détectés"
+      ],
+      "recommandation": "✅ Projet sur la bonne voie - Suivi normal"
+    },
+    "emails_critiques": [],
+    "score_activité": 7,
+    "priorité_attention": "NORMALE"
+  }
+}
