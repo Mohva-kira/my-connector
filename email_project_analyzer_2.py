@@ -9,6 +9,7 @@ from email.header import decode_header
 import re
 import logging
 import time
+from time import perf_counter
 from datetime import datetime, timedelta
 from collections import defaultdict
 import argparse
@@ -136,7 +137,11 @@ class EmailIntelligentAnalyzer:
         
         for email_data in emails:
             try:
-                text = f"{email_data['subject']} {email_data['body']}"[:512]
+                normalized = email_data.get('normalized_text')
+                if normalized:
+                    text = normalized[:512]
+                else:
+                    text = f"{email_data['subject']} {email_data['body']}".lower()[:512]
                 if not text.strip():
                     continue
                 
@@ -242,7 +247,9 @@ class EmailIntelligentAnalyzer:
         
         for email_data in emails:
             try:
-                text = f"{email_data['subject']} {email_data['body']}"
+                text = email_data.get('normalized_text')
+                if not text:
+                    text = f"{email_data['subject']} {email_data['body']}".lower()
                 
                 # Essayer spaCy d'abord
                 if self.nlp_available and self.nlp:
@@ -355,7 +362,9 @@ class EmailIntelligentAnalyzer:
             # Facteur mots-clés de risque
             risk_keyword_count = 0
             for email_data in emails:
-                text = f"{email_data['subject']} {email_data['body']}".lower()
+                text = email_data.get('normalized_text')
+                if not text:
+                    text = f"{email_data['subject']} {email_data['body']}".lower()
                 for keyword, weight in self.risk_keywords.items():
                     if keyword in text:
                         risk_score += weight * 3
@@ -407,7 +416,9 @@ class EmailIntelligentAnalyzer:
         
         for email_data in emails:
             try:
-                text = f"{email_data['subject']} {email_data['body']}".lower()
+                text = email_data.get('normalized_text')
+                if not text:
+                    text = f"{email_data['subject']} {email_data['body']}".lower()
                 criticality_score = 0
                 flags = []
                 
@@ -443,16 +454,196 @@ class EmailIntelligentAnalyzer:
 
 # Reprise du reste du code EmailProjectAnalyzer...
 class EmailProjectAnalyzer:
-    def __init__(self, email_address: str, password: str, imap_server: str = "mail.mediasoftci.net", port: int = 993):
+    def __init__(
+        self,
+        email_address: str,
+        password: str,
+        imap_server: str = "mail.mediasoftci.net",
+        port: int = 993,
+        max_deep_emails: int = 20,
+        cache_file: str = "email_analysis_cache.json"
+    ):
         self.email_address = email_address
         self.password = password
         self.imap_server = imap_server
         self.port = port
         self.mail = None
         self.project_emails = defaultdict(list)
+        self.max_deep_emails = max(5, max_deep_emails)
+        self.cache_file = cache_file
+        self.email_cache = self.load_cache()
+        self.step_timings = defaultdict(float)
+        self.step_counts = defaultdict(int)
         
         # Initialiser l'analyseur IA
         self.ai_analyzer = EmailIntelligentAnalyzer()
+
+    def record_timing(self, step_name: str, duration_seconds: float):
+        """Enregistre le temps passé sur une étape."""
+        self.step_timings[step_name] += duration_seconds
+        self.step_counts[step_name] += 1
+
+    def get_top_timing_steps(self, top_n: int = 3) -> List[Dict]:
+        """Retourne les étapes les plus coûteuses."""
+        sorted_steps = sorted(self.step_timings.items(), key=lambda item: item[1], reverse=True)
+        top_steps = []
+        for step_name, total_seconds in sorted_steps[:top_n]:
+            runs = self.step_counts.get(step_name, 1)
+            top_steps.append({
+                "étape": step_name,
+                "total_s": round(total_seconds, 3),
+                "runs": runs,
+                "moyenne_s": round(total_seconds / max(1, runs), 3)
+            })
+        return top_steps
+
+    def load_cache(self) -> Dict:
+        """Charge le cache local des emails déjà traités."""
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    raw_cache = json.load(f)
+                if isinstance(raw_cache, dict):
+                    return raw_cache
+        except Exception as e:
+            logging.warning(f"Impossible de charger le cache: {e}")
+        return {}
+
+    def save_cache(self):
+        """Sauvegarde un cache borné pour éviter les retraitements."""
+        try:
+            max_entries = 2000
+            if len(self.email_cache) > max_entries:
+                keys = list(self.email_cache.keys())[-max_entries:]
+                self.email_cache = {k: self.email_cache[k] for k in keys}
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.email_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.warning(f"Impossible de sauvegarder le cache: {e}")
+
+    def truncate_text(self, text: str, max_len: int = 160) -> str:
+        """Tronque proprement le texte pour l'affichage console."""
+        if not text:
+            return ""
+        clean = " ".join(text.split())
+        if len(clean) <= max_len:
+            return clean
+        return clean[:max_len - 3].rstrip() + "..."
+
+    def decode_best_effort(self, payload: bytes, charset_hint: str = None) -> str:
+        """Décode au mieux les corps d'email pour limiter la perte d'accents."""
+        if not payload:
+            return ""
+        candidates = [charset_hint, "utf-8", "latin-1", "cp1252"]
+        for encoding in candidates:
+            if not encoding:
+                continue
+            try:
+                return payload.decode(encoding, errors='ignore')
+            except Exception:
+                continue
+        return payload.decode("utf-8", errors='ignore')
+
+    def normalize_email_text(self, email_content: Dict) -> str:
+        """Construit une version normalisée réutilisable par les analyseurs."""
+        subject = email_content.get('subject', '')
+        body = email_content.get('body', '')
+        return f"{subject} {body}".lower()
+
+    def should_fetch_full_message(self, subject: str, project_filters: List[str]) -> bool:
+        """Filtrage précoce: ne charge le corps complet que si le sujet est potentiellement pertinent."""
+        subject_lower = (subject or "").lower()
+        for project_filter in project_filters:
+            if project_filter.lower() in subject_lower:
+                return True
+        return False
+
+    def format_flags(self, flags: List[str]) -> str:
+        """Rend les flags de criticité plus lisibles pour l'utilisateur."""
+        if not flags:
+            return "aucun indicateur explicite"
+        readable = []
+        for flag in flags[:3]:
+            if flag.startswith("urgent_"):
+                readable.append(f"urgence ({flag.replace('urgent_', '')})")
+            else:
+                readable.append(flag)
+        return ", ".join(readable)
+
+    def build_project_diagnostic(self, analysis: Dict) -> str:
+        """Crée une synthèse orientée décision pour le rapport."""
+        risk = analysis.get('évaluation_risque', {})
+        sentiment = analysis.get('analyse_sentiment', {})
+        priority = analysis.get('priorité_attention', 'NORMALE')
+        risk_level = risk.get('niveau_risque', 'INDETERMINÉ')
+        trend = sentiment.get('tendance', 'Neutre')
+        email_count = analysis.get('nb_emails', 0)
+
+        if risk_level == "CRITIQUE":
+            return (
+                f"Situation tendue ({email_count} emails, tendance {trend.lower()}). "
+                f"Priorité {priority.lower()}: escalade immédiate et plan d'action court terme."
+            )
+        if risk_level == "MODÉRÉ":
+            return (
+                f"Situation sous surveillance ({email_count} emails, tendance {trend.lower()}). "
+                f"Prévoir un point de cadrage et un suivi hebdomadaire."
+            )
+        return (
+            f"Situation globalement stable ({email_count} emails, tendance {trend.lower()}). "
+            f"Maintenir le rythme de suivi actuel."
+        )
+
+    def format_project_report(self, project_name: str, analysis: Dict) -> List[str]:
+        """Formate un bloc de rapport projet plus narratif et actionnable."""
+        lines = []
+        lines.append(f"\n🚀 PROJET: {project_name}")
+        lines.append(f"   📊 Priorité: {analysis.get('priorité_attention', 'N/A')}")
+        lines.append(f"   📧 Emails: {analysis.get('nb_emails', 0)}")
+        lines.append(f"   👥 Participants: {analysis.get('nb_participants', 0)}")
+        lines.append(f"   🧭 Diagnostic: {self.build_project_diagnostic(analysis)}")
+
+        sentiment = analysis.get('analyse_sentiment', {})
+        if sentiment.get('tendance'):
+            method = sentiment.get('méthode', 'N/A')
+            confidence = sentiment.get('confiance_moyenne')
+            confidence_txt = f", confiance moyenne {confidence}" if confidence is not None else ""
+            lines.append(
+                f"   😊 Sentiment: {sentiment['tendance']} (méthode: {method}{confidence_txt})"
+            )
+
+        risk = analysis.get('évaluation_risque', {})
+        risk_score = risk.get('score_risque', 0)
+        lines.append(f"   ⚠️ Risque: {risk.get('niveau_risque', 'N/A')} (score: {risk_score}/100)")
+        risk_factors = risk.get('facteurs_risque', [])
+        if risk_factors:
+            lines.append(f"   🔎 Facteurs: {self.truncate_text('; '.join(risk_factors), 180)}")
+        lines.append(f"   💡 Action: {risk.get('recommandation', 'Suivi standard recommandé')}")
+
+        entities = analysis.get('entités_extraites', {})
+        techs = entities.get('technologies', [])
+        montants = entities.get('montants', [])
+        if techs:
+            lines.append(f"   💻 Technologies mentionnées: {', '.join(techs[:5])}")
+        clean_montants = [m for m in montants if str(m).strip() and str(m).strip() != "000"]
+        if clean_montants:
+            lines.append(f"   💰 Montants détectés: {', '.join(clean_montants[:3])}")
+
+        auto_summary = analysis.get('résumé_automatique', {})
+        if isinstance(auto_summary, dict) and auto_summary.get('résumé_automatique'):
+            method = auto_summary.get('méthode', 'N/A')
+            summary_text = self.truncate_text(auto_summary['résumé_automatique'], 260)
+            lines.append(f"   📝 Synthèse ({method}): {summary_text}")
+
+        critical = analysis.get('emails_critiques', [])
+        if critical:
+            lines.append(f"   🚨 Emails critiques: {len(critical)} détectés")
+            for critical_email in critical[:2]:
+                subject = self.truncate_text(critical_email.get('subject', ''), 70)
+                reasons = self.format_flags(critical_email.get('flags', []))
+                score = critical_email.get('criticality_score', 0)
+                lines.append(f"      - {subject} (score: {score}, causes: {reasons})")
+        return lines
 
     def connect(self) -> bool:
         """Connexion au serveur IMAP"""
@@ -517,15 +708,20 @@ class EmailProjectAnalyzer:
                     if part.get_content_type() == "text/plain":
                         body = part.get_payload(decode=True)
                         if body:
-                            content['body'] = body.decode('utf-8', errors='ignore')
+                            content['body'] = self.decode_best_effort(
+                                body, part.get_content_charset()
+                            )
                             break
             else:
                 body = msg.get_payload(decode=True)
                 if body:
-                    content['body'] = body.decode('utf-8', errors='ignore')
+                    content['body'] = self.decode_best_effort(
+                        body, msg.get_content_charset()
+                    )
         except:
             pass
 
+        content['normalized_text'] = self.normalize_email_text(content)
         return content
 
     def search_project_emails(self, project_filters: List[str], days_back: int = 30) -> Dict:
@@ -556,23 +752,57 @@ class EmailProjectAnalyzer:
                 try:
                     if i % 20 == 0:
                         logging.info(f"Traitement: {i+1}/{len(email_ids)} emails")
-                    
-                    status, msg_data = self.mail.fetch(email_id, '(RFC822)')
-                    if status != 'OK':
+
+                    cache_key = email_id.decode(errors='ignore') if isinstance(email_id, bytes) else str(email_id)
+                    cache_entry = self.email_cache.get(cache_key)
+                    if cache_entry:
+                        email_content = cache_entry.get('content', {})
+                        matching_projects = cache_entry.get('projects', [])
+                    else:
+                        header_start = perf_counter()
+                        status, header_data = self.mail.fetch(
+                            email_id,
+                            '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO DATE)])'
+                        )
+                        self.record_timing("imap_fetch_headers", perf_counter() - header_start)
+                        if status != 'OK' or not header_data or not header_data[0]:
+                            continue
+
+                        header_msg = email.message_from_bytes(header_data[0][1])
+                        header_subject = self.decode_header_value(header_msg.get('Subject'))
+                        if not self.should_fetch_full_message(header_subject, project_filters):
+                            self.email_cache[cache_key] = {'projects': [], 'content': {}}
+                            continue
+
+                        fetch_start = perf_counter()
+                        status, msg_data = self.mail.fetch(email_id, '(RFC822)')
+                        self.record_timing("imap_fetch_full_message", perf_counter() - fetch_start)
+                        if status != 'OK':
+                            continue
+
+                        parse_start = perf_counter()
+                        msg = email.message_from_bytes(msg_data[0][1])
+                        email_content = self.extract_email_content(msg)
+                        self.record_timing("email_extract_content", perf_counter() - parse_start)
+
+                        matching_projects = self.check_project_relevance(email_content, project_filters)
+                        self.email_cache[cache_key] = {
+                            'projects': matching_projects,
+                            'content': email_content
+                        }
+
+                    if not matching_projects or not email_content:
                         continue
 
-                    msg = email.message_from_bytes(msg_data[0][1])
-                    email_content = self.extract_email_content(msg)
-
-                    matching_projects = self.check_project_relevance(email_content, project_filters)
                     for project in matching_projects:
                         project_data[project]['emails'].append(email_content)
-                        project_data[project]['dates'].append(email_content['date'])
+                        project_data[project]['dates'].append(email_content.get('date'))
                         self.extract_participants(email_content, project_data[project]['participants'])
 
                 except Exception as e:
                     continue
 
+            self.save_cache()
             return dict(project_data)
 
         except Exception as e:
@@ -582,7 +812,9 @@ class EmailProjectAnalyzer:
     def check_project_relevance(self, email_content: Dict, project_filters: List[str]) -> List[str]:
         """Vérifie si un email concerne un projet spécifique"""
         matching_projects = []
-        search_text = f"{email_content['subject']} {email_content['body']}".lower()
+        search_text = email_content.get('normalized_text')
+        if not search_text:
+            search_text = f"{email_content.get('subject', '')} {email_content.get('body', '')}".lower()
         for project_filter in project_filters:
             if project_filter.lower() in search_text:
                 matching_projects.append(project_filter)
@@ -602,23 +834,40 @@ class EmailProjectAnalyzer:
         
         for project_name, data in project_data.items():
             logging.info(f"Analyse IA pour le projet: {project_name}")
+            emails_all = data['emails']
+            deep_emails = emails_all[-self.max_deep_emails:]
             
             # Analyses IA
-            sentiment_analysis = self.ai_analyzer.analyze_sentiment(data['emails'])
-            entities = self.ai_analyzer.extract_entities(data['emails'])
-            auto_summary = self.ai_analyzer.generate_auto_summary(data['emails'])
-            risk_assessment = self.ai_analyzer.calculate_risk_score(data['emails'], sentiment_analysis, entities)
-            critical_emails = self.ai_analyzer.identify_critical_emails(data['emails'])
+            sentiment_start = perf_counter()
+            sentiment_analysis = self.ai_analyzer.analyze_sentiment(deep_emails)
+            self.record_timing("ia_sentiment", perf_counter() - sentiment_start)
+
+            entities_start = perf_counter()
+            entities = self.ai_analyzer.extract_entities(deep_emails)
+            self.record_timing("ia_entities", perf_counter() - entities_start)
+
+            summary_start = perf_counter()
+            auto_summary = self.ai_analyzer.generate_auto_summary(deep_emails)
+            self.record_timing("ia_summary", perf_counter() - summary_start)
+
+            risk_start = perf_counter()
+            risk_assessment = self.ai_analyzer.calculate_risk_score(emails_all, sentiment_analysis, entities)
+            self.record_timing("ia_risk", perf_counter() - risk_start)
+
+            critical_start = perf_counter()
+            critical_emails = self.ai_analyzer.identify_critical_emails(emails_all)
+            self.record_timing("ia_critical", perf_counter() - critical_start)
             
             # Données traditionnelles
             participants_list = list(data['participants'])
-            email_count = len(data['emails'])
+            email_count = len(emails_all)
             
             intelligent_summary[project_name] = {
                 # Métriques de base
                 'nb_emails': email_count,
                 'nb_participants': len(participants_list),
                 'participants': participants_list[:10],
+                'emails_analyzes_en_profondeur': len(deep_emails),
                 
                 # Analyses IA
                 'analyse_sentiment': sentiment_analysis,
@@ -645,13 +894,31 @@ def main():
     parser.add_argument('--no-ssl', action='store_true', help='Désactiver SSL')
     parser.add_argument('--output', help='Fichier de sortie JSON')
     parser.add_argument('--verbose', '-v', action='store_true', help='Mode verbeux')
+    parser.add_argument(
+        '--max-deep-emails',
+        type=int,
+        default=20,
+        help="Nombre max d'emails analysés en profondeur par projet"
+    )
+    parser.add_argument(
+        '--cache-file',
+        default='email_analysis_cache.json',
+        help='Fichier de cache local pour éviter les retraitements'
+    )
 
     args = parser.parse_args()
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    analyzer = EmailProjectAnalyzer(args.email, args.password, args.server, args.port)
+    analyzer = EmailProjectAnalyzer(
+        args.email,
+        args.password,
+        args.server,
+        args.port,
+        max_deep_emails=args.max_deep_emails,
+        cache_file=args.cache_file
+    )
 
     try:
         print("🤖 Démarrage de l'analyse intelligente des emails...")
@@ -660,14 +927,18 @@ def main():
             print("❌ Échec de la connexion")
             return
 
+        search_start = perf_counter()
         project_data = analyzer.search_project_emails(args.projects, args.days)
+        analyzer.record_timing("phase_recherche_imap", perf_counter() - search_start)
         
         if not project_data:
             print("❌ Aucun email trouvé")
             return
 
         print("🧠 Analyse IA en cours...")
+        ai_start = perf_counter()
         intelligent_summary = analyzer.generate_intelligent_summary(project_data)
+        analyzer.record_timing("phase_analyse_ia", perf_counter() - ai_start)
 
         # Affichage des résultats
         print("\n" + "="*80)
@@ -675,47 +946,22 @@ def main():
         print("="*80)
 
         for project_name, analysis in intelligent_summary.items():
-            print(f"\n🚀 PROJET: {project_name}")
-            print(f"   📊 Priorité: {analysis['priorité_attention']}")
-            print(f"   📧 Emails: {analysis['nb_emails']}")
-            print(f"   👥 Participants: {analysis['nb_participants']}")
-            
-            # Analyse de sentiment
-            sentiment = analysis['analyse_sentiment']
-            if 'tendance' in sentiment:
-                method = sentiment.get('méthode', 'N/A')
-                print(f"   😊 Sentiment: {sentiment['tendance']} (Méthode: {method})")
-            
-            # Évaluation des risques
-            risk = analysis['évaluation_risque']
-            print(f"   ⚠️ Risque: {risk.get('niveau_risque', 'N/A')} (Score: {risk.get('score_risque', 0)})")
-            print(f"   💡 {risk.get('recommandation', 'Aucune recommandation')}")
-            
-            # Entités importantes
-            entities = analysis['entités_extraites']
-            if entities.get('technologies'):
-                print(f"   💻 Technologies: {', '.join(entities['technologies'][:5])}")
-            if entities.get('montants'):
-                print(f"   💰 Montants: {', '.join(entities['montants'][:3])}")
-            
-            # Résumé automatique
-            auto_summary = analysis['résumé_automatique']
-            if isinstance(auto_summary, dict) and 'résumé_automatique' in auto_summary:
-                method = auto_summary.get('méthode', 'N/A')
-                print(f"   📝 Résumé ({method}): {auto_summary['résumé_automatique'][:200]}...")
-            
-            # Emails critiques
-            critical = analysis['emails_critiques']
-            if critical:
-                print(f"   🚨 Emails critiques: {len(critical)} détectés")
-                for critical_email in critical[:2]:
-                    print(f"      - {critical_email['subject'][:50]}... (Score: {critical_email['criticality_score']})")
+            for line in analyzer.format_project_report(project_name, analysis):
+                print(line)
         
         # Sauvegarde
         if args.output:
             with open(args.output, 'w', encoding='utf-8') as f:
                 json.dump(intelligent_summary, f, indent=2, ensure_ascii=False, default=str)
             print(f"\n💾 Rapport sauvegardé: {args.output}")
+
+        print("\n⏱️ BILAN PERFORMANCE")
+        print("-" * 80)
+        for step in analyzer.get_top_timing_steps(3):
+            print(
+                f"   • {step['étape']}: {step['total_s']}s "
+                f"(runs: {step['runs']}, moyenne: {step['moyenne_s']}s)"
+            )
 
         print(f"\n✅ Analyse intelligente terminée!")
 
