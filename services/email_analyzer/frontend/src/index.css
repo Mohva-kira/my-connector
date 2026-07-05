@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-stone-50 text-slate-800 min-h-screen;
+}
+
+/* Panneau résultats : entrée animée (mobile = du bas, desktop = depuis la droite) */
+@keyframes result-in-mobile {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes result-in-desktop {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-result-panel {
+  animation: result-in-mobile 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@media (min-width: 1024px) {
+  .animate-result-panel {
+    animation-name: result-in-desktop;
+    animation-duration: 0.48s;
+  }
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+.animate-skeleton-panel {
+  animation: skeleton-pulse 1.1s ease-in-out infinite;
+}
