@@ -1,211 +1,631 @@
-# Architecture Context
-# Architecture Overview
+# my-connector
 
-This document defines the technical architecture of the AI Email Assistant that transforms Gmail and Outlook emails into actionable intelligence and daily briefings.
+# Technical Architecture
 
----
+## Architecture Context & Overview
 
-## 1. Stack
+This document defines the technical architecture of **my-connector**, an AI-powered email intelligence platform that transforms Gmail and Outlook email streams into structured project workspaces, actionable insights, and intelligent daily briefings.
 
-| Layer | Technology | Role |
-|------|------------|------|
-| Frontend | React (Web App) | User dashboard, briefing view, notifications, settings |
-| Backend API | Node.js (NestJS or Express) | Core API, orchestration of email processing and user actions |
-| Background Jobs | BullMQ + Redis | Batch processing (2x/day), email sync, AI processing queues |
-| Database | PostgreSQL | Primary storage for users, emails, insights, actions |
-| Cache / Queue | Redis | Job queues, rate limiting, temporary processing state |
-| Email Integration | Gmail API + Microsoft Graph API | Email ingestion and sync |
-| AI Layer | OpenAI GPT-4.1 / GPT-4o-mini | Email classification, extraction of actions, urgency detection |
-| Search | PostgreSQL Full-Text Search | Email and metadata search (MVP) |
-| Authentication | OAuth2 (Google + Microsoft) + JWT | Secure login and session management |
-| Deployment | Docker + Cloud VPS (or AWS/GCP) | Containerized deployment and scaling |
+The architecture is designed around five core principles:
+
+- Scalability
+- Responsiveness
+- Asynchronous processing
+- AI-driven contextualization
+- Strict user-centric email filtering
+
+Long-running AI operations are completely decoupled from the user interface to guarantee a fluid experience even during intensive processing.
 
 ---
 
-## 2. System Boundaries (Codebase Responsibility)
+# Technology Stack
 
-### `/frontend`
+| Layer               | Technology                      | Responsibility                                                                   |
+| ------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
+| **Frontend**        | React                           | Temporal Briefing dashboard, Project Hub, Fast-Track refresh, Discovery Alerts   |
+| **Backend API**     | FastAPI (Python)                | REST API, authentication, project orchestration, routing, OAuth token management |
+| **Background Jobs** | Redis + arq                     | Historical clustering, scheduled synchronizations, asynchronous AI execution     |
+| **Database**        | PostgreSQL                      | Users, projects, emails, summaries, AI insights                                  |
+| **Cache & Queue**   | Redis                           | Queue management, job states, API rate limiting, session caching                 |
+| **Email Providers** | Gmail API + Microsoft Graph API | Secure email ingestion                                                           |
+| **AI Engine**       | OpenAI GPT-4o / GPT-4o-mini     | Semantic clustering, summarization, sentiment analysis, suggestion generation    |
+| **Search Engine**   | PostgreSQL Full Text Search     | Project-scoped search (MVP)                                                      |
+| **Authentication**  | OAuth2 + JWT                    | Secure authentication and authorization                                          |
+
+---
+
+# High-Level Architecture
+
+```
+                Gmail API
+                    │
+                    │
+            Microsoft Graph API
+                    │
+                    ▼
+        ┌──────────────────────────┐
+        │ Normalized Email Layer   │
+        └──────────────────────────┘
+                    │
+                    ▼
+          Recipient Matrix Filter
+        (Only To / CC are accepted)
+                    │
+                    ▼
+          FastAPI API Gateway
+                    │
+         ┌──────────┴──────────┐
+         │                     │
+         ▼                     ▼
+ PostgreSQL               Redis + arq
+         │                     │
+         │                     ▼
+         │              AI Worker Pool
+         │                     │
+         └──────────────┬──────┘
+                        ▼
+                OpenAI GPT-4o
+                        │
+                        ▼
+              Project Summaries
+                        │
+                        ▼
+               React Frontend
+```
+
+---
+
+# Codebase Responsibilities
+
+## `/frontend`
+
+The frontend provides the entire user experience.
+
+### Temporal Briefing
+
+The main dashboard presents:
+
+- Morning priorities
+- Evening recap
+- Upcoming deadlines
+- Outstanding actions
+
+Tasks from every project are aggregated and sorted by urgency.
+
+---
+
+### Project Hub
+
+Displays validated projects as a responsive grid.
+
+Each project card includes:
+
+- Project summary
+- Health indicator
+- AI sentiment
+- Outstanding actions
+- Last update timestamp
+
+---
+
+### Fast-Track Refresh
+
+Users can refresh a single project without waiting for the next scheduled synchronization.
+
+The frontend issues a scoped refresh request and monitors execution progress.
+
+---
+
+### Discovery Alerts
+
+Non-intrusive toast notifications appear whenever AI discovers a potential new project.
+
+---
+
+# `/backend`
+
+The backend orchestrates every business process.
+
+## API Gateway
+
 Responsible for:
-- User authentication UI
-- Dashboard (daily briefing)
-- Notification display
-- Settings (email accounts, preferences)
-- Action management (view tasks, archive suggestions)
+
+- JWT validation
+- OAuth token verification
+- Secure token rotation
+- Request authorization
 
 ---
 
-### `/backend`
-Responsible for:
-- API gateway
-- Authentication validation
-- User management
-- Email sync orchestration
-- Business logic (scoring, categorization)
-- Action execution (archive, tag, task creation)
+## Project Controller
+
+Handles project lifecycle operations:
+
+- Validate discovered projects
+- Rename projects
+- Merge duplicate projects
+- Archive projects
 
 ---
 
-### `/workers`
-Responsible for:
-- Batch email processing (2x/day)
-- Email ingestion pipelines
-- AI classification calls
-- Notification generation
-- Task extraction and updates
+## Fast-Track Controller
+
+```
+POST /api/projects/{id}/refresh
+```
+
+Instead of executing heavy processing immediately, the endpoint:
+
+- creates a background job
+- returns HTTP **202 Accepted**
+- provides a unique `job_id`
 
 ---
 
-### `/integrations`
-Responsible for:
-- Gmail API integration
-- Microsoft Graph integration
-- OAuth token refresh and management
-- Email normalization layer
+# `/workers`
+
+Workers execute long-running asynchronous operations.
+
+## Historical Clustering Worker
+
+Executed only during onboarding.
+
+Responsibilities:
+
+- Analyze historical emails
+- Detect conversation clusters
+- Build initial projects
+- Generate first summaries
 
 ---
 
-### `/ai-engine`
-Responsible for:
-- Prompt orchestration
-- Email classification (importance, urgency, action)
-- Structured extraction (JSON outputs)
-- Confidence scoring
+## Batch Synchronization Worker
+
+Runs twice daily.
+
+Responsibilities:
+
+- Retrieve incremental emails
+- Update project states
+- Refresh summaries
+- Generate new suggested actions
 
 ---
 
-### `/shared`
-Responsible for:
-- Types (Email, User, Insight, Action)
-- Utility functions
-- Scoring rules engine
+## Scoped Project Worker
+
+Dedicated high-priority worker for Fast-Track refreshes.
+
+Only processes one project at a time.
 
 ---
 
-## 3. Storage Model
+# `/integrations`
 
-### PostgreSQL (Primary Database)
+## Normalized Email Layer
 
-Stores structured and relational data:
+Provides a unified abstraction over:
 
-#### Users
-- id
-- email
-- oauth_provider_tokens
-- settings
+- Gmail API
+- Microsoft Graph API
 
-#### Emails (raw)
-- id
-- user_id
-- provider (gmail/outlook)
-- external_email_id
-- from
-- to
-- subject
-- body
-- received_at
-- encrypted_body
-
-#### Email Insights
-- id
-- email_id
-- importance_score (0–100)
-- type (info | action | urgent)
-- category (client | personal | admin | spam)
-- deadline (nullable)
-- ai_confidence
-
-#### Actions
-- id
-- email_id
-- type (archive | tag | task)
-- status (pending | completed)
-- created_at
+Regardless of the provider, emails are converted into a common internal schema.
 
 ---
 
-### Redis (Cache + Queue)
+## Recipient Matrix Filter
 
-Used for:
-- Job queues (email sync, AI processing)
-- Temporary processing states
-- Rate limiting (API calls to Gmail/OpenAI)
-- Session caching (optional)
+Before an email enters the platform it is validated.
 
----
+Accepted:
 
-### File Storage (Optional / Future)
+- To
+- CC
 
-Not used in MVP, but reserved for:
-- Attachments (if enabled later)
-- Large email bodies archival snapshots
+Ignored automatically:
 
----
-
-## 4. Authentication & Access Model
-
-### Authentication Flow
-
-1. User signs up via email/password or OAuth (Google/Microsoft optional)
-2. User connects Gmail/Outlook via OAuth2
-3. Backend stores encrypted OAuth tokens
-4. JWT issued for session authentication
+- BCC
+- Mailing lists
+- Marketing emails
+- Newsletters
+- Broadcast communications
 
 ---
 
-### Access Control Rules
+# `/ai-engine`
 
-- All data is **user-scoped**
-- Emails belong strictly to one user (`user_id`)
-- No cross-user data access is allowed
-- AI processing is executed per-user context only
+The AI Engine transforms email conversations into structured business knowledge.
 
----
+## Historical Clustering
 
-### Token Handling
+Groups conversations using:
 
-- OAuth tokens stored encrypted in DB
-- Refresh tokens used for long-term sync
-- Access tokens are never exposed to frontend
+- Semantic similarity
+- Subject analysis
+- Recipient patterns
+- Thread history
 
 ---
 
-## 5. AI & Background Task Model
+## Summary Generator
 
-### Batch Processing (2x/day)
+Produces structured summaries including:
 
-Triggered via cron + worker system:
+- Executive overview
+- Current status
+- Project sentiment
+- Pending actions
+- Suggested follow-ups
 
-1. Fetch new emails (Gmail + Outlook)
-2. Normalize email format
-3. Apply rules engine scoring
-4. Call AI model for classification
-5. Store insights in database
-6. Generate daily briefing
-
----
-
-### Urgent Processing (Near real-time batch trigger)
-
-- Triggered after sync job
-- Filters emails with high risk indicators
-- If score ≥ threshold → notification generated immediately
+The engine returns structured JSON instead of plain text whenever possible.
 
 ---
 
-### AI Processing Pipeline
+# PostgreSQL Data Model
 
-Input:
-- email subject
-- email body
-- metadata (sender, recipient, thread)
+```
+Users
+   │
+   ├───────────────┐
+   ▼               ▼
+Projects         Emails
+   │               │
+   ▼               ▼
+ProjectSummaries EmailInsights
+   │
+   ▼
+SuggestedActions
+```
 
-Output:
+---
+
+# Database Schema
+
+## users
+
+| Column       | Type            |
+| ------------ | --------------- |
+| id           | UUID            |
+| email        | VARCHAR         |
+| oauth_tokens | Encrypted JSONB |
+| created_at   | TIMESTAMP       |
+
+---
+
+## projects
+
+| Column       | Type              |
+| ------------ | ----------------- |
+| id           | UUID              |
+| user_id      | FK                |
+| name         | VARCHAR           |
+| status       | active / archived |
+| rules_matrix | JSONB             |
+
+The `rules_matrix` stores:
+
+- keywords
+- sender addresses
+- domains
+- matching heuristics
+
+---
+
+## emails
+
+| Column           | Type           |
+| ---------------- | -------------- |
+| id               | UUID           |
+| project_id       | FK (nullable)  |
+| user_id          | FK             |
+| recipient_status | direct_to / cc |
+| subject          | TEXT           |
+| body_encrypted   | TEXT           |
+| received_at      | TIMESTAMP      |
+
+---
+
+## project_summaries
+
+| Column                         | Type                                         |
+| ------------------------------ | -------------------------------------------- |
+| id                             | UUID                                         |
+| project_id                     | FK                                           |
+| updated_at                     | TIMESTAMP                                    |
+| content                        | TEXT                                         |
+| sentiment                      | on_track / under_tension / awaiting_feedback |
+| last_processed_email_timestamp | TIMESTAMPTZ                                  |
+
+This timestamp enables efficient incremental synchronization.
+
+---
+
+## suggested_actions
+
+| Column      | Type                            |
+| ----------- | ------------------------------- |
+| id          | UUID                            |
+| project_id  | FK                              |
+| description | TEXT                            |
+| deadline    | TIMESTAMP (nullable)            |
+| status      | pending / completed / dismissed |
+
+---
+
+# AI Processing Pipeline
+
+## Process 1 — Historical Project Discovery
+
+### Step 1
+
+Retrieve historical email metadata.
+
+Typical synchronization window:
+
+- 30 days
+- 60 days
+- 90 days
+
+---
+
+### Step 2
+
+Discard every email where the authenticated user is neither:
+
+- To
+- CC
+
+---
+
+### Step 3
+
+Extract:
+
+- Subjects
+- Thread IDs
+- Senders
+- Recipients
+
+---
+
+### Step 4
+
+Send normalized data to the AI Engine.
+
+---
+
+### Step 5
+
+AI returns structured project proposals.
+
+Example:
+
 ```json
 {
-  "type": "info | action | urgent",
-  "importance_score": 0-100,
-  "action_required": true/false,
-  "deadline": "date|null",
-  "category": "client | personal | admin",
-  "confidence": 0-1
+  "proposed_projects": [
+    {
+      "name": "BUMDA Core Module",
+      "thread_ids": ["t1", "t2"]
+    },
+    {
+      "name": "RecoPro SaaS Setup",
+      "thread_ids": ["t3"]
+    }
+  ]
 }
+```
+
+---
+
+### Step 6
+
+The user validates, edits, or merges projects before they are persisted into PostgreSQL.
+
+---
+
+# Process 2 — Fast-Track Project Refresh
+
+## Trigger
+
+The user clicks:
+
+**Refresh Summary**
+
+on a project card.
+
+---
+
+## Execution
+
+A dedicated arq queue (Redis-backed) receives the request.
+
+```
+project-fasttrack-queue
+```
+
+The request bypasses all scheduled background jobs.
+
+---
+
+## Workflow
+
+### 1.
+
+Read the project's:
+
+```
+last_processed_email_timestamp
+```
+
+---
+
+### 2.
+
+Retrieve only incremental emails received after that timestamp.
+
+---
+
+### 3.
+
+Append newly received emails into PostgreSQL.
+
+---
+
+### 4.
+
+Send only the email delta to the AI Engine.
+
+---
+
+### 5.
+
+Regenerate:
+
+- Summary
+- Sentiment
+- Suggested actions
+
+---
+
+### 6.
+
+Update the frontend through the polling engine.
+
+---
+
+# Asynchronous Job Architecture
+
+Long-running AI operations never execute inside HTTP request lifecycles.
+
+Instead, every expensive operation becomes a background job.
+
+```
+React Frontend
+       │
+       │ POST /api/projects/{id}/refresh
+       ▼
+┌─────────────────────┐
+│  FastAPI API Gateway│
+└─────────────────────┘
+       │
+       │
+ HTTP 202 Accepted
+ { job_id }
+       │
+       ▼
+┌─────────────────────┐
+│    Redis + arq      │
+└─────────────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│ Background Workers  │
+└─────────────────────┘
+       │
+       ▼
+   OpenAI GPT-4o
+       │
+       ▼
+ PostgreSQL Update
+       │
+       ▼
+ Polling Response
+       │
+       ▼
+ React Component Update
+```
+
+---
+
+# Job Lifecycle
+
+## Step 1 — Immediate Response
+
+Every expensive endpoint immediately returns:
+
+```
+HTTP 202 Accepted
+```
+
+along with
+
+- job_id
+- current status
+- metadata
+
+No HTTP request waits for AI execution.
+
+---
+
+## Step 2 — Queue Processing
+
+arq stores and schedules execution.
+
+Redis maintains:
+
+- pending
+- processing
+- completed
+- failed
+
+states.
+
+---
+
+## Step 3 — Client Polling
+
+The frontend periodically requests:
+
+```
+GET /api/jobs/:id
+```
+
+until the job completes.
+
+Possible states:
+
+```
+pending
+```
+
+↓
+
+```
+processing
+```
+
+↓
+
+```
+completed
+```
+
+or
+
+```
+failed
+```
+
+---
+
+## Step 4 — Local UI Refresh
+
+Only the affected project card is updated.
+
+The rest of the interface remains untouched, providing a fast and responsive user experience.
+
+---
+
+# Worker Isolation
+
+Dedicated worker pools maintain separate database connections from the public REST API.
+
+Benefits include:
+
+- No API blocking during AI processing
+- Stable CRUD performance
+- Better database resource management
+- Protection against reverse proxy timeouts (504 Gateway Timeout)
+- Horizontal scalability of AI workloads
+
+This architecture ensures that expensive operations such as historical clustering, semantic analysis, and project summarization never impact the responsiveness of the user-facing application.
