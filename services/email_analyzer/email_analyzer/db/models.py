@@ -77,6 +77,7 @@ class Tenant(Base):
     memberships: Mapped[list["Membership"]] = relationship(back_populates="tenant")
     subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="tenant")
     oauth_connections: Mapped[list["OAuthConnection"]] = relationship(back_populates="tenant")
+    projects: Mapped[list["Project"]] = relationship(back_populates="tenant")
 
 
 class Membership(Base):
@@ -181,3 +182,132 @@ class OAuthConnection(Base):
     )
 
     tenant: Mapped["Tenant"] = relationship(back_populates="oauth_connections")
+
+
+class ProjectStatus(str, enum.Enum):
+    active = "active"
+    archived = "archived"
+
+
+class RecipientStatus(str, enum.Enum):
+    direct_to = "direct_to"
+    cc = "cc"
+
+
+class ProjectSentiment(str, enum.Enum):
+    on_track = "on_track"
+    under_tension = "under_tension"
+    awaiting_feedback = "awaiting_feedback"
+
+
+class SuggestedActionStatus(str, enum.Enum):
+    pending = "pending"
+    completed = "completed"
+    dismissed = "dismissed"
+
+
+class Project(Base):
+    """Un projet/sujet regroupant des emails, au sens de project-overview.md.
+
+    Base de la persistance nécessaire au Fast-Track (architecture.md, Process 2) :
+    sans un `Project` et un `ProjectSummary.last_processed_email_timestamp`
+    stockés, il n'y a pas de delta possible entre deux rafraîchissements.
+    """
+
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(16), default=ProjectStatus.active.value)
+    # Règles de rattachement d'un email au projet : mots-clés, adresses, domaines.
+    rules_matrix: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="projects")
+    emails: Mapped[list["Email"]] = relationship(back_populates="project")
+    summary: Mapped[Optional["ProjectSummary"]] = relationship(
+        back_populates="project", uselist=False
+    )
+    suggested_actions: Mapped[list["SuggestedAction"]] = relationship(back_populates="project")
+
+
+class Email(Base):
+    """Email normalisé ingéré pour un tenant, éventuellement rattaché à un projet.
+
+    `body_encrypted` est une colonne texte simple à ce stade — le chiffrement
+    au repos (Fernet, comme les identifiants IMAP/OAuth) est une unité de
+    travail séparée, pas encore câblée ici.
+    """
+
+    __tablename__ = "emails"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "external_id", name="uq_email_tenant_external_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True, index=True
+    )
+    # Identifiant du message côté fournisseur (Message-ID IMAP, id Gmail/Graph…) —
+    # sert à la déduplication (code-standards.md §8 : dédup par (tenant_id, email_external_id)).
+    external_id: Mapped[str] = mapped_column(String(512))
+    recipient_status: Mapped[str] = mapped_column(String(16))
+    subject: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    body_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    received_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    project: Mapped[Optional["Project"]] = relationship(back_populates="emails")
+
+
+class ProjectSummary(Base):
+    """Résumé courant d'un projet — une seule ligne par projet, régénérée en
+    place par le Fast-Track ou la synchronisation batch (pas un historique)."""
+
+    __tablename__ = "project_summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), unique=True, index=True
+    )
+    content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sentiment: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Curseur d'incrémentalité du Fast-Track (architecture.md, Process 2) : seuls
+    # les emails reçus après cette date sont récupérés lors d'un rafraîchissement.
+    last_processed_email_timestamp: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="summary")
+
+
+class SuggestedAction(Base):
+    """Action recommandée par l'IA pour un projet (jamais exécutée automatiquement —
+    ai-workflow-rules.md §8)."""
+
+    __tablename__ = "suggested_actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), index=True)
+    description: Mapped[str] = mapped_column(Text)
+    deadline: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=SuggestedActionStatus.pending.value)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    project: Mapped["Project"] = relationship(back_populates="suggested_actions")

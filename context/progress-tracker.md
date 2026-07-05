@@ -252,6 +252,45 @@ Update this file after every meaningful implementation change.
     jobs simultanés, plusieurs process worker arq) — hors périmètre de cette
     unité, à couvrir si le volume de jobs augmente.
 
+- **Unit 10 — Persistance Project/Email/ProjectSummary/SuggestedAction (préalable au Fast-Track)**
+  (2026-07-06) :
+  - Contexte : le vrai Fast-Track (architecture.md, Process 2) suppose un
+    `last_processed_email_timestamp` stocké par projet pour calculer un
+    delta ; ce préalable n'existait pas du tout (aucune table
+    projects/emails/project_summaries/suggested_actions dans
+    `db/models.py`, tout le pipeline `/api/analyze` est un scan IMAP live
+    sans état persisté). Décision utilisateur : construire cette
+    persistance d'abord, avant tout endpoint Fast-Track.
+  - `email_analyzer/db/models.py` : ajout de `Project`, `Email`,
+    `ProjectSummary`, `SuggestedAction` + enums `ProjectStatus`,
+    `RecipientStatus`, `ProjectSentiment`, `SuggestedActionStatus` (même
+    convention que les enums existants : `str, enum.Enum`, stockés en
+    `String`, pas d'enum Postgres natif). Scoping par `tenant_id` (pas
+    `user_id` comme dans le schéma cible d'architecture.md — le modèle de
+    données réel n'a que des tenants, pas d'utilisateurs propriétaires de
+    boîte mail individuels). `Email.external_id` + contrainte unique
+    `(tenant_id, external_id)` pour la dédup exigée par
+    `code-standards.md §8`. `ProjectSummary.project_id` unique (une seule
+    ligne courante par projet, régénérée en place — pas un historique).
+    `Tenant.projects` ajouté en back-ref. `Email.body_encrypted` est une
+    colonne texte simple à ce stade — le chiffrement Fernet réel reste une
+    unité séparée, pas encore câblée.
+  - `alembic/versions/003_projects.py` (nouveau) : migration créant les 4
+    tables + index, avec `downgrade()` symétrique.
+  - Vérifié en conditions réelles (PostgreSQL local installé par
+    l'utilisateur, base `connector`, `DATABASE_URL` renseigné dans `.env`) :
+    `alembic upgrade head` applique proprement sur 002 existant ;
+    `alembic downgrade -1` puis `upgrade head` round-trip sans erreur ;
+    insert/lecture réels via l'ORM (Tenant → Project → Email/ProjectSummary/
+    SuggestedAction, relations et back-refs fonctionnelles) ; la contrainte
+    unique `(tenant_id, external_id)` rejette bien un doublon
+    (`IntegrityError`). Données de test nettoyées après vérification.
+    `python -m py_compile` OK.
+  - Pas encore fait : aucun code applicatif n'écrit ou ne lit encore ces
+    tables (le pipeline `/api/analyze` reste un scan IMAP live, inchangé).
+    C'est le prérequis pour l'unité suivante (endpoint Fast-Track réel +
+    écriture des résultats d'analyse dans `Email`/`ProjectSummary`).
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 1/8 livrée, en attente de
