@@ -27,6 +27,22 @@ ECONOMY_OPENAI_MAX_TOKENS = 512
 # Plafond de sortie pour /api/chat uniquement (Gemini 2.5 peut consommer du budget en raisonnement interne).
 CHAT_MAX_OUTPUT_TOKENS = 4096
 
+# Timeout client LLM (secondes). Volontairement < au timeout de passerelle : mieux
+# vaut échouer vite que tenir la tâche de fond trop longtemps. Surchargeable via env.
+DEFAULT_LLM_TIMEOUT_SECONDS = 60.0
+
+
+def llm_timeout_seconds() -> float:
+    """Timeout du client LLM en secondes (env LLM_TIMEOUT_SECONDS, défaut 60)."""
+    raw = (os.environ.get("LLM_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_LLM_TIMEOUT_SECONDS
+    try:
+        val = float(raw)
+        return val if val > 0 else DEFAULT_LLM_TIMEOUT_SECONDS
+    except ValueError:
+        return DEFAULT_LLM_TIMEOUT_SECONDS
+
 # gemini-2.0-flash n'est plus disponible pour les nouveaux comptes (API renvoie 404).
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -42,3 +58,49 @@ def use_local_ml() -> bool:
     """True = charger transformers + spaCy ; False = API / heuristiques uniquement."""
     v = os.environ.get("EMAIL_ANALYZER_USE_LOCAL_ML", "true").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+# Chargement séquentiel par lots : au-delà de ce nombre d'emails candidats, la
+# récupération IMAP est découpée en lots pour remonter une progression réelle
+# au client au lieu de le faire attendre sans retour. En dessous du seuil,
+# comportement inchangé (aucun lot, aucun callback de progression).
+DEFAULT_BATCH_THRESHOLD = 15
+DEFAULT_BATCH_CHUNK_SIZE = 10
+
+
+def batch_threshold() -> int:
+    """Nb d'emails candidats au-delà duquel le traitement est découpé en lots
+    (env EMAIL_ANALYZER_BATCH_THRESHOLD, défaut 15)."""
+    raw = (os.environ.get("EMAIL_ANALYZER_BATCH_THRESHOLD") or "").strip()
+    if not raw:
+        return DEFAULT_BATCH_THRESHOLD
+    try:
+        val = int(raw)
+        return val if val > 0 else DEFAULT_BATCH_THRESHOLD
+    except ValueError:
+        return DEFAULT_BATCH_THRESHOLD
+
+
+def batch_chunk_size() -> int:
+    """Taille de lot pour le traitement séquentiel (env EMAIL_ANALYZER_BATCH_SIZE,
+    défaut 10)."""
+    raw = (os.environ.get("EMAIL_ANALYZER_BATCH_SIZE") or "").strip()
+    if not raw:
+        return DEFAULT_BATCH_CHUNK_SIZE
+    try:
+        val = int(raw)
+        return val if val > 0 else DEFAULT_BATCH_CHUNK_SIZE
+    except ValueError:
+        return DEFAULT_BATCH_CHUNK_SIZE
+
+
+# Store de jobs (jobs.py) et queue arq : Redis partagé entre le process API
+# (uvicorn) et le(s) process worker (arq), ce qui lève la contrainte historique
+# de un-seul-worker-uvicorn du store en mémoire.
+DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+
+
+def redis_url() -> str:
+    """URL de connexion Redis (env REDIS_URL, défaut redis://localhost:6379/0)."""
+    raw = (os.environ.get("REDIS_URL") or "").strip()
+    return raw or DEFAULT_REDIS_URL

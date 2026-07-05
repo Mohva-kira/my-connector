@@ -198,6 +198,60 @@ Update this file after every meaningful implementation change.
     migration vers Redis/arq est une unité séparée (prochaine étape,
     Phase 1 du plan d'évolution).
 
+- **Unit 9 — Migration du store de jobs : mémoire (ThreadPoolExecutor) → Redis + arq**
+  (2026-07-06) :
+  - Contexte : `context/evolution-plan.md` (Phase 1) identifiait la contrainte
+    « 1 seul worker uvicorn » (état de job non partagé entre processus,
+    `jobs.py` historique) comme le blocker technique le plus critique avant
+    toute mise à l'échelle (Fast-Track, multi-tenant).
+  - `email_analyzer/config.py` : `redis_url()` (env `REDIS_URL`, défaut
+    `redis://localhost:6379/0`).
+  - `email_analyzer/jobs.py` : réécrit intégralement. L'état d'un job
+    (`status/result/error/tenant_id/processed/total/partial`) est stocké dans
+    Redis (clé `myconnector:job:{id}`, JSON, `EX` = 30 min — remplace le TTL
+    géré manuellement en mémoire). Nouvelle fonction `enqueue(job_id,
+    task_name, *args)` qui met le job en file via `arq` au lieu d'exécuter un
+    closure dans un `ThreadPoolExecutor` local ; nouvelle fonction
+    `set_status(job_id, status, result=, error=)` (remplace la logique
+    interne de l'ancien `submit`). `report_progress`/`get_job` gardent leur
+    signature.
+  - `email_analyzer/analysis_tasks.py` (nouveau) : héberge les tâches arq
+    `run_analysis_legacy`/`run_analysis_saas` (déplacées depuis
+    `api/main.py` — un worker arq tourne dans un process séparé, il ne peut
+    pas recevoir de closure Python). Chaque tâche appelle la logique
+    d'analyse existante via `asyncio.to_thread` (le pipeline IMAP/ML/LLM
+    reste synchrone, seule l'orchestration devient asynchrone) puis appelle
+    `jobs.set_status`. `WorkerSettings` (2 jobs concurrents par process,
+    `on_startup` précharge l'analyseur ML partagé — même logique que le
+    lifespan FastAPI côté API).
+  - `api/main.py` : `_run_analysis_legacy`/`_run_analysis_saas` supprimées
+    (déplacées) ; `/api/analyze` appelle désormais `jobs.enqueue(job_id,
+    "run_analysis_legacy"|"run_analysis_saas", ...)` avec des arguments
+    primitifs (plus l'objet `AnalyzeRequest` complet) ; `/api/analyze/{job_id}`
+    inchangé (même forme de réponse).
+  - `requirements.txt` (racine) : `arq>=0.26,<1` ajouté.
+  - `.env.example` (racine) : `REDIS_URL` documenté.
+  - `services/email_analyzer/deploy/nginx-api.conf` : suppression de la
+    consigne « uvicorn --workers 1 » (obsolète, l'état vit dans Redis) ;
+    ajout de la consigne pour lancer le worker arq séparément (`arq
+    email_analyzer.analysis_tasks.WorkerSettings`), **obligatoire** — sans
+    lui les jobs restent `pending` indéfiniment.
+  - Vérifié end-to-end en conditions réelles (Redis local installé par
+    l'utilisateur, `.env` avec identifiants IMAP réels, `assistant_provider:
+    "none"` pour éviter une dépendance à une clé LLM) : (1) `jobs.create_job`
+    + `jobs.enqueue` en Python direct → worker arq exécute réellement le job
+    (process séparé, log arq confirmé) → `jobs.get_job` renvoie `status:
+    "done"` avec un résultat IMAP réel ; (2) `uvicorn` démarré isolément (port
+    de test) + `curl POST /api/analyze` puis polling `GET
+    /api/analyze/{job_id}` → même contrat de réponse qu'avant la migration
+    (`{status, result, error, progress, partial}`), aucune régression côté
+    frontend. `python -m py_compile` OK sur les 4 fichiers modifiés/créés.
+    Processus de test arrêtés après vérification (aucun process de test ne
+    reste en arrière-plan).
+  - Non vérifié : comportement sous charge concurrente réelle (plusieurs
+    jobs simultanés, plusieurs process worker arq) — hors périmètre de cette
+    unité, à couvrir si le volume de jobs augmente.
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 1/8 livrée, en attente de
@@ -220,7 +274,7 @@ Update this file after every meaningful implementation change.
 
 ## Architecture Decisions
 
-- **Stack decision resolved (2026-07-06)**: `architecture.md` updated to reference FastAPI (Python) + Redis/`arq` instead of NestJS (Node.js) + BullMQ, aligning the documented architecture with the actual implementation. `arq` chosen over Celery/RQ for the future job-queue migration because it is asyncio-native and matches the existing async FastAPI codebase. See `context/evolution-plan.md` Phase 1 for the full rationale and the remaining implementation work (the in-memory `ThreadPoolExecutor` job store in `jobs.py` has NOT been migrated yet — this was a documentation-only unit).
+- **Stack decision resolved (2026-07-06)**: `architecture.md` updated to reference FastAPI (Python) + Redis/`arq` instead of NestJS (Node.js) + BullMQ, aligning the documented architecture with the actual implementation. `arq` chosen over Celery/RQ for the job-queue migration because it is asyncio-native and matches the existing async FastAPI codebase. See `context/evolution-plan.md` Phase 1. The in-memory `ThreadPoolExecutor` job store in `jobs.py` was migrated to Redis + `arq` the same day — see Unit 9 below.
 - Database is PostgreSQL with SQLAlchemy ORM (aligns with architecture)
 - AI layer uses OpenAI (gpt-4o-mini) + Gemini — architecture specifies GPT-4.1/GPT-4o-mini (aligns)
 - Frontend is React + Vite (aligns with architecture)

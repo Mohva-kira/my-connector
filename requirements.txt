@@ -4,7 +4,9 @@ google-generativeai>=0.8.0,<1
 python-dotenv>=1.0.0,<2
 transformers>=4.40.0,<5
 torch>=2.2.0,<3
-spacy>=3.7.0,<4
+spacy>=3.8.0,<4
+fr-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_sm-3.8.0/fr_core_news_sm-3.8.0-py3-none-any.whl
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 fastapi>=0.115.0,<1
 uvicorn[standard]>=0.32.0,<1
 sqlalchemy>=2.0,<3
@@ -20,3 +22,6 @@ email-validator>=2,<3
 google-auth-oauthlib>=1.2,<2
 google-auth-httplib2>=0.2,<1
 google-api-python-client>=2.100,<3
+
+# Job queue (remplace le store de jobs en mémoire — voir email_analyzer/jobs.py)
+arq>=0.26,<1
