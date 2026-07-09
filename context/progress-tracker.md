@@ -660,6 +660,41 @@ Update this file after every meaningful implementation change.
     secret, aucun fichier `context/*.md`) ; fichiers ignorés confirmés via
     `git check-ignore -v`.
 
+- **Unit 14 — Correctif définitif du bug bcrypt/passlib (Python 3.13)** (2026-07-09) :
+  - Contexte : `POST /api/auth/register`/`/login` cassés depuis Unit 11
+    (`ValueError: password cannot be longer than 72 bytes` sur des mots de
+    passe valides), non corrigé faute de confirmation sur la cause racine.
+  - Cause racine confirmée cette session : `passlib==1.7.4` (dernière
+    version, non maintenue depuis 2020) est incompatible avec **Python
+    3.13**, qui a supprimé le module stdlib `crypt` (PEP 594) sur lequel la
+    détection de backend de `passlib` s'appuie partiellement — le pin
+    `bcrypt>=4,<4.1` déjà en place (contournement d'un problème différent,
+    `bcrypt.__about__`) n'y change rien, confirmé en reproduisant le bug
+    dans cet environnement (`bcrypt==4.0.1` + `passlib==1.7.4` +
+    Python 3.13.5).
+  - **Décision (moindre risque)** : abandon complet de `passlib` au profit
+    d'appels `bcrypt` directs. Format de hash bcrypt (`$2b$...`) strictement
+    identique entre les deux — **aucune migration de données, aucun hash
+    existant invalidé**.
+  - `email_analyzer/auth_jwt.py` : `hash_password`/`verify_password`
+    réécrits avec `bcrypt.hashpw`/`bcrypt.checkpw` directement ; troncature
+    explicite à 72 octets UTF-8 (`_truncate_for_bcrypt`, documente un
+    comportement que bcrypt appliquait déjà silencieusement).
+  - `requirements.txt` (racine) : `passlib[bcrypt]` retiré ; pin `bcrypt`
+    élargi à `>=4,<5` (la contrainte `<4.1` ne protégeait plus qu'un usage
+    passlib désormais supprimé).
+  - Vérifié en conditions réelles, environnement jetable démonté après coup
+    (cluster Postgres local dédié, `initdb`/`pg_ctl`, port et socket
+    dédiés ; Redis local existant, DB 3 ; `alembic upgrade head` 001→003
+    propre) : `uvicorn` réel démarré, flux HTTP complet
+    `POST /api/auth/register` (mot de passe réaliste avec accents) → `200`
+    avec JWT valide ; `POST /api/auth/login` même identifiants → `200` ;
+    mauvais mot de passe → `401`. Test unitaire direct du round-trip
+    hash/verify, y compris la frontière de troncature à 72 octets (un mot
+    de passe de 100 `x` et sa variante tronquée à 71+`y` sont bien
+    distingués). `python -m py_compile` OK. Processus/cluster de test
+    arrêtés et supprimés après vérification.
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché

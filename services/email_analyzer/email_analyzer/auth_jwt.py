@@ -7,21 +7,27 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
+# bcrypt ignore silencieusement tout octet au-delà du 72e ; tronquer
+# explicitement documente ce comportement au lieu de le laisser implicite.
+_BCRYPT_MAX_BYTES = 72
+
+
+def _truncate_for_bcrypt(plain: str) -> bytes:
+    return plain.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(_truncate_for_bcrypt(plain), hashed.encode("utf-8"))
 
 
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    return bcrypt.hashpw(_truncate_for_bcrypt(plain), bcrypt.gensalt()).decode("utf-8")
 
 
 def _secret() -> str:
