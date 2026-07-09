@@ -267,6 +267,15 @@ class Email(Base):
     # Score hybride 0-100 (règles + AI, voir ai_intelligent.score_email_importance) ;
     # NULL pour les emails persistés avant cette colonne (non rétro-calculé).
     importance_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Tags métier + priorité dérivés par règles (voir email_analyzer.classification.
+    # derive_tags) ; NULL pour les emails persistés avant cette colonne.
+    tags: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    # Score de confiance 0-100 de la classification multi-critères vers ce
+    # projet (email_analyzer.classification.score_project_relevance) ; reflète
+    # uniquement les signaux déterministes issus de rules_matrix, pas le
+    # renforcement "participants connus" propre au balayage IMAP (voir
+    # migration 005). NULL pour les emails persistés avant cette colonne.
+    classification_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     project: Mapped[Optional["Project"]] = relationship(back_populates="emails")

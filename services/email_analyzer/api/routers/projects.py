@@ -30,6 +30,11 @@ class CreateProjectBody(BaseModel):
     rules_matrix: Optional[dict] = None
 
 
+class UpdateProjectBody(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    rules_matrix: Optional[dict] = None
+
+
 class SuggestedActionOut(BaseModel):
     id: uuid.UUID
     description: str
@@ -46,6 +51,11 @@ class EmailOut(BaseModel):
     # 0-100, voir ai_intelligent.score_email_importance ; NULL pour les emails
     # persistés avant l'ajout de cette colonne (migration 004).
     importance_score: Optional[int]
+    # Tags métier + priorité (email_analyzer.classification.derive_tags) et
+    # score de confiance de classification (migration 005) ; NULL/vides pour
+    # les emails persistés avant cette colonne.
+    tags: Optional[List[str]]
+    classification_score: Optional[int]
 
 
 class ProjectOut(BaseModel):
@@ -60,6 +70,11 @@ class ProjectOut(BaseModel):
     # "Outstanding actions" sur la carte projet (architecture.md, Project Hub) :
     # nombre d'actions suggérées encore `pending` (ni complétées ni écartées).
     pending_actions_count: int
+    # Règles de classification multi-critères (email_analyzer.classification) :
+    # keywords/sender_domains/sender_emails/client_names/company_names/
+    # reference_numbers. Exposé en lecture pour préremplir l'éditeur frontend
+    # (auparavant write-only via POST).
+    rules_matrix: Optional[dict]
 
 
 class ProjectDetailOut(ProjectOut):
@@ -98,6 +113,7 @@ def _project_out(
             summary.last_processed_email_timestamp if summary else None
         ),
         pending_actions_count=_pending_actions_count(db, project.id),
+        rules_matrix=project.rules_matrix,
     )
 
 
@@ -181,7 +197,34 @@ def get_project(
                 received_at=e.received_at,
                 recipient_status=e.recipient_status,
                 importance_score=e.importance_score,
+                tags=e.tags,
+                classification_score=e.classification_score,
             )
             for e in top_emails
         ],
     )
+
+
+@router.patch("/{project_id}", response_model=ProjectOut)
+def update_project(
+    project_id: uuid.UUID,
+    body: UpdateProjectBody,
+    db: Session = Depends(get_db),
+    authorization: Optional[str] = Header(None),
+) -> ProjectOut:
+    _require_saas()
+    _, tenant, _ = authenticate_bearer(db, authorization)
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.tenant_id == tenant.id)
+        .first()
+    )
+    if project is None:
+        raise HTTPException(status_code=404, detail="Projet introuvable")
+    if body.name is not None:
+        project.name = body.name.strip()
+    if body.rules_matrix is not None:
+        project.rules_matrix = body.rules_matrix
+    db.commit()
+    db.refresh(project)
+    return _project_out(db, project, project.summary)

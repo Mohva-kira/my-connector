@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
+from .classification import ProjectRules
 from .config import (
     ASSISTANT_PROVIDER_OPENAI,
     DEFAULT_GEMINI_MODEL,
@@ -252,6 +253,7 @@ class EmailProcessor:
         assistant_provider: str = ASSISTANT_PROVIDER_OPENAI,
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = DEFAULT_GEMINI_MODEL,
+        rules_matrix: Optional[dict] = None,
     ) -> Dict[str, Any]:
         """Fast-Track : récupère uniquement les emails reçus après ``since`` et
         régénère le résumé à partir de ce seul delta (architecture.md, Process 2).
@@ -262,6 +264,11 @@ class EmailProcessor:
         Contrairement à ``process_latest_emails``, expose aussi la liste brute
         des emails du delta (clé ``"emails"``) pour permettre leur persistance
         par l'appelant (voir ``email_analyzer/analysis_tasks.py``).
+
+        ``rules_matrix`` (JSONB brut de ``Project.rules_matrix``) alimente la
+        classification multi-critères (``email_analyzer/classification.py``)
+        en plus du simple nom de projet ; ``None`` reproduit exactement
+        l'ancien comportement (recherche du nom de projet en sous-chaîne).
         """
         if not self.email_address or not self.password:
             return {"_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD)."}
@@ -294,7 +301,10 @@ class EmailProcessor:
             if not analyzer.connect():
                 return {"_error": "Échec de la connexion IMAP."}
 
-            project_data = analyzer.search_project_emails([name], days_back)
+            rules_map = (
+                {name: ProjectRules.from_dict(rules_matrix)} if rules_matrix else None
+            )
+            project_data = analyzer.search_project_emails([name], days_back, rules_map=rules_map)
             if not project_data:
                 return {
                     "_empty": True,

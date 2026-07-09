@@ -10,6 +10,18 @@ const REFRESH_POLL_TIMEOUT_MS = 2 * 60 * 1000;
 
 type Sentiment = "on_track" | "under_tension" | "awaiting_feedback";
 
+// Signaux de classification multi-critères (email_analyzer/classification.py) —
+// toutes les clés sont optionnelles côté backend (ProjectRules.from_dict tolère
+// un JSON incomplet ou absent).
+export type RulesMatrix = {
+  keywords?: string[];
+  sender_domains?: string[];
+  sender_emails?: string[];
+  client_names?: string[];
+  company_names?: string[];
+  reference_numbers?: string[];
+};
+
 export type ProjectListItem = {
   id: string;
   name: string;
@@ -20,7 +32,34 @@ export type ProjectListItem = {
   sentiment: Sentiment | null;
   last_processed_email_timestamp: string | null;
   pending_actions_count: number;
+  rules_matrix: RulesMatrix | null;
 };
+
+// Un champ par signal de classification (email_analyzer/classification.py,
+// ProjectRules) — pilote à la fois le formulaire de création et l'éditeur.
+const RULES_MATRIX_FIELDS: Array<{ key: keyof RulesMatrix; label: string; placeholder: string }> = [
+  { key: "keywords", label: "Mots-clés", placeholder: "Ex. refonte, API paiement" },
+  { key: "sender_domains", label: "Domaines expéditeur", placeholder: "Ex. client.com" },
+  { key: "sender_emails", label: "Adresses expéditeur", placeholder: "Ex. contact@client.com" },
+  { key: "client_names", label: "Noms de clients", placeholder: "Ex. Société X" },
+  { key: "company_names", label: "Noms de sociétés", placeholder: "Ex. Alias Corp" },
+  { key: "reference_numbers", label: "Références internes", placeholder: "Ex. PRJ-1234" },
+];
+
+function parseCsv(value: string): string[] {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function rulesMatrixToCsv(rules: RulesMatrix | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { key } of RULES_MATRIX_FIELDS) {
+    out[key] = (rules?.[key] ?? []).join(", ");
+  }
+  return out;
+}
 
 const SENTIMENT_LABEL: Record<Sentiment, string> = {
   on_track: "Sur la bonne voie",
@@ -71,12 +110,98 @@ async function pollRefreshJob(jobId: string): Promise<Record<string, unknown>> {
   throw new Error("Le rafraîchissement prend trop de temps. Réessayez plus tard.");
 }
 
+function RulesMatrixEditor({
+  project,
+  onUpdated,
+}: {
+  project: ProjectListItem;
+  onUpdated: (id: string, patch: Partial<ProjectListItem>) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [values, setValues] = useState<Record<string, string>>(() => rulesMatrixToCsv(project.rules_matrix));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    setError(null);
+    setBusy(true);
+    try {
+      const rules_matrix: RulesMatrix = {};
+      for (const { key } of RULES_MATRIX_FIELDS) {
+        const parsed = parseCsv(values[key] ?? "");
+        if (parsed.length > 0) rules_matrix[key] = parsed;
+      }
+      const res = await apiFetch(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rules_matrix }),
+      });
+      const data = (await parseResponseJson(res)) as Record<string, unknown>;
+      if (!res.ok) throw new Error(parseApiError(data));
+      onUpdated(project.id, { rules_matrix: (data.rules_matrix as RulesMatrix | null) ?? rules_matrix });
+      setExpanded(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur inconnue");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        onClick={() => setExpanded(true)}
+        className="self-start text-xs font-medium text-text-muted underline decoration-dotted hover:text-text-secondary"
+      >
+        Règles de classification
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-border-default bg-bg-tertiary/40 p-3">
+      {RULES_MATRIX_FIELDS.map(({ key, label, placeholder }) => (
+        <label key={key} className="text-xs text-text-secondary">
+          {label}
+          <input
+            className="mt-1 w-full rounded-lg border border-border-default bg-surface px-2 py-1.5 text-xs text-text-primary"
+            value={values[key] ?? ""}
+            onChange={(e) => setValues((prev) => ({ ...prev, [key]: e.target.value }))}
+            placeholder={placeholder}
+          />
+        </label>
+      ))}
+      {error ? <p className="text-xs text-danger">{error}</p> : null}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={busy}
+          className="rounded-lg bg-accent-primary px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+        >
+          {busy ? "Enregistrement…" : "Enregistrer"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          className="rounded-lg px-3 py-1.5 text-xs text-text-secondary"
+        >
+          Annuler
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ProjectCard({
   project,
   onRefreshed,
+  onUpdated,
 }: {
   project: ProjectListItem;
   onRefreshed: (id: string, patch: Partial<ProjectListItem>) => void;
+  onUpdated: (id: string, patch: Partial<ProjectListItem>) => void;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -143,14 +268,18 @@ function ProjectCard({
 
       {refreshError ? <p className="text-xs text-danger">{refreshError}</p> : null}
 
-      <button
-        type="button"
-        onClick={() => void handleRefresh()}
-        disabled={refreshing}
-        className="mt-1 self-start rounded-full border border-info/40 px-3 py-1.5 text-xs font-medium text-info transition hover:bg-info/10 disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {refreshing ? "Actualisation…" : "Actualiser (Fast-Track)"}
-      </button>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void handleRefresh()}
+          disabled={refreshing}
+          className="mt-1 self-start rounded-full border border-info/40 px-3 py-1.5 text-xs font-medium text-info transition hover:bg-info/10 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {refreshing ? "Actualisation…" : "Actualiser (Fast-Track)"}
+        </button>
+      </div>
+
+      <RulesMatrixEditor project={project} onUpdated={onUpdated} />
     </article>
   );
 }
@@ -163,6 +292,8 @@ function CreateProjectForm({
   onCancel: () => void;
 }) {
   const [name, setName] = useState("");
+  const [showRules, setShowRules] = useState(false);
+  const [rulesValues, setRulesValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -172,15 +303,25 @@ function CreateProjectForm({
     setError(null);
     setBusy(true);
     try {
+      const rules_matrix: RulesMatrix = {};
+      for (const { key } of RULES_MATRIX_FIELDS) {
+        const parsed = parseCsv(rulesValues[key] ?? "");
+        if (parsed.length > 0) rules_matrix[key] = parsed;
+      }
       const res = await apiFetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() }),
+        body: JSON.stringify({
+          name: name.trim(),
+          ...(Object.keys(rules_matrix).length > 0 ? { rules_matrix } : {}),
+        }),
       });
       const data = await parseResponseJson(res);
       if (!res.ok) throw new Error(parseApiError(data));
       onCreated(data as ProjectListItem);
       setName("");
+      setRulesValues({});
+      setShowRules(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur inconnue");
     } finally {
@@ -218,6 +359,31 @@ function CreateProjectForm({
       >
         Annuler
       </button>
+
+      {!showRules ? (
+        <button
+          type="button"
+          onClick={() => setShowRules(true)}
+          className="w-full text-left text-xs font-medium text-text-muted underline decoration-dotted hover:text-text-secondary"
+        >
+          Règles de classification (optionnel)
+        </button>
+      ) : (
+        <div className="grid w-full gap-2 sm:grid-cols-2">
+          {RULES_MATRIX_FIELDS.map(({ key, label, placeholder }) => (
+            <label key={key} className="text-xs text-text-secondary">
+              {label}
+              <input
+                className="mt-1 w-full rounded-lg border border-border-default bg-bg-tertiary/60 px-2 py-1.5 text-xs text-text-primary"
+                value={rulesValues[key] ?? ""}
+                onChange={(e) => setRulesValues((prev) => ({ ...prev, [key]: e.target.value }))}
+                placeholder={placeholder}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+
       {error ? <p className="w-full text-sm text-danger">{error}</p> : null}
     </form>
   );
@@ -295,7 +461,7 @@ export default function ProjectHub() {
       {projects !== null && projects.length > 0 ? (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {projects.map((p) => (
-            <ProjectCard key={p.id} project={p} onRefreshed={patchProject} />
+            <ProjectCard key={p.id} project={p} onRefreshed={patchProject} onUpdated={patchProject} />
           ))}
         </div>
       ) : null}

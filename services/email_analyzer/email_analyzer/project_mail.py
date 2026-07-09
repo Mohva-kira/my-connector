@@ -14,6 +14,7 @@ from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional
 
 from .ai_intelligent import get_shared_analyzer
+from .classification import ProjectRules, score_project_relevance
 from .config import (
     ASSISTANT_PROVIDER_GEMINI,
     ASSISTANT_PROVIDER_NONE,
@@ -438,6 +439,7 @@ class EmailProjectAnalyzer:
         use_uid_fetch: bool,
         project_filters: List[str],
         project_data: Dict,
+        rules_map: Optional[Dict[str, ProjectRules]] = None,
     ) -> None:
         """Fetch (cache-aware) + parse un email et l'ajoute à `project_data` s'il
         correspond à un des `project_filters`. Bloc de travail partagé par le
@@ -472,7 +474,14 @@ class EmailProjectAnalyzer:
                 if self.use_email_cache:
                     self.email_cache[cache_key] = {"content": email_content}
 
-            matching_projects = self.check_project_relevance(email_content, project_filters)
+            # Construit via .items() (jamais un accès par crochet) pour ne
+            # jamais déclencher la factory du defaultdict pour un projet pas
+            # encore matché — sinon on changerait silencieusement le jeu de
+            # clés retourné par search_project_emails.
+            participants_map = {name: data["participants"] for name, data in project_data.items()}
+            matching_projects = self.check_project_relevance(
+                email_content, project_filters, rules_map=rules_map, participants_map=participants_map
+            )
             if not matching_projects or not email_content:
                 return
 
@@ -489,6 +498,7 @@ class EmailProjectAnalyzer:
         days_back: int = 30,
         on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
         max_matches: Optional[int] = None,
+        rules_map: Optional[Dict[str, ProjectRules]] = None,
     ) -> Dict:
         """Recherche les emails concernant les projets spécifiés.
 
@@ -548,7 +558,9 @@ class EmailProjectAnalyzer:
                 # de correspondances, sans lire tout le mailbox (contexte chat).
                 remaining = set(project_filters)
                 for email_id in reversed(email_ids):
-                    self._process_one_email_id(email_id, use_uid_fetch, project_filters, project_data)
+                    self._process_one_email_id(
+                        email_id, use_uid_fetch, project_filters, project_data, rules_map=rules_map
+                    )
                     remaining = {
                         pf
                         for pf in remaining
@@ -571,7 +583,9 @@ class EmailProjectAnalyzer:
             for i, email_id in enumerate(email_ids):
                 if i % 20 == 0:
                     logging.info("Traitement: %s/%s emails", i + 1, total)
-                self._process_one_email_id(email_id, use_uid_fetch, project_filters, project_data)
+                self._process_one_email_id(
+                    email_id, use_uid_fetch, project_filters, project_data, rules_map=rules_map
+                )
                 if chunked and (i + 1) % chunk_size == 0:
                     self._emit_batch_progress(on_batch, i + 1, total, project_data)
 
@@ -586,7 +600,12 @@ class EmailProjectAnalyzer:
             logging.error("Erreur recherche: %s", e)
             return {}
 
-    def search_project_emails_from_list(self, emails: List[Dict], project_filters: List[str]) -> Dict:
+    def search_project_emails_from_list(
+        self,
+        emails: List[Dict],
+        project_filters: List[str],
+        rules_map: Optional[Dict[str, ProjectRules]] = None,
+    ) -> Dict:
         """Variante de `search_project_emails` pour une source déjà normalisée
         et déjà récupérée (pas d'IMAP) — ex. emails Gmail
         (`gmail_oauth.fetch_emails`, même format de dict : `subject/from/to/
@@ -597,7 +616,10 @@ class EmailProjectAnalyzer:
             lambda: {"emails": [], "participants": set(), "keywords": defaultdict(int), "dates": []}
         )
         for email_content in emails:
-            matching_projects = self.check_project_relevance(email_content, project_filters)
+            participants_map = {name: data["participants"] for name, data in project_data.items()}
+            matching_projects = self.check_project_relevance(
+                email_content, project_filters, rules_map=rules_map, participants_map=participants_map
+            )
             for project in matching_projects:
                 project_data[project]["emails"].append(email_content)
                 project_data[project]["dates"].append(email_content.get("date"))
@@ -626,14 +648,27 @@ class EmailProjectAnalyzer:
         except Exception:
             logging.exception("Callback de progression en échec (ignoré, n'affecte pas l'analyse)")
 
-    def check_project_relevance(self, email_content: Dict, project_filters: List[str]) -> List[str]:
-        """Vérifie si un email concerne un projet spécifique."""
+    def check_project_relevance(
+        self,
+        email_content: Dict,
+        project_filters: List[str],
+        rules_map: Optional[Dict[str, ProjectRules]] = None,
+        participants_map: Optional[Dict[str, set]] = None,
+    ) -> List[str]:
+        """Vérifie si un email concerne un projet spécifique.
+
+        Sans `rules_map` ni `participants_map`, délègue à
+        `classification.score_project_relevance` avec seulement le signal
+        `project_name` — reproduit exactement l'ancienne recherche en
+        sous-chaîne. Avec ces paramètres, combine mots-clés/adresses/
+        participants connus/références internes en un score de confiance
+        (voir MATCH_THRESHOLD dans classification.py)."""
         matching_projects = []
-        search_text = email_content.get("normalized_text")
-        if not search_text:
-            search_text = f"{email_content.get('subject', '')} {email_content.get('body', '')}".lower()
         for project_filter in project_filters:
-            if project_filter.lower() in search_text:
+            rules = rules_map.get(project_filter) if rules_map else None
+            known_participants = participants_map.get(project_filter) if participants_map else None
+            result = score_project_relevance(email_content, project_filter, rules, known_participants)
+            if result.matched:
                 matching_projects.append(project_filter)
         return matching_projects
 

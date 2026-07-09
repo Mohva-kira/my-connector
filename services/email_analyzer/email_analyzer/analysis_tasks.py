@@ -158,6 +158,7 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
     Process 2), et persiste le résultat (Unit 10 : Project/Email/ProjectSummary/
     SuggestedAction)."""
     from email_analyzer.ai_intelligent import get_shared_analyzer
+    from email_analyzer.classification import ProjectRules, derive_tags, score_project_relevance
     from email_analyzer.db.models import (
         Email,
         Project,
@@ -193,7 +194,7 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
         since = summary_row.last_processed_email_timestamp if summary_row else None
 
         proc = processor_from_tenant(tenant)
-        delta = proc.process_delta(project.name, since)
+        delta = proc.process_delta(project.name, since, rules_matrix=project.rules_matrix)
         if isinstance(delta, dict) and delta.get("_error"):
             raise RuntimeError(str(delta["_error"]))
 
@@ -209,6 +210,10 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
             (delta.get("summary") or {}).get("évaluation_risque") or {}
         ).get("niveau_risque")
         shared_analyzer = get_shared_analyzer()
+        # Rejoue les mêmes règles que le matching IMAP (project_mail.py) pour
+        # persister un score de confiance auditable par email — recalcul pur,
+        # sans I/O supplémentaire (déjà en mémoire à ce stade).
+        project_rules = ProjectRules.from_dict(project.rules_matrix)
 
         persisted = 0
         for email_content in new_emails:
@@ -234,6 +239,8 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
             importance_score = shared_analyzer.score_email_importance(
                 email_content, recipient_status=recipient_status, niveau_risque=risk_level_for_scoring
             )
+            relevance = score_project_relevance(email_content, project.name, project_rules)
+            tags = derive_tags(email_content, importance_score=importance_score)
             db.add(
                 Email(
                     tenant_id=tenant.id,
@@ -244,6 +251,8 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
                     body_encrypted=email_content.get("body"),
                     received_at=parse_email_datetime(email_content.get("date")),
                     importance_score=importance_score,
+                    tags=tags,
+                    classification_score=relevance.score,
                 )
             )
             persisted += 1
