@@ -11,9 +11,9 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from email.header import decode_header
 from time import perf_counter
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from .ai_intelligent import EmailIntelligentAnalyzer
+from .ai_intelligent import get_shared_analyzer
 from .config import (
     ASSISTANT_PROVIDER_GEMINI,
     ASSISTANT_PROVIDER_NONE,
@@ -23,6 +23,9 @@ from .config import (
     DEFAULT_OPENAI_MAX_INPUT_CHARS,
     DEFAULT_OPENAI_MAX_TOKENS,
     VALID_PERIODS,
+    batch_chunk_size,
+    batch_threshold,
+    imap_timeout_seconds,
 )
 from .llm import (
     build_résumé_assistant_unifié,
@@ -62,7 +65,7 @@ class EmailProjectAnalyzer:
         self.step_timings = defaultdict(float)
         self.step_counts = defaultdict(int)
 
-        self.ai_analyzer = EmailIntelligentAnalyzer()
+        self.ai_analyzer = get_shared_analyzer()
 
     def record_timing(self, step_name: str, duration_seconds: float):
         """Enregistre le temps passé sur une étape."""
@@ -334,17 +337,18 @@ class EmailProjectAnalyzer:
                 self.port,
                 self.prefer_ssl,
             )
+            timeout = imap_timeout_seconds()
             if self.prefer_ssl:
                 try:
-                    self.mail = imaplib.IMAP4_SSL(self.imap_server, self.port)
+                    self.mail = imaplib.IMAP4_SSL(self.imap_server, self.port, timeout=timeout)
                     logging.info("Connexion SSL établie")
                 except Exception as ssl_error:
                     logging.warning("Échec SSL: %s", ssl_error)
                     logging.info("Tentative de connexion sans SSL...")
-                    self.mail = imaplib.IMAP4(self.imap_server, 143)
+                    self.mail = imaplib.IMAP4(self.imap_server, 143, timeout=timeout)
                     logging.info("Connexion non-SSL établie")
             else:
-                self.mail = imaplib.IMAP4(self.imap_server, self.port)
+                self.mail = imaplib.IMAP4(self.imap_server, self.port, timeout=timeout)
                 logging.info("Connexion non-SSL (explicit) établie")
 
             logging.info("Tentative d'authentification pour %s", self.email_address)
@@ -387,7 +391,11 @@ class EmailProjectAnalyzer:
             "subject": self.decode_header_value(msg["Subject"]),
             "from": self.decode_header_value(msg["From"]),
             "to": self.decode_header_value(msg["To"]),
+            "cc": self.decode_header_value(msg["Cc"]),
             "date": msg["Date"],
+            # Identifiant stable de l'email, utilisé pour la déduplication lors
+            # de la persistance (Fast-Track — voir email_analyzer/analysis_tasks.py).
+            "message_id": self.decode_header_value(msg["Message-ID"]),
             "body": "",
         }
 
@@ -424,8 +432,79 @@ class EmailProjectAnalyzer:
         content["normalized_text"] = self.normalize_email_text(content)
         return content
 
-    def search_project_emails(self, project_filters: List[str], days_back: int = 30) -> Dict:
-        """Recherche les emails concernant les projets spécifiés."""
+    def _process_one_email_id(
+        self,
+        email_id,
+        use_uid_fetch: bool,
+        project_filters: List[str],
+        project_data: Dict,
+    ) -> None:
+        """Fetch (cache-aware) + parse un email et l'ajoute à `project_data` s'il
+        correspond à un des `project_filters`. Bloc de travail partagé par le
+        balayage avant (toutes les correspondances) et le balayage arrière borné
+        (dernières correspondances seulement, cf. `max_matches`)."""
+        try:
+            cache_key = email_id.decode(errors="ignore") if isinstance(email_id, bytes) else str(email_id)
+            cache_entry = self.email_cache.get(cache_key) if self.use_email_cache else None
+            email_content = None
+            if cache_entry and isinstance(cache_entry.get("content"), dict):
+                cand = cache_entry["content"]
+                if self._cached_content_usable(cand):
+                    email_content = cand
+
+            if email_content is None:
+                fetch_start = perf_counter()
+                if use_uid_fetch:
+                    status, msg_data = self.mail.uid("fetch", email_id, "(RFC822)")
+                else:
+                    status, msg_data = self.mail.fetch(email_id, "(RFC822)")
+                self.record_timing("imap_fetch_full_message", perf_counter() - fetch_start)
+                if status != "OK" or not msg_data or not msg_data[0]:
+                    return
+
+                parse_start = perf_counter()
+                raw_payload = msg_data[0][1]
+                if not isinstance(raw_payload, (bytes, bytearray)):
+                    return
+                msg = email.message_from_bytes(raw_payload)
+                email_content = self.extract_email_content(msg)
+                self.record_timing("email_extract_content", perf_counter() - parse_start)
+                if self.use_email_cache:
+                    self.email_cache[cache_key] = {"content": email_content}
+
+            matching_projects = self.check_project_relevance(email_content, project_filters)
+            if not matching_projects or not email_content:
+                return
+
+            for project in matching_projects:
+                project_data[project]["emails"].append(email_content)
+                project_data[project]["dates"].append(email_content.get("date"))
+                self.extract_participants(email_content, project_data[project]["participants"])
+        except Exception:
+            return
+
+    def search_project_emails(
+        self,
+        project_filters: List[str],
+        days_back: int = 30,
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+        max_matches: Optional[int] = None,
+    ) -> Dict:
+        """Recherche les emails concernant les projets spécifiés.
+
+        Si le nombre d'emails candidats dépasse `batch_threshold()`, le fetch/parse
+        est découpé en lots de `batch_chunk_size()` et `on_batch(processed, total,
+        partial)` est appelé après chaque lot (progression + aperçu rapide basé sur
+        `identify_critical_emails`, rule-based donc sans coût ML). En dessous du
+        seuil, `on_batch` n'est jamais invoqué — comportement inchangé.
+
+        Si `max_matches` est fourni, le balayage se fait depuis les emails les plus
+        récents (ordre IMAP inverse) et s'arrête dès que chaque filtre a atteint
+        `max_matches` correspondances — évite de scanner tout le mailbox quand seuls
+        les derniers emails d'un projet sont utiles (contexte de `/api/chat`).
+        `on_batch` est ignoré si `max_matches` est fourni (balayage non séquentiel,
+        pas de notion de "lot" à rapporter).
+        """
         if not self.mail:
             return {}
 
@@ -452,7 +531,8 @@ class EmailProjectAnalyzer:
                 email_ids = messages[0].split()
                 use_uid_fetch = False
 
-            logging.info("Trouvé %s emails à analyser", len(email_ids))
+            total = len(email_ids)
+            logging.info("Trouvé %s emails à analyser", total)
 
             project_data = defaultdict(
                 lambda: {
@@ -463,52 +543,40 @@ class EmailProjectAnalyzer:
                 }
             )
 
+            if max_matches is not None:
+                # Balayage arrière borné : s'arrête dès que chaque filtre a assez
+                # de correspondances, sans lire tout le mailbox (contexte chat).
+                remaining = set(project_filters)
+                for email_id in reversed(email_ids):
+                    self._process_one_email_id(email_id, use_uid_fetch, project_filters, project_data)
+                    remaining = {
+                        pf
+                        for pf in remaining
+                        if len(project_data.get(pf, {}).get("emails", [])) < max_matches
+                    }
+                    if not remaining:
+                        break
+                # Le balayage arrière ajoute du plus récent au plus ancien :
+                # remettre chaque projet en ordre chronologique.
+                for data in project_data.values():
+                    data["emails"].reverse()
+                    data["dates"].reverse()
+                if self.use_email_cache:
+                    self.save_cache()
+                return dict(project_data)
+
+            chunk_size = batch_chunk_size()
+            chunked = on_batch is not None and total > batch_threshold()
+
             for i, email_id in enumerate(email_ids):
-                try:
-                    if i % 20 == 0:
-                        logging.info("Traitement: %s/%s emails", i + 1, len(email_ids))
+                if i % 20 == 0:
+                    logging.info("Traitement: %s/%s emails", i + 1, total)
+                self._process_one_email_id(email_id, use_uid_fetch, project_filters, project_data)
+                if chunked and (i + 1) % chunk_size == 0:
+                    self._emit_batch_progress(on_batch, i + 1, total, project_data)
 
-                    cache_key = email_id.decode(errors="ignore") if isinstance(email_id, bytes) else str(email_id)
-                    cache_entry = (
-                        self.email_cache.get(cache_key) if self.use_email_cache else None
-                    )
-                    email_content = None
-                    if cache_entry and isinstance(cache_entry.get("content"), dict):
-                        cand = cache_entry["content"]
-                        if self._cached_content_usable(cand):
-                            email_content = cand
-
-                    if email_content is None:
-                        fetch_start = perf_counter()
-                        if use_uid_fetch:
-                            status, msg_data = self.mail.uid("fetch", email_id, "(RFC822)")
-                        else:
-                            status, msg_data = self.mail.fetch(email_id, "(RFC822)")
-                        self.record_timing("imap_fetch_full_message", perf_counter() - fetch_start)
-                        if status != "OK" or not msg_data or not msg_data[0]:
-                            continue
-
-                        parse_start = perf_counter()
-                        raw_payload = msg_data[0][1]
-                        if not isinstance(raw_payload, (bytes, bytearray)):
-                            continue
-                        msg = email.message_from_bytes(raw_payload)
-                        email_content = self.extract_email_content(msg)
-                        self.record_timing("email_extract_content", perf_counter() - parse_start)
-                        if self.use_email_cache:
-                            self.email_cache[cache_key] = {"content": email_content}
-
-                    matching_projects = self.check_project_relevance(email_content, project_filters)
-                    if not matching_projects or not email_content:
-                        continue
-
-                    for project in matching_projects:
-                        project_data[project]["emails"].append(email_content)
-                        project_data[project]["dates"].append(email_content.get("date"))
-                        self.extract_participants(email_content, project_data[project]["participants"])
-
-                except Exception:
-                    continue
+            if chunked and total % chunk_size != 0:
+                self._emit_batch_progress(on_batch, total, total, project_data)
 
             if self.use_email_cache:
                 self.save_cache()
@@ -517,6 +585,28 @@ class EmailProjectAnalyzer:
         except Exception as e:
             logging.error("Erreur recherche: %s", e)
             return {}
+
+    def _emit_batch_progress(
+        self,
+        on_batch: Callable[[int, int, Dict[str, Any]], None],
+        processed: int,
+        total: int,
+        project_data: Dict,
+    ) -> None:
+        """Construit un aperçu partiel (nb_emails + emails critiques, rule-based)
+        et le remonte via `on_batch`. Une erreur ici ne doit jamais interrompre
+        l'analyse en cours."""
+        try:
+            partial = {
+                name: {
+                    "nb_emails": len(data["emails"]),
+                    "emails_critiques": self.ai_analyzer.identify_critical_emails(data["emails"]),
+                }
+                for name, data in project_data.items()
+            }
+            on_batch(processed, total, partial)
+        except Exception:
+            logging.exception("Callback de progression en échec (ignoré, n'affecte pas l'analyse)")
 
     def check_project_relevance(self, email_content: Dict, project_filters: List[str]) -> List[str]:
         """Vérifie si un email concerne un projet spécifique."""

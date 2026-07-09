@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -63,6 +64,7 @@ from sqlalchemy.orm import Session
 from api.routers import auth as auth_router
 from api.routers import billing as billing_router
 from api.routers import oauth as oauth_router
+from api.routers import projects as projects_router
 from api.routers import tenants as tenants_router
 
 
@@ -106,6 +108,7 @@ app.include_router(auth_router.router)
 app.include_router(tenants_router.router)
 app.include_router(billing_router.router)
 app.include_router(oauth_router.router)
+app.include_router(projects_router.router)
 
 
 class AnalyzeRequest(BaseModel):
@@ -214,6 +217,41 @@ def analyze(
         body.openai_model,
         body.gemini_model,
     )
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.post("/api/projects/{project_id}/refresh", status_code=202)
+def refresh_project(
+    project_id: uuid.UUID,
+    authorization: Optional[str] = Header(None),
+    db: Optional[Session] = Depends(get_db_optional),
+) -> Dict[str, Any]:
+    """Fast-Track : régénère le résumé d'un projet à partir des seuls emails
+    reçus depuis son dernier rafraîchissement (architecture.md, Process 2).
+
+    Un projet est toujours scopé à un tenant (Unit 10) : cet endpoint
+    nécessite le mode SaaS (DATABASE_URL défini), contrairement à
+    ``/api/analyze`` qui reste utilisable en mode legacy.
+    """
+    if db is None:
+        raise HTTPException(
+            status_code=400, detail="Fast-Track nécessite le mode SaaS (DATABASE_URL)"
+        )
+
+    _, tenant, _ = authenticate_bearer(db, authorization)
+
+    from email_analyzer.db.models import Project
+
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.tenant_id == tenant.id)
+        .first()
+    )
+    if project is None:
+        raise HTTPException(status_code=404, detail="Projet introuvable")
+
+    job_id = create_job(tenant_id=str(tenant.id))
+    enqueue(job_id, "run_fasttrack_refresh", str(tenant.id), str(project.id))
     return {"job_id": job_id, "status": "pending"}
 
 

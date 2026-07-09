@@ -72,6 +72,23 @@ cd LinkedIn_Auto_Connector_Bot
 pip install -r requirements.txt
 ```
 
+### 🧠 spaCy / Local ML Requirement
+
+The email-analyzer service runs its NLP locally (sentiment, NER, summaries) using **transformers + spaCy**. `requirements.txt` pulls in `spacy>=3.8` along with two language models that are installed as pip wheels:
+
+- `fr_core_news_sm` (French NER)
+- `en_core_web_sm` (English NER)
+
+These are downloaded and stored **locally** — no external API call is made for NLP. On first run the analyzer loads the French model, falls back to the English model, and if neither is present falls back to a blank pipeline (no NER). Because these models are a few hundred MB and run on-device, the first install may be slow and requires enough local disk/RAM.
+
+To skip loading the local ML stack entirely (and rely only on API/heuristics), set the environment variable before running:
+
+```bash
+export EMAIL_ANALYZER_USE_LOCAL_ML=false
+```
+
+It defaults to `true`. Accepted "off" values are `0`, `false`, `no`, and `off`.
+
 ## 🛠️ Configuration
 
 1. 🔐 Set up LinkedIn credentials:

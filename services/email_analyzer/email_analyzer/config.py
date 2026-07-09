@@ -43,6 +43,25 @@ def llm_timeout_seconds() -> float:
     except ValueError:
         return DEFAULT_LLM_TIMEOUT_SECONDS
 
+
+# Timeout socket IMAP (secondes). Sans timeout explicite, un serveur mail lent
+# ou injoignable bloque le thread du worker bien au-delà du timeout du job
+# arq (300s par défaut), qui finit par tuer le job côté arq sans jamais
+# libérer le thread orphelin. Surchargeable via env.
+DEFAULT_IMAP_TIMEOUT_SECONDS = 30.0
+
+
+def imap_timeout_seconds() -> float:
+    """Timeout socket IMAP en secondes (env IMAP_TIMEOUT_SECONDS, défaut 30)."""
+    raw = (os.environ.get("IMAP_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_IMAP_TIMEOUT_SECONDS
+    try:
+        val = float(raw)
+        return val if val > 0 else DEFAULT_IMAP_TIMEOUT_SECONDS
+    except ValueError:
+        return DEFAULT_IMAP_TIMEOUT_SECONDS
+
 # gemini-2.0-flash n'est plus disponible pour les nouveaux comptes (API renvoie 404).
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 

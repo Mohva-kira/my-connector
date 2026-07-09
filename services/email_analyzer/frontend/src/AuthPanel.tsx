@@ -56,15 +56,15 @@ export default function AuthPanel({
   }
 
   return (
-    <div className="mx-auto max-w-md rounded-2xl border border-stone-200 bg-white p-8 shadow-sm">
-      <h2 className="text-center text-lg font-semibold text-slate-900">
+    <div className="mx-auto max-w-md rounded-2xl border border-border-default bg-surface p-8 shadow-sm">
+      <h2 className="text-center text-lg font-semibold text-text-primary">
         {mode === "login" ? "Connexion" : "Créer un compte"}
       </h2>
       <div className="mt-4 flex justify-center gap-2">
         <button
           type="button"
           className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-            mode === "login" ? "bg-slate-800 text-white" : "bg-stone-100 text-slate-600"
+            mode === "login" ? "bg-accent-primary text-white" : "bg-bg-tertiary text-text-secondary"
           }`}
           onClick={() => setMode("login")}
         >
@@ -73,7 +73,7 @@ export default function AuthPanel({
         <button
           type="button"
           className={`rounded-full px-4 py-1.5 text-sm font-medium ${
-            mode === "register" ? "bg-slate-800 text-white" : "bg-stone-100 text-slate-600"
+            mode === "register" ? "bg-accent-primary text-white" : "bg-bg-tertiary text-text-secondary"
           }`}
           onClick={() => setMode("register")}
         >
@@ -82,18 +82,18 @@ export default function AuthPanel({
       </div>
       <form className="mt-6 space-y-4" onSubmit={(e) => void submit(e)}>
         <label className="block text-sm">
-          <span className="text-slate-700">Email</span>
+          <span className="text-text-secondary">Email</span>
           <input
             type="email"
             required
             autoComplete="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2 text-sm"
+            className="mt-1 w-full rounded-xl border border-border-default bg-bg-tertiary/60 px-3 py-2 text-sm text-text-primary"
           />
         </label>
         <label className="block text-sm">
-          <span className="text-slate-700">Mot de passe</span>
+          <span className="text-text-secondary">Mot de passe</span>
           <input
             type="password"
             required
@@ -101,30 +101,30 @@ export default function AuthPanel({
             autoComplete={mode === "login" ? "current-password" : "new-password"}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2 text-sm"
+            className="mt-1 w-full rounded-xl border border-border-default bg-bg-tertiary/60 px-3 py-2 text-sm text-text-primary"
           />
         </label>
         {mode === "register" ? (
           <label className="block text-sm">
-            <span className="text-slate-700">Nom de l&apos;organisation</span>
+            <span className="text-text-secondary">Nom de l&apos;organisation</span>
             <input
               type="text"
               required
               value={orgName}
               onChange={(e) => setOrgName(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2 text-sm"
+              className="mt-1 w-full rounded-xl border border-border-default bg-bg-tertiary/60 px-3 py-2 text-sm text-text-primary"
             />
           </label>
         ) : null}
         {error ? (
-          <p className="text-sm text-red-700" role="alert">
+          <p className="text-sm text-danger" role="alert">
             {error}
           </p>
         ) : null}
         <button
           type="submit"
           disabled={busy}
-          className="w-full rounded-xl bg-slate-800 py-2.5 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-50"
+          className="w-full rounded-xl bg-accent-primary py-2.5 text-sm font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
         >
           {busy ? "…" : mode === "login" ? "Se connecter" : "S&apos;inscrire"}
         </button>

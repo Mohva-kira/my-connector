@@ -4,6 +4,7 @@ import { apiFetch } from "./apiClient";
 import { parseResponseJson, type Health } from "./apiUtils";
 import HomePage from "./pages/HomePage";
 import LoginPage from "./pages/LoginPage";
+import ProjectHubPage from "./pages/ProjectHubPage";
 import SettingsPage from "./pages/SettingsPage";
 
 export default function App() {
@@ -37,8 +38,8 @@ export default function App() {
 
   if (!healthReady) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center bg-stone-100/80 px-4">
-        <p className="text-sm text-slate-500">Chargement…</p>
+      <div className="flex min-h-screen flex-col items-center justify-center bg-bg-primary px-4">
+        <p className="text-sm text-text-muted">Chargement…</p>
       </div>
     );
   }
@@ -78,6 +79,10 @@ export default function App() {
             setSessionTick={setSessionTick}
           />
         }
+      />
+      <Route
+        path="/projects"
+        element={<ProjectHubPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
       />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

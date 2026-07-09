@@ -159,62 +159,62 @@ export function ImapSettingsForm({
 
   return (
     <form className="mt-4 space-y-3" onSubmit={(e) => void save(e)} {...formProps}>
-      <label className="block text-sm">
+      <label className="block text-sm text-text-secondary">
         Hôte
         <input
-          className="mt-1 w-full rounded-lg border border-stone-200 px-2 py-2 text-sm"
+          className="mt-1 w-full rounded-lg border border-border-default bg-bg-tertiary/60 px-2 py-2 text-sm text-text-primary"
           value={host}
           onChange={(e) => setHost(e.target.value)}
           required
           placeholder="imap.example.com"
         />
       </label>
-      <label className="block text-sm">
+      <label className="block text-sm text-text-secondary">
         Port
         <input
           type="number"
-          className="mt-1 w-full rounded-lg border border-stone-200 px-2 py-2 text-sm"
+          className="mt-1 w-full rounded-lg border border-border-default bg-bg-tertiary/60 px-2 py-2 text-sm text-text-primary"
           value={port}
           onChange={(e) => setPort(Number(e.target.value))}
         />
       </label>
-      <label className="block text-sm">
+      <label className="block text-sm text-text-secondary">
         Utilisateur
         <input
-          className="mt-1 w-full rounded-lg border border-stone-200 px-2 py-2 text-sm"
+          className="mt-1 w-full rounded-lg border border-border-default bg-bg-tertiary/60 px-2 py-2 text-sm text-text-primary"
           value={user}
           onChange={(e) => setUser(e.target.value)}
           required
         />
       </label>
-      <label className="block text-sm">
+      <label className="block text-sm text-text-secondary">
         Mot de passe
         <input
           type="password"
-          className="mt-1 w-full rounded-lg border border-stone-200 px-2 py-2 text-sm"
+          className="mt-1 w-full rounded-lg border border-border-default bg-bg-tertiary/60 px-2 py-2 text-sm text-text-primary"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="••••••••"
         />
       </label>
-      <label className="block text-sm">
+      <label className="block text-sm text-text-secondary">
         Dossier
         <input
-          className="mt-1 w-full rounded-lg border border-stone-200 px-2 py-2 text-sm"
+          className="mt-1 w-full rounded-lg border border-border-default bg-bg-tertiary/60 px-2 py-2 text-sm text-text-primary"
           value={folder}
           onChange={(e) => setFolder(e.target.value)}
         />
       </label>
-      <label className="flex items-center gap-2 text-sm">
+      <label className="flex items-center gap-2 text-sm text-text-secondary">
         <input type="checkbox" checked={ssl} onChange={(e) => setSsl(e.target.checked)} />
         SSL (993)
       </label>
-      {msg ? <p className="text-sm text-slate-700">{msg}</p> : null}
+      {msg ? <p className="text-sm text-text-secondary">{msg}</p> : null}
       <div className="flex flex-wrap gap-2 pt-2">
         <button
           type="submit"
           disabled={busy}
-          className="rounded-xl bg-slate-800 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          className="rounded-xl bg-accent-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
         >
           Enregistrer
         </button>
@@ -222,12 +222,12 @@ export function ImapSettingsForm({
           type="button"
           disabled={busy}
           onClick={() => void testConn()}
-          className="rounded-xl border border-stone-200 px-4 py-2 text-sm font-medium text-slate-800"
+          className="rounded-xl border border-border-default px-4 py-2 text-sm font-medium text-text-primary"
         >
           Tester
         </button>
         {showCancel && onCancel ? (
-          <button type="button" onClick={onCancel} className="rounded-xl px-4 py-2 text-sm text-slate-600">
+          <button type="button" onClick={onCancel} className="rounded-xl px-4 py-2 text-sm text-text-secondary">
             Annuler
           </button>
         ) : null}
@@ -248,11 +248,11 @@ export function ImapSettingsModal({
   const titleId = "imap-modal-title";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby={titleId}>
-      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
-        <h3 id={titleId} className="text-lg font-semibold text-slate-900">
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-surface p-6 shadow-xl">
+        <h3 id={titleId} className="text-lg font-semibold text-text-primary">
           Boîte IMAP (organisation)
         </h3>
-        <p className="mt-1 text-sm text-slate-500">
+        <p className="mt-1 text-sm text-text-muted">
           Ces identifiants sont chiffrés côté serveur. Laissez le mot de passe vide pour ne pas le modifier.
         </p>
         <ImapSettingsForm
@@ -320,23 +320,23 @@ export function BillingModal({
       aria-modal="true"
       aria-labelledby="billing-modal-title"
     >
-      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
-        <h3 id="billing-modal-title" className="text-lg font-semibold text-slate-900">
+      <div className="w-full max-w-lg rounded-2xl bg-surface p-6 shadow-xl">
+        <h3 id="billing-modal-title" className="text-lg font-semibold text-text-primary">
           Facturation CinetPay
         </h3>
-        <p className="mt-1 text-sm text-slate-500">
+        <p className="mt-1 text-sm text-text-muted">
           Vous serez redirigé vers le guichet de paiement sécurisé.
         </p>
-        {err ? <p className="mt-2 text-sm text-red-700">{err}</p> : null}
+        {err ? <p className="mt-2 text-sm text-danger">{err}</p> : null}
         <ul className="mt-4 space-y-3">
           {plans.map((p) => (
             <li
               key={p.id}
-              className="flex items-center justify-between rounded-xl border border-stone-200 px-4 py-3"
+              className="flex items-center justify-between rounded-xl border border-border-default px-4 py-3"
             >
               <div>
-                <p className="font-medium text-slate-900">{p.name}</p>
-                <p className="text-xs text-slate-500">
+                <p className="font-medium text-text-primary">{p.name}</p>
+                <p className="text-xs text-text-muted">
                   {p.price_amount} {p.currency} / {p.interval}
                   {p.quota_analyses_per_month != null ? ` — ${p.quota_analyses_per_month} analyses/mois` : ""}
                 </p>
@@ -345,14 +345,14 @@ export function BillingModal({
                 type="button"
                 disabled={busy !== null}
                 onClick={() => void pay(p.slug)}
-                className="rounded-lg bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
+                className="rounded-lg bg-success px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
               >
                 {busy === p.slug ? "…" : "Payer"}
               </button>
             </li>
           ))}
         </ul>
-        <button type="button" className="mt-6 text-sm text-slate-600 underline" onClick={onClose}>
+        <button type="button" className="mt-6 text-sm text-text-secondary underline" onClick={onClose}>
           Fermer
         </button>
       </div>

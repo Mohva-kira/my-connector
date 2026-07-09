@@ -251,6 +251,21 @@ Update this file after every meaningful implementation change.
   - Non vérifié : comportement sous charge concurrente réelle (plusieurs
     jobs simultanés, plusieurs process worker arq) — hors périmètre de cette
     unité, à couvrir si le volume de jobs augmente.
+  - **Bug trouvé et corrigé (2026-07-06)** : le worker arq échouait sur toute
+    analyse en mode SaaS avec `RuntimeError("DATABASE_URL non configuré")`
+    même quand `.env` contenait bien `DATABASE_URL`. Cause : `api/main.py` et
+    `alembic/env.py` appellent `load_dotenv()` explicitement, mais
+    `analysis_tasks.py` (le module chargé par `arq
+    email_analyzer.analysis_tasks.WorkerSettings`, process séparé d'uvicorn)
+    ne le faisait pas — confirmé en inspectant `/proc/<pid>/environ` du
+    worker en cours d'exécution : ni `DATABASE_URL` ni `REDIS_URL` n'y
+    figuraient, alors qu'ils sont définis dans le `.env` racine. Corrigé en
+    ajoutant les mêmes appels `load_dotenv(_REPO_ROOT / ".env")` /
+    `load_dotenv(_SERVICE_ROOT / ".env")` en tête de `analysis_tasks.py`,
+    avant l'import de `email_analyzer.config` (dont `redis_url()` est évalué
+    au chargement du module, dans le corps de `WorkerSettings`). Vérifié :
+    `init_db()` fixe désormais `SessionLocal` même avec `env -i` (environnement
+    parent vidé). Worker relancé pour prendre en compte le correctif.
 
 - **Unit 10 — Persistance Project/Email/ProjectSummary/SuggestedAction (préalable au Fast-Track)**
   (2026-07-06) :
@@ -291,19 +306,353 @@ Update this file after every meaningful implementation change.
     C'est le prérequis pour l'unité suivante (endpoint Fast-Track réel +
     écriture des résultats d'analyse dans `Email`/`ProjectSummary`).
 
+- **Unit 7, étape 2 — Câblage du polling réel sur le `syncStore`** (2026-07-06) :
+  - Contexte : l'étape 1 avait posé le store/EventBus/placeholder sans les
+    alimenter avec de vraies données. Décision utilisateur : garder le
+    mécanisme de polling existant (`pollAnalysis`, Unit 6, déjà validé en
+    conditions réelles) plutôt que de le remplacer par `React Query`
+    (dépendance ajoutée en étape 1 mais restée inutilisée — aucun composant
+    ne la consomme encore, à réévaluer si un vrai besoin de cache/retry
+    apparaît) ; mapper les `SyncStage` sur les seuls signaux réellement émis
+    par le backend plutôt que d'en simuler par paliers de temps.
+  - `sync-experience/bridgeAnalyzeJob.ts` (nouveau) : `applyAnalyzeTickToStore(tick,
+    store)`, fonction pure sans dépendance React. Mapping **minimal honnête** :
+    `status: "pending"` → `CONNECTING`, `"running"` → `IMPORTING`, `"done"` →
+    `COMPLETED`, `"error"` → `store.reset()`. Les 6 stages intermédiaires
+    (`NORMALIZING`…`GENERATING_BRIEFING`) restent définis dans le type mais ne
+    sont jamais atteints — le backend n'émet aucun signal de pipeline
+    granulaire aujourd'hui, et cette passerelle n'en invente pas. Stats
+    dérivées uniquement de données réelles : `emailsProcessed`/`emailsTotal`
+    depuis `progress.{processed,total}`, `urgentFound` = somme des longueurs
+    de `partial[*].emails_critiques` (comptage réel d'emails critiques
+    détectés par lots, rule-based, cf. Unit 3). `actionsFound`/`deadlinesFound`
+    restent à 0 pendant la progression — aucune donnée réelle ne les
+    alimente avant la fin de l'analyse LLM.
+  - `hooks/useSyncGame.ts` : logique de souscription extraite dans
+    `subscribeSyncStoreToEventBus()` (pure, sans React) ; `useSyncGame` ne
+    fait plus que l'appeler dans un `useEffect`. Permet de piloter le flux
+    store → EventBus dans un script `tsx` sans monter React, pour vérifier
+    réellement le câblage plutôt que de se fier à la seule compilation.
+  - `pages/HomePage.tsx` : `useSyncStore.getState().reset()` au lancement
+    d'une analyse et dans le `catch` (échecs réseau/HTTP qui ne passent pas
+    par un tick `"error"`) ; `applyAnalyzeTickToStore(...)` appelé dans le
+    callback `onTick` déjà existant de `pollAnalysis`, en plus (pas en
+    remplacement) de la mise à jour du state React local
+    (`progress`/`partialBlock`) qui alimente l'UI actuelle — aucune requête
+    HTTP dupliquée, aucune régression du flux Unit 6/3.
+  - **Bug découvert et corrigé pendant la vérification** : `setStage(...)`
+    puis `setStats(...)` sont deux appels `set()` Zustand distincts, chacun
+    notifiant immédiatement les abonnés (`useSyncGame`). En appelant
+    `setStage("COMPLETED")` avant `setStats(...)`, l'événement
+    `SYNC_COMPLETED` se déclenchait avec les stats du tick **précédent**
+    (stats pas encore mises à jour). Corrigé en réordonnant
+    `bridgeAnalyzeJob.ts` pour appeler `setStats` avant `setStage` — les
+    stats sont donc toujours à jour au moment où `STAGE_CHANGED`/
+    `SYNC_COMPLETED` sont émis.
+  - Vérifié : `tsc --noEmit` sans erreur ; `vite build` transforme les 46
+    modules sans erreur (échec ensuite limité au nettoyage de `dist/`
+    pré-existant appartenant à `root`, problème d'environnement déjà
+    documenté, sans rapport avec le code). Flux store → EventBus vérifié
+    avec un script `tsx` temporaire (créé puis supprimé) rejouant une
+    séquence de ticks réalistes (`pending` → `running` ×2 avec
+    `progress`/`partial` croissants → `done`, puis un tick `error` isolé) :
+    tous les événements (`STAGE_CHANGED`, `EMAIL_IMPORTED`, `URGENT_FOUND`,
+    `PROGRESS_UPDATED`, `SYNC_COMPLETED`) sont émis avec les payloads
+    attendus, `SYNC_COMPLETED` porte les stats finales correctes après
+    correction du bug, et le tick `error` réinitialise bien le store à
+    l'état initial.
+  - Non vérifié : rendu réel dans le navigateur avec un job d'analyse
+    IMAP/Redis live (pas d'identifiants IMAP configurés dans cet
+    environnement de session — `.env` absent) ; `<SyncGame />` n'est
+    toujours pas monté dans `HomePage.tsx` (le composant reste un
+    placeholder texte, la UI de résultat actuelle — barre de progression,
+    `partialBlock` — n'a pas été touchée pour éviter toute régression
+    visuelle avant que les vrais composants (PipelineTrack, Robot,
+    EmailEnvelope, HUD, FloatingText) existent).
+
+- **Unit 7, étape 3 — Premier composant visuel réel (HUD)** (2026-07-06) :
+  - Contexte : décision utilisateur explicite de passer en mode autonome
+    pour la suite de ce chantier (« continue l'implémentation sans demander
+    mon avis, en tant qu'administrateur prends les décisions recommandées
+    et valide les suggestions ») — les choix ci-dessous sont donc pris et
+    documentés directement, sans question de clarification préalable.
+  - `sync-experience/components/HUD.tsx` (nouveau) : composant de lecture
+    seule branché sur `useSyncStore` via sélecteurs (`stage`, `stats`).
+    Libellés FR par `SyncStage` (`STAGE_LABELS`, seuls `CONNECTING`,
+    `IMPORTING`, `COMPLETED` sont réellement atteignables aujourd'hui, cf.
+    étape 2) ; barre de progression + compteur `processed/total` affichés
+    uniquement si `emailsTotal > 0` (sinon message d'attente neutre, jamais
+    de fausse barre à 0%) ; badge `urgentFound` (token `danger`, cohérent
+    avec `color-sentiment-critical` de `ui-context.md`) affiché seulement si
+    `> 0` — conforme au principe *Calm Workspace* (pas de badge à zéro en
+    permanence).
+  - `sync-experience/components/SyncExperience.tsx` : remplace le
+    placeholder texte (`{stage} / {progress}%`) par `<HUD />`. Toujours pas
+    monté dans `HomePage.tsx` — l'UI de résultat actuelle (barre + skeleton
+    + `partialBlock`, Unit 3) reste inchangée tant que `SyncExperience` n'a
+    pas tous ses éléments visuels (PipelineTrack, Robot, EmailEnvelope,
+    FloatingText restent à construire).
+  - Vérifié : `tsc --noEmit` OK ; `vite build` transforme les modules sans
+    erreur (échec ensuite limité au même `EACCES` sur `dist/`
+    pré-existant, sans rapport). Tentative de vérification visuelle réelle
+    dans un navigateur headless (Chromium système + `playwright-core`
+    installé temporairement en `--no-save`, route `/dev/sync-preview`
+    temporaire montant `<SyncGame/>` avec des stats seedées) : **Chromium
+    plante immédiatement (SIGTRAP) au lancement dans cet environnement**,
+    avec ou sans `--no-sandbox`/`--disable-gpu`/`--disable-dev-shm-usage`,
+    y compris invoqué directement hors de Playwright — confirme que
+    l'environnement de session ne permet pas de lancer un navigateur
+    (cohérent avec toutes les unités précédentes : « pas d'outil navigateur
+    disponible »). La route de test temporaire, le paquet `playwright-core`
+    et le script de capture ont été entièrement retirés après l'essai
+    (`git diff` sur `App.tsx`/`package.json` confirmé identique à avant
+    l'essai).
+  - Non vérifié : rendu visuel réel du HUD (dark theme, alignement,
+    lisibilité) — nécessite soit un navigateur dans l'environnement de
+    session, soit une vérification manuelle par l'utilisateur en lançant
+    `npm run dev` localement.
+
+- **Unit 11 — Fast-Track réel : découverte + CRUD Project manquant + bug
+  critique du worker corrigé** (2026-07-06) :
+  - **Découverte importante** : en lisant le code avant d'implémenter
+    (comme l'exige `CLAUDE.md`), j'ai trouvé que `POST
+    /api/projects/{id}/refresh` (`api/main.py`) et toute la logique de
+    persistance Fast-Track (`_run_fasttrack_sync` dans
+    `email_analyzer/analysis_tasks.py` : delta via `EmailProcessor.
+    process_delta`, écriture `Email`/`ProjectSummary`/`SuggestedAction`,
+    dédup par `external_id`, mapping sentiment depuis le niveau de risque)
+    **existaient déjà dans l'arbre de travail, non committées, et non
+    documentées ici** — `progress-tracker.md` affirmait à tort après Unit 10
+    qu'« aucun code applicatif n'écrit encore ces tables ». Origine
+    antérieure à cette session (confirmé via `git diff` contre le dernier
+    commit `07e5926`). Je n'ai pas réimplémenté cette logique : je l'ai lue,
+    vérifiée, et corrigée là où elle était cassée (voir bug ci-dessous).
+    Cette entrée corrige rétroactivement le tracker.
+  - **Gap réel identifié** : aucun moyen d'appeler cet endpoint n'existait
+    car aucun `Project` ne pouvait jamais être créé (pas de `POST
+    /api/projects`, pas de liste). `api/routers/projects.py` (nouveau,
+    écrit cette session) : `POST /api/projects` (create), `GET
+    /api/projects` (liste, scindé par tenant, inclut `summary_content`/
+    `sentiment`/`last_processed_email_timestamp` depuis `ProjectSummary`
+    si présent), `GET /api/projects/{id}` (détail + `suggested_actions`).
+    Suit exactement le pattern des routers existants (`_require_saas()`
+    dupliqué localement comme dans `tenants.py`/`auth.py`/`oauth.py`/
+    `billing.py` — convention du projet, pas une nouvelle abstraction).
+    Enregistré dans `api/main.py` (2 lignes : import + `include_router`).
+  - **Bug critique trouvé et corrigé** : le worker `arq`
+    (`analysis_tasks.py`) n'appelait jamais `init_db()` — seul le
+    `lifespan` FastAPI (process `uvicorn`) le fait. Résultat : dans le
+    process worker (séparé depuis Unit 9), `SessionLocal` restait `None`
+    en permanence, et **toute tâche touchant la DB échouait avec
+    « DATABASE_URL non configuré » même quand la variable d'environnement
+    était correctement définie** — reproduit avec `/api/analyze` en mode
+    SaaS (pas seulement avec mon nouveau Fast-Track). Ce bug affecte donc
+    aussi une fonctionnalité déjà livrée (Unit 9). Corrigé en ajoutant
+    `init_db()` dans `on_startup` (`analysis_tasks.py`), au même endroit où
+    l'analyseur ML partagé est déjà pré-chargé par process worker.
+  - Vérifié en conditions réelles, environnement jetable et démonté après
+    coup (pas de `.env`/identifiants dans cette session) :
+    - Cluster PostgreSQL local jetable (`initdb`/`pg_ctl`, port dédié,
+      socket dans `/tmp`) + Redis local (déjà disponible) + `alembic
+      upgrade head` (001→003) appliqué proprement.
+    - `uvicorn` + un worker `arq` réel lancés comme deux process séparés
+      (topologie exacte d'Unit 9) contre ce cluster.
+    - Tenant/utilisateur/jeton créés directement en base (le flux HTTP
+      `POST /api/auth/register` est bloqué par un bug **préexistant, sans
+      rapport** : `passlib`+`bcrypt` incompatibles sous Python 3.13 dans cet
+      environnement — `ValueError: password cannot be longer than 72
+      bytes` sur un mot de passe pourtant valide ; non corrigé, hors
+      périmètre de cette unité, à traiter séparément si l'utilisateur le
+      confirme).
+    - Flux HTTP réel : `POST /api/projects` → `GET /api/projects` → `GET
+      /api/projects/{id}` (CRUD complet, scoping tenant vérifié) ; `POST
+      /api/projects/{id}/refresh` → `202 {job_id}` → `GET
+      /api/analyze/{job_id}` jusqu'à `error` **avant** le correctif (« DATABASE_URL
+      non configuré ») puis jusqu'à l'erreur métier attendue **après** le
+      correctif (« Identifiants IMAP manquants » — normal, tenant de test
+      sans IMAP configuré) ; `/api/analyze` (SaaS) confirmé cassé par le
+      même bug puis réparé par le même correctif.
+    - Logique de persistance (`_run_fasttrack_sync`) testée en appel direct
+      (contourne `arq`/HTTP) avec `EmailProcessor.process_delta` mocké
+      (aucun IMAP/LLM réel disponible) : 2 emails factices insérés avec le
+      bon `recipient_status` (`direct_to`/`cc` selon le champ `To:`) et
+      dédupliqués par `external_id` ; `ProjectSummary.sentiment` correctement
+      dérivé de `niveau_risque=CRITIQUE` → `under_tension` ; `SuggestedAction`
+      créée uniquement pour risque non-FAIBLE ; second appel sans nouvel
+      email vérifié idempotent (pas de doublon `Email`, pas de nouvelle
+      `SuggestedAction`, résumé/sentiment inchangés).
+    - `python -m py_compile` OK sur tous les fichiers touchés. Tout
+      l'environnement jetable (Postgres, process `uvicorn`/`arq`, sockets,
+      `pgdata`) démonté et supprimé après vérification ; `redis-cli flushdb`
+      sur la DB de test (index 1, jamais celle de prod par défaut).
+  - Non vérifié : le vrai chemin `process_delta` avec un IMAP réel (dépend
+    d'identifiants que cette session n'a pas) ; le flux HTTP `register`
+    (bug bcrypt préexistant bloquant) ; comportement sous charge concurrente.
+  - **⚠️ Signalé à l'utilisateur** : `git status` montre un très grand nombre
+    de fichiers modifiés non committés dans tout le dépôt (au-delà de cette
+    session — état déjà présent au tout début de la conversation). Une
+    partie est probablement du bruit de fin de ligne, mais le Fast-Track
+    découvert ci-dessus prouve qu'il y a aussi du vrai code fonctionnel non
+    committé. Recommandation : committer bientôt pour ne pas risquer de
+    perdre ce travail.
+
+- **Unit 12 — Frontend Project Hub** (2026-07-06) :
+  - Contexte : Unit 11 a rendu le Fast-Track fonctionnel côté backend, mais
+    aucune UI n'existait pour créer un projet, en voir la liste, ou
+    déclencher un rafraîchissement — écart comblé ici, conformément à la
+    spec `architecture.md` (`### Project Hub`, `### Fast-Track Refresh`) :
+    grille responsive de cartes, chacune avec résumé, indicateur de santé,
+    sentiment IA, actions en attente, horodatage de dernière mise à jour.
+  - **Ajout backend minimal, directement motivé par la spec** :
+    `api/routers/projects.py` — `pending_actions_count` ajouté à
+    `ProjectOut`/`ProjectDetailOut` (compte les `SuggestedAction` au statut
+    `pending` uniquement) : la spec exige "Outstanding actions" sur la
+    carte, et l'endpoint liste ne remontait jusqu'ici aucune info sur les
+    actions (seul le détail les exposait). Requête de comptage par projet
+    (pas de sous-requête agrégée) — accepté vu le volume de projets par
+    tenant attendu à ce stade, à revisiter seulement si ça devient un vrai
+    goulot.
+  - `frontend/src/ProjectHub.tsx` (nouveau) : `ProjectHub` (liste + création)
+    et `ProjectCard` (une carte, refresh Fast-Track local). Mapping
+    sentiment → couleur **sans nouveau token** : les 3 valeurs réelles de
+    `ProjectSentiment` (`on_track`/`under_tension`/`awaiting_feedback`)
+    correspondent déjà exactement à 3 des 5 couleurs de la "Project Health
+    Scale" de `ui-context.md` (`success`/`danger`/`warning`, mêmes valeurs
+    hex) — les 2 niveaux intermédiaires (Needs Attention/Delayed) n'ont pas
+    de token dédié ajouté puisque le backend ne les distingue pas.
+  - Fast-Track par carte : `POST /api/projects/{id}/refresh` puis polling de
+    `GET /api/analyze/{job_id}` (réutilise tel quel l'endpoint générique de
+    `jobs.py` — même pattern que `pollAnalysis` dans `HomePage.tsx`, dupliqué
+    ici en `pollRefreshJob` plutôt que partagé : portées différentes —
+    accepté, pas de nouvelle abstraction cross-fichier pour deux call sites).
+    État `refreshing` **local à `ProjectCard`** : seule la carte concernée
+    pulse (`.animate-fasttrack-pulse`, nouveau), jamais d'overlay global —
+    respecte explicitement `architecture.md` *"Only the affected project
+    card is updated"*. Au succès, le résultat du job (`sentiment`/`content`/
+    `last_processed_email_timestamp`) patch directement la ligne du projet
+    dans l'état local (pas de refetch complet de la liste).
+  - `frontend/tailwind.config.js` : 2 tokens ajoutés (`fasttrack-active`
+    `#60A5FA`, `fasttrack-bg` `rgba(59,130,246,.10)`), valeurs de
+    `ui-context.md` "Fast-Track Tokens" — `fasttrack-idle` non ajouté, la
+    valeur `#3B82F6` existe déjà sous le nom `info` et est réutilisée telle
+    quelle (pas de doublon de token pour la même couleur).
+  - `frontend/src/index.css` : `@keyframes fasttrack-pulse` +
+    `.animate-fasttrack-pulse` (pulsation de `box-shadow`, même convention
+    que `batch-pop`/`skeleton-pulse`/`typing-dot` déjà en place).
+  - `frontend/src/pages/ProjectHubPage.tsx` (nouveau) : garde-fous
+    identiques à `SettingsPage.tsx` (`saasEnabled` → sinon `Navigate` vers
+    `/`, token absent → `/login`, `me` en cours de chargement → spinner) —
+    le Project Hub est strictement SaaS (les projets sont scopés par
+    tenant), pas de repli legacy.
+  - `App.tsx` (route `/projects`) et `components/AppShell.tsx` (lien nav
+    "Projets") mis à jour.
+  - Vérifié : `tsc --noEmit` sans erreur ; `vite build` transforme les 48
+    modules sans erreur (même échec `EACCES` sur `dist/` pré-existant,
+    sans rapport, déjà documenté). Contrat backend réel re-vérifié avec un
+    cluster Postgres jetable (même méthode qu'Unit 11, démonté après coup) :
+    `POST/GET /api/projects` et `GET /api/projects/{id}` renvoient
+    exactement la forme attendue par `ProjectListItem`/`ProjectDetailOut`
+    côté frontend ; `pending_actions_count` vérifié à `1` avec 1 action
+    `pending` + 1 `completed` seedées directement en base (compte bien
+    seulement les `pending`, pas les autres statuts).
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que pour le HUD d'Unit 7 — Chromium système crashe au
+    lancement dans cette session, cf. entrée Unit 7 étape 3 ; pas retenté
+    ici, la cause est déjà identifiée comme un problème d'environnement,
+    pas de code) ; le flux de polling `pollRefreshJob` face à un vrai job
+    Fast-Track déclenché depuis le navigateur (le contrat HTTP est vérifié,
+    mais pas le rendu de la pulsation/l'état `refreshing` en conditions
+    réelles) ; recommandé à l'utilisateur de lancer `npm run dev` +
+    `uvicorn`/`arq` localement pour un premier passage visuel.
+
+- **Fix — "Analyse complète" échouait prématurément avec un timeout côté
+  client alors que le job backend tournait toujours** (2026-07-08) :
+  - Cause racine (double, flux `HomePage.tsx` / `run_analysis_saas` /
+    `run_analysis_legacy` uniquement — Fast-Track hors scope, confirmé avec
+    l'utilisateur) :
+    1. Frontend — `pollAnalysis` (`HomePage.tsx`) laissait l'erreur d'un
+       **seul** tick (`AbortSignal.timeout(30s)`, hoquet réseau) se propager
+       et tuer tout le run, alors que le budget global de polling est de
+       5 min et que le job backend continuait souvent de tourner sainement.
+    2. Backend — aucun timeout explicite sur les connexions IMAP
+       (`imaplib.IMAP4_SSL`/`IMAP4`) ni sur l'appel Gemini
+       (`generate_content`), combiné au `job_timeout` implicite de 300 s
+       d'arq et au `max_tries` par défaut (5) : un job lent se faisait tuer
+       puis **rejouer jusqu'à 5 fois**, refaisant intégralement le fetch
+       IMAP + les résumés LLM à chaque tentative (aucun état intermédiaire
+       persisté avant le `db.commit()` final).
+  - Extraction des emails et corrélation job_id/tenant_id à travers
+    create_job → enqueue → poll → Redis : **vérifiées correctes**, aucun bug
+    trouvé — le mécanisme de réponse progressive (`on_batch` →
+    `report_progress` → `processed`/`total`/`partial` → `onTick` →
+    `setProgress`/`setPartialBlock`/`bridgeAnalyzeJob`) était déjà câblé et
+    fonctionnel ; il était juste interrompu par le bug (1) ci-dessus.
+  - `frontend/src/pages/HomePage.tsx` : `pollAnalysis` — le fetch d'un tick
+    est maintenant dans un `try/catch` interne à la boucle ; une erreur
+    transitoire fait `continue` au lieu de propager, la boucle ne s'arrête
+    que sur `deadline` global dépassé ou `status === "error"` explicite du
+    backend.
+  - `email_analyzer/config.py` : nouveau `imap_timeout_seconds()` (env
+    `IMAP_TIMEOUT_SECONDS`, défaut 30 s), même pattern que
+    `llm_timeout_seconds()`.
+  - `email_analyzer/project_mail.py` : `connect()` passe `timeout=` sur les
+    3 sites de construction `imaplib.IMAP4_SSL`/`IMAP4`.
+  - `email_analyzer/llm.py` : `generate_gemini_assistant_summary` passe
+    `request_options={"timeout": llm_timeout_seconds()}` à `generate_content`
+    (alignement sur le client OpenAI qui avait déjà `timeout=` depuis
+    Unit 6 ; l'autre site Gemini du fichier, `chat.send_message` pour
+    `/api/chat`, non touché — hors scope de ce flux).
+  - `email_analyzer/analysis_tasks.py` : `WorkerSettings.functions` — `
+    run_analysis_legacy`/`run_analysis_saas` enveloppés en `arq.func(...,
+    max_tries=1)` (travail non idempotent, un retry ne fait que redoubler le
+    coût réseau/LLM) ; `run_fasttrack_refresh` inchangé (hors scope).
+  - Vérifié : `python -m py_compile` sur les 4 fichiers backend modifiés ;
+    import direct de `WorkerSettings.functions` confirmant `max_tries=1` sur
+    les 2 bonnes entrées ; `tsc --noEmit` sans erreur côté frontend.
+  - Non vérifié : passage réel dans le navigateur avec un vrai worker arq +
+    un compte IMAP lent (même contrainte d'environnement que les entrées
+    précédentes — pas de Chromium fonctionnel dans cette session).
+
 ## In Progress
 
-- Unit 7 — Gamified Loading Experience : étape 1/8 livrée, en attente de
-  validation utilisateur avant l'étape 2 (câblage React Query ↔ Zustand ↔
-  EventBus).
+- Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
+  sur le store, non monté dans l'UI) puis **mise en pause décidée en mode
+  autonome** (2026-07-06) : les étapes 4-8 (`PipelineTrack`, `Robot`,
+  `EmailEnvelope`, `FloatingText`) supposent toutes une granularité que le
+  backend n'expose pas encore (stages de pipeline détaillés, items
+  individuels par email pendant le scan). Les continuer maintenant
+  signifierait soit fabriquer des données (déjà écarté à l'étape 2), soit
+  construire des composants qui ne s'activeront jamais tant que le signal
+  réel n'existe pas — les deux vont à l'encontre de `ai-workflow-rules.md`
+  (pas de logique spéculative/cachée) et de la préférence utilisateur
+  établie pour le mapping honnête. Reprise naturelle une fois qu'une source
+  de données plus granulaire existe (par ex. si Unit 11 ci-dessous finit
+  par exposer une progression par email plutôt que par lot de 10).
 
 ## Next Up
 
-- **Unit 7, étape 2** : câblage `React Query → syncStore` (alimenter le
-  store depuis le polling `/api/analyze/{job_id}` existant), puis
-  vérification du flux `useSyncGame → EventBus`.
+- **Committer le travail en attente** : recommandé avant toute nouvelle
+  unité — voir l'avertissement dans l'entrée Unit 11 ci-dessus. Le Fast-Track
+  découvert cette session (endpoint + persistance) n'existe nulle part
+  ailleurs que dans cet arbre de travail.
+- **Bug bcrypt/passlib sous Python 3.13** (trouvé pendant la vérification
+  d'Unit 11, non corrigé) : `POST /api/auth/register` (et probablement
+  `/login`) lève une `ValueError: password cannot be longer than 72 bytes`
+  sur un mot de passe valide, à cause d'une incompatibilité de version entre
+  `passlib` et `bcrypt` déclenchée par la détection de backend de `passlib`.
+  Bloque toute inscription réelle dans cet environnement (Python 3.13) —
+  à confirmer si ça reproduit aussi en prod (quelle version de Python ?)
+  avant de choisir le correctif (mise à jour `passlib`, ou bascule vers
+  `bcrypt` direct).
+- **Vérification visuelle du Project Hub par l'utilisateur** : `npm run dev`
+  + `uvicorn`/`arq` locaux, ouvrir `/projects`, créer un projet, déclencher
+  un rafraîchissement Fast-Track et confirmer que seule la carte concernée
+  pulse — voir l'entrée Unit 12 ci-dessus pour ce qui a et n'a pas pu être
+  vérifié dans cette session (pas de navigateur disponible).
+- **Unit 4 — APScheduler / Celery batch processing** (2x/day email sync job,
+  replacing BullMQ since stack is Python) — débloqué maintenant qu'Unit 11
+  écrit réellement dans les tables Unit 10.
 - **Unit 2 — Outlook (Microsoft Graph) OAuth2 Integration**: same pattern as Gmail, using Microsoft Identity Platform
-- **Unit 4 — APScheduler / Celery batch processing** (2x/day email sync job, replacing BullMQ since stack is Python)
 - **Unit 5 — Email importance scoring engine** (rules + AI hybrid using existing LLM integration)
 
 ## Open Questions

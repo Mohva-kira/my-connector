@@ -1,1 +1,14 @@
 .env
+
+# Caches/rapports d'analyse : contiennent des corps d'emails clients réels
+# (identifiants, données personnelles) — ne doivent jamais être committés.
+email_analysis_cache.json
+rapport.json
+rapport_ia.json
+resume
+resumer
+10_2025.json
+.cache_tenants/
+tenant_*.json
+__pycache__/
+*.pyc

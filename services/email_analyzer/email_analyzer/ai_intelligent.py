@@ -2,6 +2,7 @@
 
 import logging
 import re
+import threading
 from typing import Dict, List
 
 from .config import use_local_ml
@@ -57,19 +58,30 @@ class EmailIntelligentAnalyzer:
             try:
                 import spacy
 
-                self.nlp = spacy.load("fr_core_news_sm")
-                self.nlp_available = True
-                logging.info("Modèle NER français chargé")
-            except Exception as e:
-                logging.warning("SpaCy NER: %s", e)
                 try:
-                    import spacy
-
-                    self.nlp = spacy.load("en_core_web_sm")
+                    self.nlp = spacy.load("fr_core_news_sm")
                     self.nlp_available = True
-                    logging.info("Modèle NER anglais chargé (fallback)")
-                except Exception:
-                    self.nlp = None
+                    logging.info("Modèle NER français chargé")
+                except Exception as e:
+                    logging.warning("SpaCy NER français non disponible: %s", e)
+                    try:
+                        self.nlp = spacy.load("en_core_web_sm")
+                        self.nlp_available = True
+                        logging.info("Modèle NER anglais chargé (fallback)")
+                    except Exception as e2:
+                        logging.warning("SpaCy NER anglais non disponible: %s", e2)
+                        try:
+                            self.nlp = spacy.blank("fr")
+                            self.nlp_available = True
+                            logging.info(
+                                "Modèle spaCy vide français chargé (pas de NER disponible)"
+                            )
+                        except Exception as e3:
+                            logging.warning("Impossible de charger spaCy: %s", e3)
+                            self.nlp = None
+            except ImportError as e:
+                logging.error("spaCy non disponible: %s", e)
+                self.nlp = None
         else:
             logging.info(
                 "EMAIL_ANALYZER_USE_LOCAL_ML désactivé : pas de chargement transformers/spaCy"
@@ -474,3 +486,23 @@ class EmailIntelligentAnalyzer:
 
         critical_emails.sort(key=lambda x: x["criticality_score"], reverse=True)
         return critical_emails[:5]
+
+
+_SHARED_ANALYZER: "EmailIntelligentAnalyzer | None" = None
+_SHARED_ANALYZER_LOCK = threading.Lock()
+
+
+def get_shared_analyzer() -> "EmailIntelligentAnalyzer":
+    """Retourne un analyseur ML unique, partagé entre les requêtes.
+
+    Les modèles transformers/spaCy sont coûteux à charger (dizaines de secondes
+    sur CPU). Les instancier une seule fois évite un cold-load par requête, cause
+    majeure des timeouts 504 sur ``/api/analyze``. L'inférence en lecture seule
+    est sûre à partager entre les threads du threadpool.
+    """
+    global _SHARED_ANALYZER
+    if _SHARED_ANALYZER is None:
+        with _SHARED_ANALYZER_LOCK:
+            if _SHARED_ANALYZER is None:
+                _SHARED_ANALYZER = EmailIntelligentAnalyzer()
+    return _SHARED_ANALYZER

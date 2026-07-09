@@ -2,7 +2,8 @@
 
 import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -14,6 +15,7 @@ from .config import (
     DEFAULT_OPENAI_MAX_TOKENS,
     VALID_ASSISTANT_PROVIDERS,
 )
+from .period import parse_email_datetime
 from .project_mail import EmailProjectAnalyzer, imap_days_for_period_arg
 from .templates import generate_response_draft as build_response_draft
 
@@ -76,6 +78,7 @@ class EmailProcessor:
         openai_max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
         openai_max_input_chars: int = DEFAULT_OPENAI_MAX_INPUT_CHARS,
         openai_body_chars: int = DEFAULT_OPENAI_BODY_CHARS,
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
         Récupère les emails correspondant aux projets, applique la période optionnelle,
@@ -83,6 +86,8 @@ class EmailProcessor:
 
         :param project_filter: un nom de projet ou une liste de noms.
         :param period: today | yesterday | 3 | 7 | 11 (optionnel) ; sinon fenêtre `days` pour IMAP.
+        :param on_batch: callback optionnel(processed, total, partial) appelé après chaque
+            lot lorsque le nombre d'emails candidats dépasse le seuil de chunking.
         """
         if not self.email_address or not self.password:
             return {
@@ -114,7 +119,7 @@ class EmailProcessor:
                 return {"_error": "Échec de la connexion IMAP."}
 
             imap_days = imap_days_for_period_arg(period, days)
-            project_data = analyzer.search_project_emails(projects, imap_days)
+            project_data = analyzer.search_project_emails(projects, imap_days, on_batch=on_batch)
 
             if not project_data:
                 filter_label = projects[0] if len(projects) == 1 else ", ".join(projects)
@@ -144,6 +149,108 @@ class EmailProcessor:
                 openai_max_input_chars=openai_max_input_chars,
                 openai_body_chars=openai_body_chars,
             )
+        finally:
+            analyzer.disconnect()
+
+    def process_delta(
+        self,
+        project_name: str,
+        since: Optional[datetime],
+        assistant_provider: str = ASSISTANT_PROVIDER_OPENAI,
+        openai_model: str = "gpt-4o-mini",
+        gemini_model: str = DEFAULT_GEMINI_MODEL,
+    ) -> Dict[str, Any]:
+        """Fast-Track : récupère uniquement les emails reçus après ``since`` et
+        régénère le résumé à partir de ce seul delta (architecture.md, Process 2).
+
+        Si ``since`` est ``None`` (premier rafraîchissement d'un projet), retombe
+        sur une fenêtre par défaut de 30 jours, comme ``process_latest_emails``.
+
+        Contrairement à ``process_latest_emails``, expose aussi la liste brute
+        des emails du delta (clé ``"emails"``) pour permettre leur persistance
+        par l'appelant (voir ``email_analyzer/analysis_tasks.py``).
+        """
+        if not self.email_address or not self.password:
+            return {"_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD)."}
+
+        name = project_name.strip()
+        if not name:
+            return {"_error": "project_name vide."}
+
+        if since is not None:
+            since_utc = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+            # +2 jours de marge : IMAP SINCE ne connaît que la granularité jour
+            # (fuseau du serveur) — le filtrage exact se fait ensuite en Python.
+            days_back = max(1, (datetime.now(timezone.utc) - since_utc).days + 2)
+        else:
+            since_utc = None
+            days_back = 30
+
+        analyzer = EmailProjectAnalyzer(
+            self.email_address,
+            self.password,
+            self.imap_server,
+            self.port,
+            max_deep_emails=self.max_deep_emails,
+            cache_file=self.cache_file,
+            imap_folder=self.imap_folder,
+            prefer_ssl=self.imap_use_ssl,
+        )
+
+        try:
+            if not analyzer.connect():
+                return {"_error": "Échec de la connexion IMAP."}
+
+            project_data = analyzer.search_project_emails([name], days_back)
+            if not project_data:
+                return {
+                    "_empty": True,
+                    "emails": [],
+                    "_message": "Aucun email ne correspond au filtre dans la fenêtre analysée.",
+                }
+
+            keys = list(project_data.keys())
+            key = next((k for k in keys if k.lower() == name.lower()), None) or keys[0]
+            block = project_data.get(key) or {}
+            emails: List[Dict[str, Any]] = list(block.get("emails") or [])
+
+            if since_utc is not None:
+                filtered: List[Dict[str, Any]] = []
+                for em in emails:
+                    parsed = parse_email_datetime(em.get("date"))
+                    if parsed is None:
+                        continue
+                    parsed_utc = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                    if parsed_utc > since_utc:
+                        filtered.append(em)
+                emails = filtered
+
+            if not emails:
+                return {
+                    "_empty": True,
+                    "emails": [],
+                    "_message": "Aucun nouvel email depuis le dernier rafraîchissement.",
+                }
+
+            participants: set = set()
+            for em in emails:
+                analyzer.extract_participants(em, participants)
+
+            filtered_data = {
+                key: {
+                    "emails": emails,
+                    "participants": participants,
+                    "keywords": {},
+                    "dates": [em.get("date") for em in emails],
+                }
+            }
+            summary = analyzer.generate_intelligent_summary(
+                filtered_data,
+                assistant_provider=assistant_provider,
+                openai_model=openai_model,
+                gemini_model=gemini_model,
+            )
+            return {"emails": emails, "summary": summary.get(key, {})}
         finally:
             analyzer.disconnect()
 
@@ -182,7 +289,7 @@ class EmailProcessor:
                 return []
 
             imap_days = imap_days_for_period_arg(period, days)
-            project_data = analyzer.search_project_emails([pf], imap_days)
+            project_data = analyzer.search_project_emails([pf], imap_days, max_matches=n)
             if not project_data:
                 return []
 

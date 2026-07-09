@@ -11,6 +11,7 @@ from .config import (
     DEFAULT_OPENAI_BODY_CHARS,
     DEFAULT_OPENAI_MAX_INPUT_CHARS,
     DEFAULT_OPENAI_MAX_TOKENS,
+    llm_timeout_seconds,
 )
 
 _CHAT_TRUNCATION_NOTICE = (
@@ -116,7 +117,7 @@ def generate_openai_assistant_summary(
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=api_key, timeout=120.0)
+        client = OpenAI(api_key=api_key, timeout=llm_timeout_seconds())
         completion = client.chat.completions.create(
             model=model,
             messages=[
@@ -214,6 +215,7 @@ def generate_gemini_assistant_summary(
         response = gen_model.generate_content(
             user_prompt,
             generation_config=generation_config,
+            request_options={"timeout": llm_timeout_seconds()},
         )
         text_out = None
         if response.candidates:
@@ -383,7 +385,7 @@ def project_assistant_chat_openai(
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=api_key, timeout=120.0)
+        client = OpenAI(api_key=api_key, timeout=llm_timeout_seconds())
         completion = client.chat.completions.create(
             model=model,
             messages=api_messages,

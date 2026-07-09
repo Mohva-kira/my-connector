@@ -23,6 +23,29 @@ type Props = {
 const INITIAL_USER_PROMPT =
   "Bonjour. Démarre la session : présente-toi brièvement, résume ce que tu retiens des derniers emails de ce projet, puis pose 2 questions ciblées pour affiner le résumé selon mes besoins (rôle, temps, priorité).";
 
+// Messages courts qui tournent pendant l'attente (connexion initiale ou
+// réponse) : donne un retour vivant sans bruit visuel, cf. context/ui-context.md.
+const BOOTSTRAP_STATUS_MESSAGES = [
+  "Connexion à l'assistant…",
+  "Lecture des derniers emails…",
+  "Préparation du résumé…",
+];
+const REPLY_STATUS_MESSAGES = ["Réflexion en cours…", "Rédaction de la réponse…"];
+
+function TypingDots() {
+  return (
+    <span className="inline-flex items-center gap-1" aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          className="animate-typing-dot h-1.5 w-1.5 rounded-full bg-ai-primary"
+          style={{ animationDelay: `${i * 0.15}s` }}
+        />
+      ))}
+    </span>
+  );
+}
+
 export function ConversationalAssistant({
   projectName,
   imapPeriod,
@@ -39,6 +62,7 @@ export function ConversationalAssistant({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [statusMsgIndex, setStatusMsgIndex] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bootstrapDoneRef = useRef(false);
@@ -54,6 +78,18 @@ export function ConversationalAssistant({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, busy]);
+
+  useEffect(() => {
+    if (!busy) {
+      setStatusMsgIndex(0);
+      return;
+    }
+    const pool = messages.length === 0 ? BOOTSTRAP_STATUS_MESSAGES : REPLY_STATUS_MESSAGES;
+    const id = setInterval(() => {
+      setStatusMsgIndex((i) => (i + 1) % pool.length);
+    }, 1800);
+    return () => clearInterval(id);
+  }, [busy, messages.length]);
 
   useEffect(() => {
     if (provider === "none" || messages.length > 0 || bootstrapDoneRef.current) return;
@@ -155,9 +191,9 @@ export function ConversationalAssistant({
 
   if (provider === "none") {
     return (
-      <div className="rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 text-sm text-amber-950">
+      <div className="rounded-2xl border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning">
         <p className="font-medium">Assistant conversationnel indisponible</p>
-        <p className="mt-1 text-amber-900/90">
+        <p className="mt-1 text-warning/90">
           Choisissez <strong>OpenAI</strong> ou <strong>Gemini</strong> dans le formulaire de gauche,
           puis relancez l&apos;analyse pour activer le chat.
         </p>
@@ -166,17 +202,20 @@ export function ConversationalAssistant({
   }
 
   return (
-    <div className="flex min-h-[min(60vh,480px)] flex-col rounded-2xl border border-stone-200/80 bg-white shadow-sm shadow-stone-200/50">
-      <div className="border-b border-stone-100 px-4 py-3">
-        <h2 className="text-sm font-semibold text-slate-900">Assistant projet</h2>
-        <p className="mt-0.5 text-xs text-slate-500">
+    <div className="flex min-h-[min(60vh,480px)] flex-col rounded-2xl border border-border-default bg-surface shadow-sm">
+      <div className="border-b border-border-subtle px-4 py-3">
+        <h2 className="text-sm font-semibold text-text-primary">Assistant projet</h2>
+        <p className="mt-0.5 text-xs text-text-muted">
           Synthèse orientée impact — posez des précisions, l&apos;assistant adapte le résumé.
         </p>
       </div>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {messages.length === 0 && busy ? (
-          <p className="text-center text-sm text-slate-500">Connexion à l&apos;assistant…</p>
+          <p className="flex items-center justify-center gap-2 text-center text-sm text-text-muted">
+            <TypingDots />
+            {BOOTSTRAP_STATUS_MESSAGES[statusMsgIndex]}
+          </p>
         ) : null}
 
         {messages.map((m, i) => (
@@ -187,8 +226,8 @@ export function ConversationalAssistant({
             <div
               className={`max-w-[92%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${
                 m.role === "user"
-                  ? "bg-slate-800 text-white"
-                  : "border border-stone-200 bg-stone-50 text-slate-800"
+                  ? "bg-accent-primary text-white"
+                  : "border border-border-default bg-bg-tertiary text-text-primary"
               }`}
             >
               <pre className="whitespace-pre-wrap font-sans">{m.content}</pre>
@@ -197,13 +236,16 @@ export function ConversationalAssistant({
         ))}
 
         {busy && messages.length > 0 ? (
-          <p className="text-center text-xs text-slate-400">Réponse en cours…</p>
+          <p className="flex items-center justify-center gap-2 text-center text-xs text-text-muted">
+            <TypingDots />
+            {REPLY_STATUS_MESSAGES[statusMsgIndex]}
+          </p>
         ) : null}
 
         {error ? (
           <div
             role="alert"
-            className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900"
+            className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger"
           >
             {error}
           </div>
@@ -212,7 +254,7 @@ export function ConversationalAssistant({
         <div ref={bottomRef} />
       </div>
 
-      <div className="border-t border-stone-100 p-3">
+      <div className="border-t border-border-subtle p-3">
         <div className="flex gap-2">
           <textarea
             ref={inputRef}
@@ -227,13 +269,13 @@ export function ConversationalAssistant({
             rows={2}
             placeholder="Votre message… (Entrée pour envoyer, Maj+Entrée pour une ligne)"
             disabled={busy}
-            className="min-h-[44px] flex-1 resize-y rounded-xl border border-stone-200 bg-stone-50/50 px-3 py-2 text-sm outline-none ring-slate-300 placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus:ring-2 disabled:opacity-50"
+            className="min-h-[44px] flex-1 resize-y rounded-xl border border-border-default bg-bg-tertiary/60 px-3 py-2 text-sm text-text-primary outline-none ring-accent-primary placeholder:text-text-muted focus:border-accent-primary focus:bg-bg-tertiary focus:ring-2 disabled:opacity-50"
           />
           <button
             type="button"
             onClick={() => void sendUserMessage(input)}
             disabled={busy || !input.trim()}
-            className="self-end rounded-xl bg-slate-800 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+            className="self-end rounded-xl bg-accent-primary px-4 py-2 text-sm font-medium text-white transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
           >
             Envoyer
           </button>
