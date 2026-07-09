@@ -613,6 +613,53 @@ Update this file after every meaningful implementation change.
     un compte IMAP lent (même contrainte d'environnement que les entrées
     précédentes — pas de Chromium fonctionnel dans cette session).
 
+- **Unit 13 — Stabilisation du dépôt : commit du travail en attente + secrets non trackés**
+  (2026-07-09) :
+  - Contexte : reprise en **mode autonome intégral** demandée explicitement
+    par l'utilisateur (« fait tout le traitement sans demander de validation
+    [...] tu es l'administrateur ») — plan validé couvrant Units 13 à 19
+    ci-dessous, exécuté sans pause de validation entre unités.
+  - **Découverte avant tout traitement** : les 6 fichiers `context/*.md`
+    (architecture, project-overview, ui-context, code-standards,
+    ai-workflow-rules, evolution-plan) sont non committés et incohérents
+    entre eux et avec HEAD (ex. `evolution-plan.md` non committé propose un
+    pivot « V2 » pgvector, `architecture.md` non committé décrit encore un
+    cache vectoriel device Orama/Voy, `code-standards.md` — committé comme
+    non committé — décrit encore Node.js/NestJS/BullMQ). **Décision
+    utilisateur** : ignorer cette incohérence pour cette session, ne pas
+    toucher ces 6 fichiers, avancer sur le backlog concret en se basant sur
+    ce fichier (`progress-tracker.md`, en avance sur HEAD et cohérent avec
+    le code réel) plutôt que sur `architecture.md`/`code-standards.md`. À
+    reprendre dans une session dédiée.
+  - **Découverte critique de sécurité** : plusieurs fichiers déjà **committés**
+    dans l'historique git (`email_analysis_cache.json` racine et
+    `services/email_analyzer/`, `rapport.json`, `rapport_ia.json`, `resume`,
+    `resumer`, `10_2025.json`,
+    `.cache_tenants/tenant_c4c275d0-....json`) contiennent des **corps
+    d'emails clients réels** — dont un email contenant en clair des
+    identifiants d'administration (pgAdmin/RabbitMQ/APISIX) d'un client
+    (BBCI/Ezikash). Un fichier équivalent non tracké
+    (`tenant_566b33cb-....json`) contenait la même catégorie de données.
+    **Remédiation appliquée** (réversible, ne réécrit pas l'historique
+    git) : `.gitignore` étendu (ces motifs + `__pycache__/`/`*.pyc`) et
+    `git rm --cached` sur les fichiers trackés (restent sur disque,
+    seulement retirés du suivi futur). **Non fait, décision explicitement
+    laissée à l'utilisateur** : purge de l'historique git existant (ces
+    données restent lisibles dans les commits passés) et rotation des
+    identifiants exposés (pgAdmin/RabbitMQ/APISIX du client BBCI/Ezikash)
+    — actions à fort rayon d'effet, hors du périmètre d'une décision prise
+    de façon autonome.
+  - Commit du travail réel précédemment non committé (routeur Fast-Track
+    `api/routers/projects.py`, Project Hub, scaffolding `sync-experience`,
+    fix timeout du 2026-07-08) — voir message de commit `0fd191f` pour le
+    détail. Exclu du commit : les 6 fichiers `context/*.md` (décision
+    ci-dessus) et ~100 fichiers marqués modifiés uniquement par un
+    changement de mode Unix (`100644→100755`, aucun contenu réel changé).
+  - Vérifié : `git status` propre sur tous les fichiers concernés après
+    coup ; `git diff --cached` relu intégralement avant commit (aucun
+    secret, aucun fichier `context/*.md`) ; fichiers ignorés confirmés via
+    `git check-ignore -v`.
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -631,19 +678,6 @@ Update this file after every meaningful implementation change.
 
 ## Next Up
 
-- **Committer le travail en attente** : recommandé avant toute nouvelle
-  unité — voir l'avertissement dans l'entrée Unit 11 ci-dessus. Le Fast-Track
-  découvert cette session (endpoint + persistance) n'existe nulle part
-  ailleurs que dans cet arbre de travail.
-- **Bug bcrypt/passlib sous Python 3.13** (trouvé pendant la vérification
-  d'Unit 11, non corrigé) : `POST /api/auth/register` (et probablement
-  `/login`) lève une `ValueError: password cannot be longer than 72 bytes`
-  sur un mot de passe valide, à cause d'une incompatibilité de version entre
-  `passlib` et `bcrypt` déclenchée par la détection de backend de `passlib`.
-  Bloque toute inscription réelle dans cet environnement (Python 3.13) —
-  à confirmer si ça reproduit aussi en prod (quelle version de Python ?)
-  avant de choisir le correctif (mise à jour `passlib`, ou bascule vers
-  `bcrypt` direct).
 - **Vérification visuelle du Project Hub par l'utilisateur** : `npm run dev`
   + `uvicorn`/`arq` locaux, ouvrir `/projects`, créer un projet, déclencher
   un rafraîchissement Fast-Track et confirmer que seule la carte concernée
