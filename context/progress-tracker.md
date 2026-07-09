@@ -863,6 +863,59 @@ Update this file after every meaningful implementation change.
     compte disponible dans cet environnement, comme pour Gmail) ; la
     rotation effective du refresh_token Outlook en conditions réelles.
 
+- **Unit 18 — Sync planifiée 2x/jour via `arq` cron** (2026-07-09) :
+  - Contexte : Next Up historique « Unit 4 » (« APScheduler / Celery batch
+    processing ») — débloquée par Unit 11 (Fast-Track écrit réellement dans
+    les tables Unit 10). Renommée/reformulée : la stack réelle est `arq`
+    (Architecture Decisions), pas APScheduler ni Celery — planification via
+    le support cron natif d'`arq` (`arq.cron.cron`), aucune nouvelle
+    dépendance.
+  - `email_analyzer/analysis_tasks.py` : nouvelle tâche
+    `run_scheduled_sync(ctx)` — itère tous les `Project` au statut `active`
+    (les `archived` sont exclus, inutile de les resynchroniser), appelle
+    `_run_fasttrack_sync` pour chacun (réutilisation directe, même logique
+    que le rafraîchissement manuel par carte — aucune duplication). Un échec
+    par projet est loggé (`logger.exception`) sans jamais interrompre le
+    traitement des projets suivants. Enregistrée dans
+    `WorkerSettings.cron_jobs = [cron(run_scheduled_sync, hour={7, 19},
+    minute=0, max_tries=1)]` — 7h/19h cohérent avec le « briefing matin/soir »
+    de `project-overview.md`. `max_tries=1` : `run_scheduled_sync` gère déjà
+    ses échecs par projet en interne, un retry global ne ferait que
+    retraiter des projets déjà réussis.
+  - **Limitation connue héritée d'Unit 15/17** : `_run_fasttrack_sync`
+    appelle `EmailProcessor.process_delta`, resté strictement IMAP (le
+    branchement Gmail/Outlook d'Unit 15/17 ne couvre que
+    `process_latest_emails`, explicitement hors périmètre à l'époque). Les
+    projets de tenants Gmail/Outlook-only échouent donc proprement (loggés,
+    sans casser le batch) plutôt que d'être réellement synchronisés — pas
+    un nouveau bug, la limitation était déjà documentée, cette unité la
+    rend juste visible à l'échelle du cron plutôt que d'un seul flux manuel.
+    À lever si confirmé comme un besoin réel (répliquer le même pattern que
+    Unit 15 dans `process_delta`).
+  - `services/email_analyzer/deploy/nginx-api.conf` : note ajoutée — le
+    process worker `arq` déjà obligatoire (Unit 9) exécute aussi
+    automatiquement cette sync planifiée, aucune commande de déploiement
+    séparée (déduplication cron entre process worker gérée nativement par
+    `arq` via Redis, `unique=True` par défaut).
+  - Vérifié : `python -m py_compile` ; `WorkerSettings.cron_jobs` inspecté
+    directement (hour `{7, 19}`, `minute=0`, `max_tries=1` bien appliqués).
+    Vérification bout-en-bout en conditions réelles (cluster Postgres
+    jetable dédié, `alembic upgrade head`) avec 3 tenants/projets seedés :
+    (1) tenant avec IMAP configuré (`process_delta` mocké, pas d'IMAP réel
+    disponible) → traité avec succès, `ProjectSummary.
+    last_processed_email_timestamp` avancé ; (2) tenant sans aucune source
+    → échec propre (`RuntimeError` "Identifiants IMAP manquants" loggé),
+    aucune `ProjectSummary` créée, **le batch continue** ; (3) projet
+    `archived` → jamais tenté (absent du log d'appels). Confirme les 3
+    critères du plan : projets valides rafraîchis, échec d'un projet
+    n'empêche pas les suivants, timestamp avancé correctement.
+    Environnement jetable démonté après vérification.
+  - Non vérifié : déclenchement réel à l'horaire cron (7h/19h) — vérifié
+    uniquement par appel direct de `run_scheduled_sync()`, pas en laissant
+    tourner un worker arq jusqu'à l'horaire ; comportement sous plusieurs
+    process worker arq simultanés (dédup `unique=True`, documentée mais pas
+    testée avec 2 process réels).
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -886,14 +939,11 @@ Update this file after every meaningful implementation change.
   un rafraîchissement Fast-Track et confirmer que seule la carte concernée
   pulse — voir l'entrée Unit 12 ci-dessus pour ce qui a et n'a pas pu être
   vérifié dans cette session (pas de navigateur disponible).
-- **Sync planifiée 2x/jour via `arq` cron** (remplace la mention historique
-  APScheduler/Celery — stack réelle = `arq`) — débloqué maintenant qu'Unit 11
-  écrit réellement dans les tables Unit 10. Prochaine unité (Unit 18).
 - **Moteur de scoring d'importance par email** (rules + AI hybride,
-  réutilisant `ai_intelligent.py`) — prochaine unité après la sync planifiée
-  (Unit 19).
+  réutilisant `ai_intelligent.py`) — prochaine unité (Unit 19).
 - ~~Outlook (Microsoft Graph) OAuth2 Integration~~ — **Fermée par Unit 17**
   (2026-07-09).
+- ~~Sync planifiée 2x/jour via `arq` cron~~ — **Fermée par Unit 18** (2026-07-09).
 
 ## Open Questions
 

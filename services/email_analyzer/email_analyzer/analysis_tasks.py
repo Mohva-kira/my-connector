@@ -14,13 +14,17 @@ par ``jobs.enqueue`` restent ``pending`` indéfiniment.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from arq import func
 from arq.connections import RedisSettings
+from arq.cron import cron
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Le worker arq est lancé comme process indépendant (voir docstring module) : il
 # n'hérite pas du chargement de .env fait par api/main.py. Sans cet appel,
@@ -360,6 +364,51 @@ async def on_startup(ctx: Dict[str, Any]) -> None:
     get_shared_analyzer()
 
 
+async def run_scheduled_sync(ctx: Dict[str, Any]) -> None:
+    """Tâche cron arq (2x/jour, voir `WorkerSettings.cron_jobs`) : régénère
+    chaque projet actif via la même logique Fast-Track que le rafraîchissement
+    manuel (`_run_fasttrack_sync`, delta depuis `last_processed_email_timestamp`)
+    — pas de logique de sync dupliquée. Remplace la mention historique
+    APScheduler/Celery de `progress-tracker.md` : la stack réelle est `arq`.
+
+    Un projet sans source exploitable (ni IMAP ni OAuth Gmail/Outlook — cas des
+    tenants Gmail/Outlook-only tant que `process_delta` reste IMAP-only, voir
+    Unit 15/17) échoue proprement via `_run_fasttrack_sync` (`_error` ->
+    `RuntimeError`) et est loggé sans interrompre le traitement des projets
+    suivants — même discipline que `_run_saas_sync`/`_run_fasttrack_sync`
+    (jamais de `except Exception: pass` générique)."""
+    from email_analyzer.db.models import Project, ProjectStatus
+    from email_analyzer.db.session import SessionLocal
+
+    if SessionLocal is None:
+        logger.error("Sync planifiée annulée : DATABASE_URL non configuré")
+        return
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Project.id, Project.tenant_id)
+            .filter(Project.status == ProjectStatus.active.value)
+            .all()
+        )
+    finally:
+        db.close()
+
+    logger.info("Sync planifiée : %s projet(s) actif(s) à traiter", len(rows))
+    succeeded = 0
+    for project_id, tenant_id in rows:
+        try:
+            await asyncio.to_thread(
+                _run_fasttrack_sync, f"scheduled:{project_id}", str(tenant_id), str(project_id)
+            )
+            succeeded += 1
+        except Exception:
+            logger.exception(
+                "Sync planifiée : échec pour project_id=%s tenant_id=%s", project_id, tenant_id
+            )
+    logger.info("Sync planifiée terminée : %s/%s projet(s) rafraîchi(s)", succeeded, len(rows))
+
+
 class WorkerSettings:
     # run_analysis_legacy/run_analysis_saas ne sont pas idempotents : un retry
     # après timeout refait entièrement le fetch IMAP + les résumés LLM au lieu
@@ -372,6 +421,11 @@ class WorkerSettings:
         func(run_analysis_saas, max_tries=1),
         run_fasttrack_refresh,
     ]
+    # Sync planifiée 2x/jour (7h/19h, heure du process worker — cf.
+    # project-overview.md "briefing matin/soir") ; max_tries=1 car
+    # run_scheduled_sync gère déjà ses échecs par projet en interne, un retry
+    # global ne ferait que retraiter des projets déjà réussis.
+    cron_jobs = [cron(run_scheduled_sync, hour={7, 19}, minute=0, max_tries=1)]
     on_startup = on_startup
     redis_settings = RedisSettings.from_dsn(redis_url())
     # Un job à la fois par process worker : reproduit la limite de concurrence
