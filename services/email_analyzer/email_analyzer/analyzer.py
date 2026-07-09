@@ -37,16 +37,28 @@ class EmailProcessor:
         load_env: bool = True,
         imap_folder: Optional[str] = None,
         imap_use_ssl: Optional[bool] = None,
+        gmail_connection: Optional[Any] = None,
+        use_env_fallback: bool = True,
     ):
         if load_env:
             load_dotenv()
 
-        self.email_address = (
-            email_address
-            or os.environ.get("IMAP_USER")
-            or os.environ.get("EMAIL")
+        # use_env_fallback=False isole les credentials d'un tenant SaaS de
+        # tout IMAP_USER/IMAP_PASSWORD global du process (utilisé par le
+        # mode legacy) — sans ça, un tenant sans IMAP configuré analyserait
+        # silencieusement la boîte définie par le .env du serveur au lieu de
+        # renvoyer une erreur ou de basculer sur Gmail (voir saas_logic.
+        # processor_from_tenant).
+        self.email_address = email_address or (
+            (os.environ.get("IMAP_USER") or os.environ.get("EMAIL")) if use_env_fallback else None
         )
-        self.password = password or os.environ.get("IMAP_PASSWORD")
+        self.password = password or (
+            os.environ.get("IMAP_PASSWORD") if use_env_fallback else None
+        )
+        # Connexion OAuth Gmail (objet OAuthConnection), utilisée en repli
+        # quand aucun IMAP n'est configuré — voir process_latest_emails.
+        self.gmail_connection = gmail_connection
+        self.last_gmail_token_refresh: Optional[Dict[str, Any]] = None
         self.imap_server = imap_server or os.environ.get("IMAP_HOST", "mail.mediasoftci.net")
         self.port = int(port or os.environ.get("IMAP_PORT", "993"))
         self.cache_file = cache_file or os.environ.get(
@@ -87,9 +99,16 @@ class EmailProcessor:
         :param project_filter: un nom de projet ou une liste de noms.
         :param period: today | yesterday | 3 | 7 | 11 (optionnel) ; sinon fenêtre `days` pour IMAP.
         :param on_batch: callback optionnel(processed, total, partial) appelé après chaque
-            lot lorsque le nombre d'emails candidats dépasse le seuil de chunking.
+            lot lorsque le nombre d'emails candidats dépasse le seuil de chunking. Ignoré
+            sur le chemin Gmail (pas de notion de lot, un seul appel API).
+
+        Si aucun identifiant IMAP n'est configuré mais qu'une connexion Gmail OAuth
+        l'est (``self.gmail_connection``), bascule automatiquement sur l'API Gmail
+        (voir Open Question #1 de progress-tracker.md / ``saas_logic.processor_from_tenant``).
         """
-        if not self.email_address or not self.password:
+        has_imap = bool(self.email_address and self.password)
+        use_gmail = not has_imap and self.gmail_connection is not None
+        if not has_imap and not use_gmail:
             return {
                 "_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD).",
             }
@@ -104,8 +123,8 @@ class EmailProcessor:
             return {"_error": "project_filter vide."}
 
         analyzer = EmailProjectAnalyzer(
-            self.email_address,
-            self.password,
+            self.email_address or "",
+            self.password or "",
             self.imap_server,
             self.port,
             max_deep_emails=self.max_deep_emails,
@@ -114,43 +133,80 @@ class EmailProcessor:
             prefer_ssl=self.imap_use_ssl,
         )
 
-        try:
+        imap_days = imap_days_for_period_arg(period, days)
+        source_label = "IMAP"
+
+        if use_gmail:
+            source_label = "Gmail"
+            try:
+                project_data = self._fetch_gmail_project_data(analyzer, projects, imap_days)
+            except Exception as exc:
+                logging.exception("Échec de la récupération Gmail")
+                return {"_error": f"Échec de la récupération Gmail : {exc}"}
+        else:
             if not analyzer.connect():
                 return {"_error": "Échec de la connexion IMAP."}
+            try:
+                project_data = analyzer.search_project_emails(projects, imap_days, on_batch=on_batch)
+            finally:
+                analyzer.disconnect()
 
-            imap_days = imap_days_for_period_arg(period, days)
-            project_data = analyzer.search_project_emails(projects, imap_days, on_batch=on_batch)
+        if not project_data:
+            filter_label = projects[0] if len(projects) == 1 else ", ".join(projects)
+            return {
+                "_empty": True,
+                "_message": (
+                    f"Aucun email ne correspond au filtre dans {source_label} sur la période "
+                    "analysée (recherche dans le sujet et le corps)."
+                ),
+                "_filter": filter_label,
+                "_imap_folder": self.imap_folder if not use_gmail else None,
+                "_days_back": imap_days,
+            }
 
-            if not project_data:
-                filter_label = projects[0] if len(projects) == 1 else ", ".join(projects)
-                return {
-                    "_empty": True,
-                    "_message": (
-                        "Aucun email ne correspond au filtre dans le dossier IMAP sur la période "
-                        "analysée (recherche dans le sujet et le corps)."
-                    ),
-                    "_filter": filter_label,
-                    "_imap_folder": self.imap_folder,
-                    "_days_back": imap_days,
-                }
+        if period:
+            project_data = analyzer.apply_period_filter(project_data, period)
+            total_in_period = sum(len(d.get("emails", [])) for d in project_data.values())
+            if total_in_period == 0:
+                return {"_error": f"Aucun email dans la période {period}."}
 
-            if period:
-                project_data = analyzer.apply_period_filter(project_data, period)
-                total_in_period = sum(len(d.get("emails", [])) for d in project_data.values())
-                if total_in_period == 0:
-                    return {"_error": f"Aucun email dans la période {period}."}
+        return analyzer.generate_intelligent_summary(
+            project_data,
+            assistant_provider=assistant_provider,
+            openai_model=openai_model,
+            gemini_model=gemini_model,
+            openai_max_tokens=openai_max_tokens,
+            openai_max_input_chars=openai_max_input_chars,
+            openai_body_chars=openai_body_chars,
+        )
 
-            return analyzer.generate_intelligent_summary(
-                project_data,
-                assistant_provider=assistant_provider,
-                openai_model=openai_model,
-                gemini_model=gemini_model,
-                openai_max_tokens=openai_max_tokens,
-                openai_max_input_chars=openai_max_input_chars,
-                openai_body_chars=openai_body_chars,
-            )
-        finally:
-            analyzer.disconnect()
+    def _fetch_gmail_project_data(
+        self,
+        analyzer: EmailProjectAnalyzer,
+        projects: List[str],
+        days_back: int,
+    ) -> Dict[str, Any]:
+        """Récupère les emails récents via Gmail OAuth (aucune connexion IMAP) et
+        les fait matcher par ``analyzer`` exactement comme le chemin IMAP —
+        réutilise ``check_project_relevance``/``extract_participants`` via
+        ``search_project_emails_from_list``, pas de logique de matching dupliquée.
+        Limite à 200 messages (une seule page Gmail API, pas de pagination) —
+        suffisant pour un scan périodique mais pas un historique exhaustif ;
+        limitation connue, à lever si besoin réel constaté.
+        """
+        from . import gmail_oauth
+
+        query = gmail_oauth.build_gmail_query("", days_back=days_back)
+        emails, token_refresh = gmail_oauth.fetch_emails(
+            self.gmail_connection.access_token_encrypted,
+            self.gmail_connection.refresh_token_encrypted,
+            self.gmail_connection.token_expiry,
+            query=query,
+            max_results=200,
+        )
+        if token_refresh:
+            self.last_gmail_token_refresh = token_refresh
+        return analyzer.search_project_emails_from_list(emails, projects)
 
     def process_delta(
         self,

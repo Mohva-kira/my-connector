@@ -96,7 +96,11 @@ def authenticate_bearer(db: Session, authorization: Optional[str]) -> Tuple["Use
 
 
 def processor_from_tenant(tenant: "Tenant") -> EmailProcessor:
-    pwd = ""
+    cache_dir = (os.environ.get("EMAIL_ANALYZER_CACHE_DIR") or ".").strip()
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"tenant_{tenant.id}.json")
+    max_deep_emails = int(os.environ.get("EMAIL_ANALYZER_MAX_DEEP_EMAILS", "20"))
+
     if tenant.imap_password_encrypted:
         try:
             pwd = decrypt_secret(tenant.imap_password_encrypted)
@@ -105,23 +109,32 @@ def processor_from_tenant(tenant: "Tenant") -> EmailProcessor:
                 status_code=500,
                 detail="Configuration IMAP : déchiffrement impossible (ENCRYPTION_KEY)",
             ) from e
+        port = tenant.imap_port if tenant.imap_port is not None else 993
+        return EmailProcessor(
+            email_address=tenant.imap_user or "",
+            password=pwd,
+            imap_server=tenant.imap_host or os.environ.get("IMAP_HOST", "mail.mediasoftci.net"),
+            port=port,
+            cache_file=cache_path,
+            max_deep_emails=max_deep_emails,
+            load_env=False,
+            imap_folder=tenant.imap_folder,
+            imap_use_ssl=tenant.imap_use_ssl,
+            use_env_fallback=False,
+        )
 
-    cache_dir = (os.environ.get("EMAIL_ANALYZER_CACHE_DIR") or ".").strip()
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_path = os.path.join(cache_dir, f"tenant_{tenant.id}.json")
-
-    port = tenant.imap_port if tenant.imap_port is not None else 993
-
+    # Pas d'IMAP configuré pour ce tenant : bascule sur Gmail OAuth si une
+    # connexion existe (Open Question #1 de progress-tracker.md). IMAP garde
+    # la priorité s'il est configuré (branche ci-dessus).
+    gmail_conn = next(
+        (c for c in (tenant.oauth_connections or []) if c.provider == "gmail"), None
+    )
     return EmailProcessor(
-        email_address=tenant.imap_user or "",
-        password=pwd,
-        imap_server=tenant.imap_host or os.environ.get("IMAP_HOST", "mail.mediasoftci.net"),
-        port=port,
         cache_file=cache_path,
-        max_deep_emails=int(os.environ.get("EMAIL_ANALYZER_MAX_DEEP_EMAILS", "20")),
+        max_deep_emails=max_deep_emails,
         load_env=False,
-        imap_folder=tenant.imap_folder,
-        imap_use_ssl=tenant.imap_use_ssl,
+        use_env_fallback=False,
+        gmail_connection=gmail_conn,
     )
 
 

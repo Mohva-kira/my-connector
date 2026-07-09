@@ -114,6 +114,12 @@ def _run_saas_sync(
             gemini_model=gemini_model,
             on_batch=on_batch,
         )
+        if proc.last_gmail_token_refresh:
+            # Commit isolé et immédiat : un rafraîchissement de token Gmail
+            # réussi côté Google ne doit pas être perdu si l'analyse échoue
+            # plus loin (voir email_analyzer/analyzer.py, _fetch_gmail_project_data).
+            _persist_gmail_token_refresh(proc.gmail_connection, proc.last_gmail_token_refresh)
+            db.commit()
         if isinstance(result, dict) and result.get("_error"):
             db.rollback()
             raise RuntimeError(str(result["_error"]))
@@ -122,6 +128,16 @@ def _run_saas_sync(
         return result
     finally:
         db.close()
+
+
+def _persist_gmail_token_refresh(connection: Any, token_refresh: Dict[str, Any]) -> None:
+    """Persiste un access token Gmail rafraîchi (voir gmail_oauth._get_valid_access_token) —
+    même logique de chiffrement que le callback OAuth initial (api/routers/oauth.py)."""
+    from email_analyzer.encryption import encrypt_secret
+
+    connection.access_token_encrypted = encrypt_secret(token_refresh["access_token"])
+    if token_refresh.get("expiry"):
+        connection.token_expiry = token_refresh["expiry"]
 
 
 def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[str, Any]:

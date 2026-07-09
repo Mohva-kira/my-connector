@@ -586,6 +586,24 @@ class EmailProjectAnalyzer:
             logging.error("Erreur recherche: %s", e)
             return {}
 
+    def search_project_emails_from_list(self, emails: List[Dict], project_filters: List[str]) -> Dict:
+        """Variante de `search_project_emails` pour une source déjà normalisée
+        et déjà récupérée (pas d'IMAP) — ex. emails Gmail
+        (`gmail_oauth.fetch_emails`, même format de dict : `subject/from/to/
+        date/body/normalized_text`). Réutilise le même matching par projet
+        (`check_project_relevance`/`extract_participants`) que le chemin IMAP,
+        sans connexion ni cache IMAP."""
+        project_data: Dict = defaultdict(
+            lambda: {"emails": [], "participants": set(), "keywords": defaultdict(int), "dates": []}
+        )
+        for email_content in emails:
+            matching_projects = self.check_project_relevance(email_content, project_filters)
+            for project in matching_projects:
+                project_data[project]["emails"].append(email_content)
+                project_data[project]["dates"].append(email_content.get("date"))
+                self.extract_participants(email_content, project_data[project]["participants"])
+        return dict(project_data)
+
     def _emit_batch_progress(
         self,
         on_batch: Callable[[int, int, Dict[str, Any]], None],

@@ -695,6 +695,75 @@ Update this file after every meaningful implementation change.
     distingués). `python -m py_compile` OK. Processus/cluster de test
     arrêtés et supprimés après vérification.
 
+- **Unit 15 — Fermeture de l'Open Question #1 : Gmail OAuth branché sur `/api/analyze`**
+  (2026-07-09) :
+  - Contexte : Unit 1 (2026-05-04) avait livré le flux OAuth Gmail
+    (`gmail_oauth.py`, `api/routers/oauth.py`) mais `EmailProcessor`/
+    `processor_from_tenant` restaient strictement IMAP — un tenant Gmail-only
+    n'avait aucun moyen de déclencher une analyse.
+  - Découverte exploitée : le format d'email normalisé est déjà identique
+    entre IMAP (`project_mail.py`, `extract_email_content`) et Gmail
+    (`gmail_oauth._normalize_message`) — mêmes clés `subject/from/to/date/
+    body/normalized_text`.
+  - `email_analyzer/project_mail.py` : nouvelle méthode
+    `EmailProjectAnalyzer.search_project_emails_from_list(emails,
+    project_filters)` — même matching que `search_project_emails`
+    (réutilise `check_project_relevance`/`extract_participants`, aucune
+    logique dupliquée), mais sur une liste déjà récupérée au lieu d'itérer
+    une connexion IMAP.
+  - `email_analyzer/analyzer.py` : `EmailProcessor.__init__` gagne
+    `gmail_connection` (objet `OAuthConnection`, duck-typed) et
+    `use_env_fallback` (bool, défaut `True`). `process_latest_emails`
+    bascule sur `_fetch_gmail_project_data` (nouvelle méthode privée,
+    `gmail_oauth.fetch_emails` + `search_project_emails_from_list`, plafond
+    200 messages/une page — pas de pagination Gmail, limitation connue) quand
+    aucun IMAP n'est configuré mais qu'une connexion Gmail l'est ; IMAP garde
+    la priorité si les deux sont présents. Reste inchangé pour `process_delta`
+    (Fast-Track) et `fetch_last_n_emails_for_chat` (`/api/chat`) —
+    explicitement hors périmètre de cette unité, même pattern à répliquer
+    plus tard si besoin confirmé.
+  - **Bug latent trouvé et corrigé en cours de route** : `EmailProcessor.
+    __init__` retombait sur `os.environ.get("IMAP_USER"/"IMAP_PASSWORD")`
+    même pour un processeur construit par `processor_from_tenant` (mode
+    SaaS, `load_env=False`) dès lors que ces variables étaient définies
+    globalement dans le process (cas réel de cet environnement de dev via
+    le `.env` racine, chargé par `api/main.py`). Un tenant SaaS sans IMAP
+    configuré aurait donc silencieusement analysé la boîte IMAP globale du
+    serveur au lieu de basculer sur Gmail ou de renvoyer une erreur claire —
+    risque de fuite de données inter-tenant. Corrigé par le nouveau flag
+    `use_env_fallback=False`, mis systématiquement par `processor_from_tenant`
+    (les deux branches IMAP et Gmail) ; le mode legacy (`_run_legacy_sync`,
+    pas de notion de tenant) garde `use_env_fallback=True` par défaut,
+    comportement inchangé.
+  - `email_analyzer/saas_logic.py` : `processor_from_tenant` restructuré —
+    branche IMAP inchangée si `imap_password_encrypted` présent, sinon
+    cherche une `OAuthConnection(provider="gmail")` via la relation déjà
+    existante `tenant.oauth_connections` (aucune requête DB supplémentaire
+    à écrire).
+  - `email_analyzer/analysis_tasks.py` : `_run_saas_sync` persiste
+    immédiatement (commit isolé, séparé du commit de fin de job) un
+    éventuel `proc.last_gmail_token_refresh` via la nouvelle fonction
+    `_persist_gmail_token_refresh` — un rafraîchissement de token réussi
+    côté Google ne doit pas être perdu si l'analyse échoue plus loin.
+  - Vérifié : `python -m py_compile` sur les 4 fichiers. Trois scénarios
+    testés en direct Python avec `gmail_oauth.fetch_emails` mocké (pas de
+    compte Gmail réel disponible dans cet environnement) : (1) tenant
+    Gmail-only → email correspondant bien matché, `nb_emails == 1`,
+    `token_refresh` capturé ; (2) tenant avec IMAP **et** Gmail configurés
+    → IMAP prioritaire, `gmail_oauth.fetch_emails` jamais appelé ; (3)
+    tenant sans aucune source → message d'erreur original inchangé. Puis
+    vérification bout-en-bout en conditions réelles (cluster Postgres
+    jetable dédié, `alembic upgrade head` 001→003, tenant + `OAuthConnection`
+    Gmail réels insérés en base, `_run_saas_sync` appelé directement avec
+    `fetch_emails` mocké) : résultat d'analyse correct **et** le nouveau
+    token d'accès rafraîchi relu depuis Postgres après coup (déchiffré avec
+    `ENCRYPTION_KEY`, confirmé identique à la valeur mockée). Environnement
+    jetable démonté après vérification.
+  - Non vérifié : échange réel avec un compte Gmail (aucun compte OAuth
+    disponible dans cet environnement, comme pour Unit 1) ; pagination
+    au-delà de 200 messages (non implémentée, limitation documentée
+    ci-dessus).
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -726,7 +795,10 @@ Update this file after every meaningful implementation change.
 
 ## Open Questions
 
-1. **Gmail OAuth analysis integration**: The `/api/analyze` endpoint still uses IMAP. Unit 2.5 should wire `gmail_oauth.fetch_emails()` into `EmailProcessor` so Gmail OAuth connections are used automatically when IMAP is not configured.
+1. ~~**Gmail OAuth analysis integration**~~ — **Fermée par Unit 15** (2026-07-09) :
+   `processor_from_tenant` bascule automatiquement sur Gmail OAuth quand
+   IMAP n'est pas configuré. `process_delta` (Fast-Track) et
+   `fetch_last_n_emails_for_chat` restent IMAP-only (hors périmètre d'Unit 15).
 2. **Billing**: CinetPay (XOF) is already integrated. Architecture.md does not specify a payment provider. CinetPay retained as-is.
 
 ## Architecture Decisions
