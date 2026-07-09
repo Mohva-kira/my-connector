@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from email_analyzer.db.models import Project, ProjectSummary, SuggestedAction
+from email_analyzer.db.models import Email, Project, ProjectSummary, SuggestedAction
 from email_analyzer.db.session import get_db
 from email_analyzer.saas_logic import authenticate_bearer, saas_enabled
 
@@ -38,6 +38,16 @@ class SuggestedActionOut(BaseModel):
     created_at: datetime
 
 
+class EmailOut(BaseModel):
+    id: uuid.UUID
+    subject: Optional[str]
+    received_at: Optional[datetime]
+    recipient_status: str
+    # 0-100, voir ai_intelligent.score_email_importance ; NULL pour les emails
+    # persistés avant l'ajout de cette colonne (migration 004).
+    importance_score: Optional[int]
+
+
 class ProjectOut(BaseModel):
     id: uuid.UUID
     name: str
@@ -54,6 +64,10 @@ class ProjectOut(BaseModel):
 
 class ProjectDetailOut(ProjectOut):
     suggested_actions: List[SuggestedActionOut]
+    # Les 10 emails les plus importants du projet (tri par importance_score,
+    # cf. progress-tracker.md Unit 19) — permet un tri côté frontend sans
+    # endpoint de liste d'emails paginé séparé (hors périmètre de cette unité).
+    top_emails: List[EmailOut]
 
 
 def _require_saas() -> None:
@@ -140,6 +154,13 @@ def get_project(
         .order_by(SuggestedAction.created_at.desc())
         .all()
     )
+    top_emails = (
+        db.query(Email)
+        .filter(Email.project_id == project.id)
+        .order_by(Email.importance_score.desc().nullslast(), Email.received_at.desc())
+        .limit(10)
+        .all()
+    )
     base = _project_out(db, project, project.summary)
     return ProjectDetailOut(
         **base.model_dump(),
@@ -152,5 +173,15 @@ def get_project(
                 created_at=a.created_at,
             )
             for a in actions
+        ],
+        top_emails=[
+            EmailOut(
+                id=e.id,
+                subject=e.subject,
+                received_at=e.received_at,
+                recipient_status=e.recipient_status,
+                importance_score=e.importance_score,
+            )
+            for e in top_emails
         ],
     )

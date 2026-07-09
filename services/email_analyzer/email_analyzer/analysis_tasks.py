@@ -157,6 +157,7 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
     d'emails reçus depuis son dernier rafraîchissement (architecture.md,
     Process 2), et persiste le résultat (Unit 10 : Project/Email/ProjectSummary/
     SuggestedAction)."""
+    from email_analyzer.ai_intelligent import get_shared_analyzer
     from email_analyzer.db.models import (
         Email,
         Project,
@@ -200,6 +201,15 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
         refreshed_at = datetime.now(timezone.utc)
         tenant_email = (tenant.imap_user or "").lower()
 
+        # Niveau de risque déjà calculé par le même appel LLM (delta["summary"]),
+        # utilisé comme plancher du score d'importance par email — voir
+        # ai_intelligent.score_email_importance. Extrait avant la boucle : le
+        # même niveau de risque (projet) s'applique à tous les emails du delta.
+        risk_level_for_scoring = (
+            (delta.get("summary") or {}).get("évaluation_risque") or {}
+        ).get("niveau_risque")
+        shared_analyzer = get_shared_analyzer()
+
         persisted = 0
         for email_content in new_emails:
             message_id = (email_content.get("message_id") or "").strip()
@@ -221,6 +231,9 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
                 if tenant_email and tenant_email not in to_field
                 else RecipientStatus.direct_to.value
             )
+            importance_score = shared_analyzer.score_email_importance(
+                email_content, recipient_status=recipient_status, niveau_risque=risk_level_for_scoring
+            )
             db.add(
                 Email(
                     tenant_id=tenant.id,
@@ -230,6 +243,7 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
                     subject=email_content.get("subject"),
                     body_encrypted=email_content.get("body"),
                     received_at=parse_email_datetime(email_content.get("date")),
+                    importance_score=importance_score,
                 )
             )
             persisted += 1

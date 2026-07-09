@@ -3,9 +3,18 @@
 import logging
 import re
 import threading
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .config import use_local_ml
+
+# Plancher ajouté au score de règles selon le niveau de risque déjà calculé
+# par calculate_risk_score pour le projet (signal LLM/heuristique existant,
+# aucun appel supplémentaire) — voir EmailIntelligentAnalyzer.score_email_importance.
+_IMPORTANCE_RISK_LEVEL_FLOOR = {
+    "CRITIQUE": 40,
+    "MODÉRÉ": 20,
+    "FAIBLE": 0,
+}
 
 
 class EmailIntelligentAnalyzer:
@@ -486,6 +495,40 @@ class EmailIntelligentAnalyzer:
 
         critical_emails.sort(key=lambda x: x["criticality_score"], reverse=True)
         return critical_emails[:5]
+
+    def score_email_importance(
+        self,
+        email_data: Dict,
+        recipient_status: Optional[str] = None,
+        niveau_risque: Optional[str] = None,
+    ) -> int:
+        """Score hybride d'importance 0-100 pour UN email, calculé au moment
+        de la persistance (Fast-Track / sync planifiée — voir
+        analysis_tasks.py) :
+
+        - Règles : mêmes mots-clés pondérés que `identify_critical_emails`
+          (`self.risk_keywords`), plafonnés puis mis à l'échelle (60 pts max) ;
+          pas de nouvelle table de poids.
+        - Adressage : +15 si l'email est adressé directement (``recipient_status
+          == "direct_to"``), 0 si en copie (``"cc"``).
+        - IA : plancher dérivé du `niveau_risque` déjà produit par l'appel LLM
+          du même cycle de résumé (`_IMPORTANCE_RISK_LEVEL_FLOOR`) — pas
+          d'appel LLM par email, coût/latence non maîtrisés à cette échelle.
+
+        Volontairement pas de nouvel appel réseau : les trois signaux
+        proviennent de calculs déjà faits ailleurs dans le pipeline.
+        """
+        text = email_data.get("normalized_text")
+        if not text:
+            text = f"{email_data.get('subject', '')} {email_data.get('body', '')}".lower()
+
+        keyword_score = sum(weight for keyword, weight in self.risk_keywords.items() if keyword in text)
+        rule_score = min(60, keyword_score * 3)
+
+        recipient_bonus = 15 if recipient_status == "direct_to" else 0
+        ai_floor = _IMPORTANCE_RISK_LEVEL_FLOOR.get(niveau_risque or "", 0)
+
+        return min(100, rule_score + recipient_bonus + ai_floor)
 
 
 _SHARED_ANALYZER: "EmailIntelligentAnalyzer | None" = None

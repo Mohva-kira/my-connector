@@ -916,6 +916,76 @@ Update this file after every meaningful implementation change.
     process worker arq simultanés (dédup `unique=True`, documentée mais pas
     testée avec 2 process réels).
 
+- **Unit 19 — Moteur de scoring d'importance par email (rules + AI hybride)** (2026-07-09) :
+  - Contexte : Next Up historique « Unit 5 ». Dernière unité du plan
+    d'implémentation autonome validé cette session (Units 13-19).
+  - Découverte de réutilisation : `ai_intelligent.py` avait déjà un
+    dictionnaire de mots-clés pondérés (`risk_keywords`) et une méthode
+    `identify_critical_emails` flaggant des emails individuels par
+    mots-clés urgents — mais rien n'était persisté au niveau d'un email
+    individuel (`Email`, Unit 10, n'avait pas de colonne de score).
+  - **Décision (moindre risque)** : pas de nouvel appel LLM par email (coût/
+    latence non maîtrisés à l'échelle d'une sync planifiée batch, cf. Unit
+    18) — score hybride calculé au moment de la persistance à partir de
+    signaux déjà disponibles sans coût réseau supplémentaire :
+    - **Règles** : mêmes `risk_keywords` que `identify_critical_emails`,
+      somme pondérée plafonnée puis mise à l'échelle (60 pts max).
+    - **Adressage** : +15 si `recipient_status == "direct_to"`, 0 si `"cc"`
+      (signal déjà calculé par `_run_fasttrack_sync`, aucun calcul
+      supplémentaire).
+    - **IA** : plancher (`_IMPORTANCE_RISK_LEVEL_FLOOR` : CRITIQUE=40,
+      MODÉRÉ=20, FAIBLE=0) dérivé du `niveau_risque` déjà produit par
+      l'appel LLM du même cycle de résumé (extrait de `delta["summary"]`
+      avant la boucle de persistance des emails, un seul niveau de risque
+      pour tout le lot).
+    - Résultat borné `[0, 100]`.
+  - `alembic/versions/004_email_importance_score.py` (nouveau) : ajoute
+    `emails.importance_score` (`Integer`, nullable — les lignes existantes
+    ne sont pas rétro-calculées), `downgrade()` symétrique. Suit le pattern
+    de `003_projects.py`.
+  - `email_analyzer/db/models.py` : colonne `Email.importance_score`.
+  - `email_analyzer/ai_intelligent.py` : nouvelle méthode
+    `EmailIntelligentAnalyzer.score_email_importance(email_data,
+    recipient_status, niveau_risque)` + constante module
+    `_IMPORTANCE_RISK_LEVEL_FLOOR`.
+  - `email_analyzer/analysis_tasks.py` : `_run_fasttrack_sync` extrait
+    `risk_level_for_scoring` de `delta["summary"]` avant la boucle, appelle
+    `get_shared_analyzer().score_email_importance(...)` pour chaque email
+    persisté et passe le résultat à `Email(..., importance_score=...)`.
+    Couvre à la fois le Fast-Track manuel (carte projet) et la sync
+    planifiée (Unit 18, qui appelle la même fonction) — un seul point
+    d'écriture, pas de logique dupliquée.
+  - `api/routers/projects.py` : nouveau schéma `EmailOut`
+    (`id/subject/received_at/recipient_status/importance_score`) ;
+    `ProjectDetailOut.top_emails` — les 10 emails du projet triés par
+    `importance_score` décroissant (`NULLS LAST` pour les emails persistés
+    avant cette unité) puis `received_at` décroissant. Pas de nouvel
+    endpoint de liste d'emails paginé (hors périmètre, `top_emails` suffit
+    à « permettre un tri côté frontend » comme demandé) ; aucun changement
+    frontend dans cette unité (le tri/affichage réel de `top_emails` reste
+    à construire si un besoin UI se confirme).
+  - Vérifié : `python -m py_compile` sur les 4 fichiers Python
+    modifiés/créés. `score_email_importance` testé directement sur des cas
+    connus : email urgent + `direct_to` + `CRITIQUE` → score 88 (`≥ 80`
+    attendu) ; email neutre + `cc` + `FAIBLE` → score 0 ; cas extrême
+    (tous les mots-clés de risque présents) → plafonné à 100, jamais
+    au-delà. Vérification bout-en-bout en conditions réelles (cluster
+    Postgres jetable dédié) : `alembic upgrade head` (001→004) propre,
+    `downgrade -1` puis `upgrade head` round-trip confirmant la colonne
+    disparaît puis réapparaît ; `_run_fasttrack_sync` appelé avec
+    `process_delta` mocké (2 emails factices, un urgent+direct_to, un
+    neutre+cc) → les deux persistés avec le bon score, le score le plus
+    élevé correspondant bien à l'email urgent/direct_to attendu. Puis test
+    HTTP réel (`uvicorn`) : `POST /api/auth/register` → `POST
+    /api/projects` → 3 `Email` seedées directement en base (scores 90, 10,
+    `NULL`) → `GET /api/projects/{id}` renvoie `top_emails` correctement
+    trié (90, puis 10, puis `NULL` en dernier). Environnement jetable
+    démonté après vérification. `tsc --noEmit` toujours sans erreur côté
+    frontend (aucun changement frontend dans cette unité).
+  - Non vérifié : pertinence du score sur un vrai corpus d'emails clients
+    (les poids/seuils sont un premier jet raisonnable, pas calibrés sur des
+    données réelles) ; rendu/tri réel dans l'UI (pas encore construit).
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -939,11 +1009,16 @@ Update this file after every meaningful implementation change.
   un rafraîchissement Fast-Track et confirmer que seule la carte concernée
   pulse — voir l'entrée Unit 12 ci-dessus pour ce qui a et n'a pas pu être
   vérifié dans cette session (pas de navigateur disponible).
-- **Moteur de scoring d'importance par email** (rules + AI hybride,
-  réutilisant `ai_intelligent.py`) — prochaine unité (Unit 19).
 - ~~Outlook (Microsoft Graph) OAuth2 Integration~~ — **Fermée par Unit 17**
   (2026-07-09).
 - ~~Sync planifiée 2x/jour via `arq` cron~~ — **Fermée par Unit 18** (2026-07-09).
+- ~~Moteur de scoring d'importance par email~~ — **Fermée par Unit 19**
+  (2026-07-09). Reste ouvert : calibration des poids sur un vrai corpus,
+  affichage/tri de `top_emails` côté frontend.
+- **Doc d'implémentation en attente d'une session dédiée** : les 6 fichiers
+  `context/*.md` restent incohérents entre eux et avec le code (voir entrée
+  Unit 13 ci-dessus) — non traité par décision utilisateur explicite cette
+  session, à reprendre séparément.
 
 ## Open Questions
 

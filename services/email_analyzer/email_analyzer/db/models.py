@@ -264,6 +264,9 @@ class Email(Base):
     subject: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     body_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     received_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Score hybride 0-100 (règles + AI, voir ai_intelligent.score_email_importance) ;
+    # NULL pour les emails persistés avant cette colonne (non rétro-calculé).
+    importance_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     project: Mapped[Optional["Project"]] = relationship(back_populates="emails")
