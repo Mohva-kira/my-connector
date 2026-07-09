@@ -764,6 +764,39 @@ Update this file after every meaningful implementation change.
     au-delà de 200 messages (non implémentée, limitation documentée
     ci-dessus).
 
+- **Unit 16 — Frontend : UI de connexion des comptes (Gmail + Outlook)** (2026-07-09) :
+  - Contexte : recherche sur `frontend/src/` avant implémentation (`grep -rl
+    oauth`) — **aucune UI n'appelait `/api/oauth/*`**, ni pour Gmail (livré
+    backend-only en Unit 1, 2026-05-04) ni a fortiori pour Outlook (pas
+    encore implémenté à ce stade, voir Unit 17 ci-dessous). Les deux
+    intégrations OAuth étaient inutilisables depuis l'app. Un seul
+    composant provider-agnostic couvre les deux plutôt que de dupliquer la
+    même UI à quelques unités d'écart.
+  - `frontend/src/ConnectedAccounts.tsx` (nouveau) : section « Comptes
+    connectés » — liste via `GET /api/oauth/connections` (déjà
+    provider-agnostic côté API), boutons « Connecter Gmail »/« Connecter
+    Outlook » (`GET /api/oauth/{provider}/authorize` puis redirection
+    complète de la page vers l'URL retournée — nécessaire pour l'écran de
+    consentement Google/Microsoft), lecture unique du retour de callback
+    (`?oauth=success|error&provider=...`, déjà émis par
+    `api/routers/oauth.py`) avec nettoyage de l'URL via
+    `history.replaceState` pour ne pas le réafficher à un rafraîchissement,
+    déconnexion via `DELETE /api/oauth/connections/{id}`. Réutilise
+    `apiFetch`/le pattern `parseJson`/gestion d'erreur déjà en place dans
+    `SaasPanels.tsx` (aucune nouvelle abstraction réseau).
+  - `frontend/src/pages/SettingsPage.tsx` : `<ConnectedAccounts />` monté
+    entre la section IMAP et la section Facturation.
+  - Vérifié : `tsc --noEmit` sans erreur ; `vite build` transforme les 49
+    modules sans erreur (échec ensuite limité au même `EACCES` sur `dist/`
+    pré-existant appartenant à `root`, sans rapport, déjà documenté dans les
+    unités précédentes).
+  - Non vérifié : rendu visuel réel dans un navigateur (Chromium système
+    crashe au lancement dans cette session, cf. Units 7/12) ; le bouton
+    « Connecter Outlook » pointe vers un endpoint qui n'existe pas encore à
+    ce stade de la session (`/api/oauth/outlook/authorize`, livré par
+    Unit 17 juste après) — cohérent une fois les deux unités appliquées
+    ensemble, comme prévu par le plan.
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché

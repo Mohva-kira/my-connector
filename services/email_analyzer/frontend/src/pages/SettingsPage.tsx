@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { getAccessToken, setAccessToken } from "../apiClient";
 import AppShell from "../components/AppShell";
+import ConnectedAccounts from "../ConnectedAccounts";
 import { BillingModal, ImapSettingsForm, useSaasSession } from "../SaasPanels";
 
 export default function SettingsPage({
@@ -109,6 +110,8 @@ export default function SettingsPage({
             onSaved={() => setSessionTick((s) => s + 1)}
           />
         </section>
+
+        <ConnectedAccounts />
 
         <section className="rounded-2xl border border-border-default bg-surface p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-text-primary">Facturation</h2>
