@@ -797,6 +797,72 @@ Update this file after every meaningful implementation change.
     Unit 17 juste après) — cohérent une fois les deux unités appliquées
     ensemble, comme prévu par le plan.
 
+- **Unit 17 — Outlook OAuth2 (Microsoft Graph), miroir de Gmail** (2026-07-09) :
+  - Contexte : Next Up historique « Unit 2 » — `OAuthConnection.provider`
+    était déjà générique (pas de contrainte `gmail`-only en base), donc un
+    nouveau provider plutôt qu'un nouveau concept.
+  - **Décision (moindre risque)** : flux OAuth2 + Microsoft Graph en appels
+    HTTP directs via `httpx` (déjà une dépendance du projet), sans ajouter
+    `msal` — les endpoints Microsoft identity platform v2.0 et Graph sont de
+    l'OAuth2/OIDC et du REST standard.
+  - `email_analyzer/outlook_oauth.py` (nouveau) : même forme que
+    `gmail_oauth.py` — `build_authorization_url`, `exchange_code_for_tokens`,
+    `refresh_access_token` (gère la rotation du refresh_token, propre à
+    Microsoft — Google ne la fait pas), `get_connected_email`,
+    `build_outlook_filter` (équivalent de `build_gmail_query`, un `$filter`
+    OData bornant par date), `fetch_emails`, `_normalize_message` (mêmes
+    clés de sortie que Gmail : `id/subject/from/to/date/body/
+    normalized_text` — réutilise `gmail_oauth._strip_html` pour le nettoyage
+    HTML plutôt que de dupliquer le regex).
+  - `api/routers/oauth.py` : `outlook_authorize`/`outlook_callback` ajoutés
+    au même router (`/api/oauth/outlook/...`), réutilisant
+    `_create_state_token`/`_decode_state_token` (déjà génériques).
+    **Refactor de réutilisation** : la logique d'upsert `OAuthConnection`
+    (dupliquée si copiée telle quelle) extraite en `_upsert_oauth_connection`
+    partagée par `gmail_callback` et `outlook_callback`. `delete_connection`
+    ne tentait déjà la révocation HTTP que si `provider == "gmail"` (code
+    existant, aucun changement nécessaire — tolérant par construction pour
+    un provider sans révocation implémentée).
+  - `email_analyzer/analyzer.py` : `EmailProcessor` gagne
+    `outlook_connection` (miroir de `gmail_connection`) et
+    `last_outlook_token_refresh` ; `process_latest_emails` ajoute la branche
+    Outlook (`_fetch_outlook_project_data`, même limitation connue que Gmail
+    — 200 messages, une page, pas de pagination) ; priorité IMAP > Gmail >
+    Outlook si plusieurs sources sont configurées (arbitraire côté
+    Gmail/Outlook faute de signal pour départager, documenté en commentaire).
+  - `email_analyzer/saas_logic.py` : `processor_from_tenant` cherche aussi
+    une `OAuthConnection(provider="outlook")` en repli.
+  - `email_analyzer/analysis_tasks.py` : `_persist_gmail_token_refresh`
+    renommée `_persist_oauth_token_refresh` (généralisée aux deux
+    providers) et gère en plus la rotation de refresh_token Outlook.
+  - `.env.example` (racine) : section Outlook OAuth2 (`OUTLOOK_CLIENT_ID`,
+    `OUTLOOK_CLIENT_SECRET`) avec instructions Azure AD.
+  - `requirements.txt` : aucun ajout (httpx déjà présent).
+  - Vérifié : `python -m py_compile` sur les 5 fichiers modifiés/créés.
+    `build_authorization_url` produit une URL statiquement valide (`client_id`,
+    `redirect_uri`, `state`, scopes Graph présents, encodage correct).
+    `_normalize_message` testé directement : HTML correctement dépouillé
+    (même comportement que `gmail_oauth._strip_html`), plusieurs
+    destinataires bien joints. Deux scénarios `process_latest_emails` testés
+    avec `outlook_oauth.fetch_emails` mocké (pas de compte Microsoft réel
+    disponible) : (1) tenant Outlook-only → email correspondant bien matché,
+    `token_refresh` capturé ; (2) tenant avec Gmail **et** Outlook connectés
+    → Gmail prioritaire, `outlook_oauth.fetch_emails` jamais appelé. Puis
+    vérification HTTP réelle bout-en-bout (cluster Postgres jetable dédié,
+    `alembic upgrade head`, `uvicorn` réel, `OUTLOOK_CLIENT_ID`/`SECRET` de
+    test) : `POST /api/auth/register` → `GET /api/oauth/outlook/authorize`
+    (200, URL bien formée avec le bon state signé) → `GET
+    /api/oauth/connections` (200, `[]`) → `GET /api/oauth/outlook/callback`
+    avec `error=access_denied` et sans `code`/`state` → redirection `307`
+    vers `/settings?oauth=error&provider=outlook` dans les deux cas.
+    Environnement jetable démonté après vérification. `tsc --noEmit` toujours
+    sans erreur côté frontend (aucun changement frontend dans cette unité,
+    `ConnectedAccounts.tsx` d'Unit 16 pointe désormais vers un endpoint qui
+    existe réellement).
+  - Non vérifié : échange réel avec un compte Microsoft/Azure AD (aucun
+    compte disponible dans cet environnement, comme pour Gmail) ; la
+    rotation effective du refresh_token Outlook en conditions réelles.
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -820,11 +886,14 @@ Update this file after every meaningful implementation change.
   un rafraîchissement Fast-Track et confirmer que seule la carte concernée
   pulse — voir l'entrée Unit 12 ci-dessus pour ce qui a et n'a pas pu être
   vérifié dans cette session (pas de navigateur disponible).
-- **Unit 4 — APScheduler / Celery batch processing** (2x/day email sync job,
-  replacing BullMQ since stack is Python) — débloqué maintenant qu'Unit 11
-  écrit réellement dans les tables Unit 10.
-- **Unit 2 — Outlook (Microsoft Graph) OAuth2 Integration**: same pattern as Gmail, using Microsoft Identity Platform
-- **Unit 5 — Email importance scoring engine** (rules + AI hybrid using existing LLM integration)
+- **Sync planifiée 2x/jour via `arq` cron** (remplace la mention historique
+  APScheduler/Celery — stack réelle = `arq`) — débloqué maintenant qu'Unit 11
+  écrit réellement dans les tables Unit 10. Prochaine unité (Unit 18).
+- **Moteur de scoring d'importance par email** (rules + AI hybride,
+  réutilisant `ai_intelligent.py`) — prochaine unité après la sync planifiée
+  (Unit 19).
+- ~~Outlook (Microsoft Graph) OAuth2 Integration~~ — **Fermée par Unit 17**
+  (2026-07-09).
 
 ## Open Questions
 

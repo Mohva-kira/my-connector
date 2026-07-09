@@ -123,18 +123,20 @@ def processor_from_tenant(tenant: "Tenant") -> EmailProcessor:
             use_env_fallback=False,
         )
 
-    # Pas d'IMAP configuré pour ce tenant : bascule sur Gmail OAuth si une
-    # connexion existe (Open Question #1 de progress-tracker.md). IMAP garde
-    # la priorité s'il est configuré (branche ci-dessus).
-    gmail_conn = next(
-        (c for c in (tenant.oauth_connections or []) if c.provider == "gmail"), None
-    )
+    # Pas d'IMAP configuré pour ce tenant : bascule sur Gmail ou Outlook OAuth
+    # si une connexion existe (Open Question #1 de progress-tracker.md ;
+    # EmailProcessor donne la priorité à Gmail si les deux sont connectés).
+    # IMAP garde la priorité s'il est configuré (branche ci-dessus).
+    connections = tenant.oauth_connections or []
+    gmail_conn = next((c for c in connections if c.provider == "gmail"), None)
+    outlook_conn = next((c for c in connections if c.provider == "outlook"), None)
     return EmailProcessor(
         cache_file=cache_path,
         max_deep_emails=max_deep_emails,
         load_env=False,
         use_env_fallback=False,
         gmail_connection=gmail_conn,
+        outlook_connection=outlook_conn,
     )
 
 

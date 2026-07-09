@@ -38,6 +38,7 @@ class EmailProcessor:
         imap_folder: Optional[str] = None,
         imap_use_ssl: Optional[bool] = None,
         gmail_connection: Optional[Any] = None,
+        outlook_connection: Optional[Any] = None,
         use_env_fallback: bool = True,
     ):
         if load_env:
@@ -55,10 +56,14 @@ class EmailProcessor:
         self.password = password or (
             os.environ.get("IMAP_PASSWORD") if use_env_fallback else None
         )
-        # Connexion OAuth Gmail (objet OAuthConnection), utilisée en repli
-        # quand aucun IMAP n'est configuré — voir process_latest_emails.
+        # Connexions OAuth (objets OAuthConnection), utilisées en repli quand
+        # aucun IMAP n'est configuré — voir process_latest_emails. Gmail est
+        # prioritaire sur Outlook si les deux sont connectés (choix arbitraire,
+        # pas de signal pour départager ; à revisiter si ça devient un vrai cas).
         self.gmail_connection = gmail_connection
+        self.outlook_connection = outlook_connection
         self.last_gmail_token_refresh: Optional[Dict[str, Any]] = None
+        self.last_outlook_token_refresh: Optional[Dict[str, Any]] = None
         self.imap_server = imap_server or os.environ.get("IMAP_HOST", "mail.mediasoftci.net")
         self.port = int(port or os.environ.get("IMAP_PORT", "993"))
         self.cache_file = cache_file or os.environ.get(
@@ -102,13 +107,16 @@ class EmailProcessor:
             lot lorsque le nombre d'emails candidats dépasse le seuil de chunking. Ignoré
             sur le chemin Gmail (pas de notion de lot, un seul appel API).
 
-        Si aucun identifiant IMAP n'est configuré mais qu'une connexion Gmail OAuth
-        l'est (``self.gmail_connection``), bascule automatiquement sur l'API Gmail
-        (voir Open Question #1 de progress-tracker.md / ``saas_logic.processor_from_tenant``).
+        Si aucun identifiant IMAP n'est configuré mais qu'une connexion Gmail ou
+        Outlook OAuth l'est (``self.gmail_connection``/``self.outlook_connection``),
+        bascule automatiquement sur l'API correspondante (Gmail prioritaire si les
+        deux sont connectés) — voir Open Question #1 de progress-tracker.md /
+        ``saas_logic.processor_from_tenant``.
         """
         has_imap = bool(self.email_address and self.password)
         use_gmail = not has_imap and self.gmail_connection is not None
-        if not has_imap and not use_gmail:
+        use_outlook = not has_imap and not use_gmail and self.outlook_connection is not None
+        if not has_imap and not use_gmail and not use_outlook:
             return {
                 "_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD).",
             }
@@ -143,6 +151,13 @@ class EmailProcessor:
             except Exception as exc:
                 logging.exception("Échec de la récupération Gmail")
                 return {"_error": f"Échec de la récupération Gmail : {exc}"}
+        elif use_outlook:
+            source_label = "Outlook"
+            try:
+                project_data = self._fetch_outlook_project_data(analyzer, projects, imap_days)
+            except Exception as exc:
+                logging.exception("Échec de la récupération Outlook")
+                return {"_error": f"Échec de la récupération Outlook : {exc}"}
         else:
             if not analyzer.connect():
                 return {"_error": "Échec de la connexion IMAP."}
@@ -160,7 +175,7 @@ class EmailProcessor:
                     "analysée (recherche dans le sujet et le corps)."
                 ),
                 "_filter": filter_label,
-                "_imap_folder": self.imap_folder if not use_gmail else None,
+                "_imap_folder": self.imap_folder if not (use_gmail or use_outlook) else None,
                 "_days_back": imap_days,
             }
 
@@ -206,6 +221,28 @@ class EmailProcessor:
         )
         if token_refresh:
             self.last_gmail_token_refresh = token_refresh
+        return analyzer.search_project_emails_from_list(emails, projects)
+
+    def _fetch_outlook_project_data(
+        self,
+        analyzer: EmailProjectAnalyzer,
+        projects: List[str],
+        days_back: int,
+    ) -> Dict[str, Any]:
+        """Miroir de `_fetch_gmail_project_data` pour Outlook (Microsoft Graph) —
+        même limitation connue (200 messages, une seule page, pas de pagination)."""
+        from . import outlook_oauth
+
+        query = outlook_oauth.build_outlook_filter(days_back=days_back)
+        emails, token_refresh = outlook_oauth.fetch_emails(
+            self.outlook_connection.access_token_encrypted,
+            self.outlook_connection.refresh_token_encrypted,
+            self.outlook_connection.token_expiry,
+            query=query,
+            max_results=200,
+        )
+        if token_refresh:
+            self.last_outlook_token_refresh = token_refresh
         return analyzer.search_project_emails_from_list(emails, projects)
 
     def process_delta(
