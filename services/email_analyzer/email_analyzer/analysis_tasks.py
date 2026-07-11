@@ -56,22 +56,40 @@ _SENTIMENT_BY_RISK_LEVEL = {
 }
 
 
+def _parse_iso_date(date_iso: Optional[str]) -> Optional[datetime]:
+    """Parse une date ISO ("YYYY-MM-DD" ou datetime complet) renvoyée par le
+    LLM (llm.DeadlineItem.date_iso) en datetime tz-aware pour
+    SuggestedAction.deadline. Le LLM n'est pas garanti de renvoyer un format
+    valide — une valeur non parsable devient ``None`` plutôt qu'une exception
+    qui interromprait toute la persistance du Fast-Track."""
+    if not date_iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(date_iso)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _run_legacy_sync(
     job_id: str,
-    project: str,
+    project: Optional[str],
     period: Optional[str],
     days: int,
     assistant_provider: str,
     openai_model: str,
     gemini_model: str,
 ) -> Dict[str, Any]:
-    """Analyse en mode legacy (identifiants IMAP via .env, sans DB)."""
+    """Analyse en mode legacy (identifiants IMAP via .env, sans DB). ``project``
+    vide/``None`` déclenche le mode "sans filtre" (voir `EmailProcessor.
+    process_latest_emails`)."""
     from email_analyzer.analyzer import EmailProcessor
 
     proc = EmailProcessor(load_env=False)
     on_batch = lambda processed, total, partial: report_progress(job_id, processed, total, partial)
+    project_clean = project.strip() if project else None
     result = proc.process_latest_emails(
-        project.strip(),
+        project_clean or None,
         period=period,
         days=days,
         assistant_provider=assistant_provider,
@@ -87,7 +105,7 @@ def _run_legacy_sync(
 def _run_saas_sync(
     job_id: str,
     tenant_id: str,
-    project: str,
+    project: Optional[str],
     period: Optional[str],
     days: int,
     assistant_provider: str,
@@ -109,8 +127,9 @@ def _run_saas_sync(
             raise RuntimeError("Organisation introuvable")
         proc = processor_from_tenant(tenant)
         on_batch = lambda processed, total, partial: report_progress(job_id, processed, total, partial)
+        project_clean = project.strip() if project else None
         result = proc.process_latest_emails(
-            project.strip(),
+            project_clean or None,
             period=period,
             days=days,
             assistant_provider=assistant_provider,
@@ -152,11 +171,28 @@ def _persist_oauth_token_refresh(connection: Any, token_refresh: Dict[str, Any])
         connection.refresh_token_encrypted = encrypt_secret(token_refresh["refresh_token"])
 
 
-def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[str, Any]:
+def _run_fasttrack_sync(
+    job_id: str,
+    tenant_id: str,
+    project_id: str,
+    fallback_days: int = 30,
+    force_days: Optional[int] = None,
+) -> Dict[str, Any]:
     """Fast-Track : régénère le résumé d'UN projet à partir du seul delta
     d'emails reçus depuis son dernier rafraîchissement (architecture.md,
     Process 2), et persiste le résultat (Unit 10 : Project/Email/ProjectSummary/
-    SuggestedAction)."""
+    SuggestedAction).
+
+    ``fallback_days`` : fenêtre utilisée uniquement si le projet n'a jamais été
+    synchronisé (``since is None``) — 30 par défaut, 60 pour le cron
+    (``run_scheduled_sync``), 20 pour l'auto-sync au login
+    (``saas_logic.trigger_login_auto_sync``).
+
+    ``force_days`` : si fourni, ignore ``last_processed_email_timestamp`` et
+    force un rescan complet sur cette fenêtre — utilisé par le bouton
+    "chercher sur plus de jours" du frontend quand un premier sync ne trouve
+    rien (voir ``api/main.py::refresh_project``).
+    """
     from email_analyzer.ai_intelligent import get_shared_analyzer
     from email_analyzer.classification import ProjectRules, derive_tags, score_project_relevance
     from email_analyzer.db.models import (
@@ -191,10 +227,24 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
         summary_row = (
             db.query(ProjectSummary).filter(ProjectSummary.project_id == project.id).first()
         )
-        since = summary_row.last_processed_email_timestamp if summary_row else None
+        if force_days is not None:
+            since = None
+            effective_fallback_days = force_days
+        else:
+            since = summary_row.last_processed_email_timestamp if summary_row else None
+            effective_fallback_days = fallback_days
 
         proc = processor_from_tenant(tenant)
-        delta = proc.process_delta(project.name, since, rules_matrix=project.rules_matrix)
+        delta = proc.process_delta(
+            project.name,
+            since,
+            rules_matrix=project.rules_matrix,
+            fallback_days=effective_fallback_days,
+            # Persisté ci-dessous (ProjectSummary.structured_content) : seul
+            # ce chemin (Fast-Track/cron) écrit en base, contrairement à
+            # /api/analyze — voir analyzer.py::process_delta.
+            include_structured=True,
+        )
         if isinstance(delta, dict) and delta.get("_error"):
             raise RuntimeError(str(delta["_error"]))
 
@@ -263,6 +313,7 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
 
         content = summary_row.content
         sentiment = summary_row.sentiment
+        tags_reference: list = []
         if new_emails:
             summary_block = delta.get("summary") or {}
             content = (
@@ -270,22 +321,67 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
                 or summary_block.get("résumé_automatique")
                 or content
             )
+            tags_reference = summary_block.get("tags_reference") or []
             risk = summary_block.get("évaluation_risque") or {}
             risk_level = risk.get("niveau_risque")
             sentiment = _SENTIMENT_BY_RISK_LEVEL.get(risk_level, "awaiting_feedback")
             summary_row.content = content
             summary_row.sentiment = sentiment
 
+            # Sortie LLM structurée (llm.ProjectSummaryLLM, rfc-email-pipeline-v2.md
+            # §11) : additive, jamais bloquante — une erreur d'extraction (clé
+            # "_structured_erreur") laisse structured_content à None plutôt que
+            # d'interrompre la persistance du reste du résumé.
+            structured_content = summary_block.get("structured_content")
+            summary_row.structured_content = structured_content
+            summary_row.llm_risk_level = (
+                (structured_content or {}).get("llm_risk_level")
+            )
+
             db.query(SuggestedAction).filter(SuggestedAction.project_id == project.id).delete()
-            recommendation = risk.get("recommandation")
-            if recommendation and risk_level not in (None, "FAIBLE"):
-                db.add(
-                    SuggestedAction(
-                        project_id=project.id,
-                        description=recommendation,
-                        status=SuggestedActionStatus.pending.value,
+            next_steps = (structured_content or {}).get("next_steps") or []
+            deadline_items = (structured_content or {}).get("deadlines") or []
+            if next_steps or deadline_items:
+                # Une ligne SuggestedAction par prochaine étape/échéance
+                # structurée (llm.ProjectSummaryLLM) plutôt que l'ancienne
+                # recommandation unique dérivée du seul niveau de risque.
+                for step in next_steps:
+                    description = (step.get("description") or "").strip()
+                    if not description:
+                        continue
+                    db.add(
+                        SuggestedAction(
+                            project_id=project.id,
+                            description=description,
+                            status=SuggestedActionStatus.pending.value,
+                        )
                     )
-                )
+                for item in deadline_items:
+                    description = (item.get("description") or "").strip()
+                    if not description:
+                        continue
+                    db.add(
+                        SuggestedAction(
+                            project_id=project.id,
+                            description=description,
+                            deadline=_parse_iso_date(item.get("date_iso")),
+                            status=SuggestedActionStatus.pending.value,
+                        )
+                    )
+            else:
+                # Repli : extraction structurée absente ou en échec (voir
+                # summary_block["_structured_erreur"]) — conserve l'ancienne
+                # recommandation dérivée des règles plutôt que de ne créer
+                # aucune action.
+                recommendation = risk.get("recommandation")
+                if recommendation and risk_level not in (None, "FAIBLE"):
+                    db.add(
+                        SuggestedAction(
+                            project_id=project.id,
+                            description=recommendation,
+                            status=SuggestedActionStatus.pending.value,
+                        )
+                    )
 
         summary_row.last_processed_email_timestamp = refreshed_at
         db.commit()
@@ -296,6 +392,7 @@ def _run_fasttrack_sync(job_id: str, tenant_id: str, project_id: str) -> Dict[st
             "persisted_emails": persisted,
             "sentiment": sentiment,
             "content": content,
+            "tags_reference": tags_reference,
             "last_processed_email_timestamp": refreshed_at.isoformat(),
         }
     except Exception:
@@ -310,10 +407,14 @@ async def run_fasttrack_refresh(
     job_id: str,
     tenant_id: str,
     project_id: str,
+    fallback_days: int = 30,
+    force_days: Optional[int] = None,
 ) -> None:
     set_status(job_id, STATUS_RUNNING)
     try:
-        result = await asyncio.to_thread(_run_fasttrack_sync, job_id, tenant_id, project_id)
+        result = await asyncio.to_thread(
+            _run_fasttrack_sync, job_id, tenant_id, project_id, fallback_days, force_days
+        )
         set_status(job_id, STATUS_DONE, result=result)
     except Exception as exc:  # noqa: BLE001 — frontière du worker : rien ne doit remonter
         set_status(job_id, STATUS_ERROR, error=str(exc))
@@ -322,7 +423,7 @@ async def run_fasttrack_refresh(
 async def run_analysis_legacy(
     ctx: Dict[str, Any],
     job_id: str,
-    project: str,
+    project: Optional[str],
     period: Optional[str],
     days: int,
     assistant_provider: str,
@@ -343,7 +444,7 @@ async def run_analysis_saas(
     ctx: Dict[str, Any],
     job_id: str,
     tenant_id: str,
-    project: str,
+    project: Optional[str],
     period: Optional[str],
     days: int,
     assistant_provider: str,
@@ -421,8 +522,16 @@ async def run_scheduled_sync(ctx: Dict[str, Any]) -> None:
     succeeded = 0
     for project_id, tenant_id in rows:
         try:
+            # fallback_days=60 : repli plus généreux que le défaut (30) pour les
+            # projets jamais synchronisés — voir CLAUDE.md / progress-tracker.md,
+            # le cron tournait souvent sans rien trouver avec une fenêtre trop
+            # courte. N'affecte pas les projets déjà synchronisés (delta normal).
             await asyncio.to_thread(
-                _run_fasttrack_sync, f"scheduled:{project_id}", str(tenant_id), str(project_id)
+                _run_fasttrack_sync,
+                f"scheduled:{project_id}",
+                str(tenant_id),
+                str(project_id),
+                60,
             )
             succeeded += 1
         except Exception:
@@ -451,6 +560,14 @@ class WorkerSettings:
     cron_jobs = [cron(run_scheduled_sync, hour={7, 19}, minute=0, max_tries=1)]
     on_startup = on_startup
     redis_settings = RedisSettings.from_dsn(redis_url())
+    # Le défaut arq (300s) est trop court pour run_analysis_saas/legacy dès que
+    # `days` couvre une grosse fenêtre (beaucoup d'emails -> beaucoup d'appels
+    # LLM synchrones dans process_latest_emails) : le job se fait tuer par
+    # TimeoutError avant la fin plutôt que d'aboutir. max_tries=1 fait déjà
+    # échouer proprement au lieu de rejouer le travail ; il faut aussi laisser
+    # assez de temps pour qu'un job normalement lent puisse réussir du premier
+    # coup.
+    job_timeout = 1800
     # Un job à la fois par process worker : reproduit la limite de concurrence
     # de l'ancien ThreadPoolExecutor(max_workers=2) en lançant 2 process arq
     # (voir README / nginx-api.conf), plutôt qu'un seul process à forte concurrence.

@@ -54,13 +54,14 @@ from email_analyzer.saas_logic import (
     record_analysis_usage,
     saas_enabled,
 )
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from api.routers import actions as actions_router
 from api.routers import auth as auth_router
 from api.routers import billing as billing_router
 from api.routers import oauth as oauth_router
@@ -109,13 +110,18 @@ app.include_router(tenants_router.router)
 app.include_router(billing_router.router)
 app.include_router(oauth_router.router)
 app.include_router(projects_router.router)
+app.include_router(actions_router.router)
 
 
 class AnalyzeRequest(BaseModel):
-    project: str = Field(..., min_length=1, description="Filtre nom de projet")
+    project: Optional[str] = Field(
+        None,
+        description="Filtre nom de projet (optionnel — vide/absent = analyse tous les "
+        "emails de la fenêtre sans filtre et propose les sujets détectés)",
+    )
     period: Optional[str] = Field(
         None,
-        description="today | yesterday | 3 | 7 | 11",
+        description="today | yesterday | 3 | 7 | 11 | 90 | 120 | 240",
     )
     days: int = Field(30, ge=1, le=365, description="Fenêtre IMAP si period absent")
     assistant_provider: Literal["openai", "gemini", "none"] = "openai"
@@ -140,7 +146,7 @@ class ChatRequest(BaseModel):
     project_name: str = Field(..., min_length=1)
     period: Optional[str] = Field(
         None,
-        description="Même logique que /api/analyze (today | yesterday | 3 | 7 | 11) ; sinon fenêtre days",
+        description="Même logique que /api/analyze (today | yesterday | 3 | 7 | 11 | 90 | 120 | 240) ; sinon fenêtre days",
     )
     days: int = Field(30, ge=1, le=365, description="Fenêtre IMAP si period absent")
     messages: List[ChatMessage] = Field(..., min_length=1)
@@ -186,12 +192,14 @@ def analyze(
     load_dotenv(_REPO_ROOT / ".env")
     load_dotenv(_SERVICE_ROOT / ".env")
 
+    project_value = (body.project or "").strip() or None
+
     if db is None:
         job_id = create_job(tenant_id=None)
         enqueue(
             job_id,
             "run_analysis_legacy",
-            body.project,
+            project_value,
             body.period,
             body.days,
             body.assistant_provider,
@@ -210,7 +218,7 @@ def analyze(
         job_id,
         "run_analysis_saas",
         str(tenant_id),
-        body.project,
+        project_value,
         body.period,
         body.days,
         body.assistant_provider,
@@ -223,6 +231,12 @@ def analyze(
 @app.post("/api/projects/{project_id}/refresh", status_code=202)
 def refresh_project(
     project_id: uuid.UUID,
+    force_days: Optional[int] = Query(
+        None,
+        ge=1,
+        le=365,
+        description="Ignore last_processed_email_timestamp et force un rescan sur N jours (bouton 'chercher sur plus de jours').",
+    ),
     authorization: Optional[str] = Header(None),
     db: Optional[Session] = Depends(get_db_optional),
 ) -> Dict[str, Any]:
@@ -251,7 +265,7 @@ def refresh_project(
         raise HTTPException(status_code=404, detail="Projet introuvable")
 
     job_id = create_job(tenant_id=str(tenant.id))
-    enqueue(job_id, "run_fasttrack_refresh", str(tenant.id), str(project.id))
+    enqueue(job_id, "run_fasttrack_refresh", str(tenant.id), str(project.id), 30, force_days)
     return {"job_id": job_id, "status": "pending"}
 
 

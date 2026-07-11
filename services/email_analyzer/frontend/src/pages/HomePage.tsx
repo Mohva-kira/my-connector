@@ -30,6 +30,12 @@ const LOADING_STATUS_MESSAGES = [
 
 type AnalyzeProgress = { processed: number; total: number };
 
+// Doit rester identique à EmailProcessor.NO_FILTER_RESULT_KEY (analyzer.py) :
+// clé de résultat utilisée par le backend quand l'analyse est lancée sans
+// filtre — sert à savoir si les fils de discussion doivent être proposés
+// comme sujets cliquables (voir AnalysisDashboard.onSelectThread).
+const NO_FILTER_RESULT_KEY = "Tous les emails";
+
 // Taille de lot affichée dans la pastille de gamification (doit correspondre à
 // EMAIL_ANALYZER_BATCH_SIZE côté serveur, défaut 10 — purement décoratif, ne
 // pilote aucune logique).
@@ -137,8 +143,14 @@ export default function HomePage({
     [],
   );
 
-  async function runAnalyze(e: React.FormEvent) {
-    e.preventDefault();
+  // overrideDays : utilisé par les boutons "Chercher sur N jours" du bloc
+  // "Aucun email trouvé" (isEmptyReport) — force le mode fenêtre plutôt que
+  // de dépendre d'un setState encore non appliqué au moment de l'appel.
+  // overrideProject : utilisé quand on clique un sujet détecté (fil de
+  // discussion) dans le résultat d'une analyse sans filtre, pour relancer une
+  // analyse ciblée sans dépendre d'un setState pas encore appliqué.
+  async function launchAnalysis(overrideDays?: number, overrideProject?: string) {
+    const projectValue = overrideProject ?? project;
     setError(null);
     setReport(null);
     setAnalysisBlock(null);
@@ -149,11 +161,18 @@ export default function HomePage({
     setStatusMsgIndex(0);
     setLoading(true);
     useSyncStore.getState().reset();
+    if (overrideDays) {
+      setPeriodMode("window");
+      setDays(overrideDays);
+    }
+    if (overrideProject !== undefined) {
+      setProject(overrideProject);
+    }
     try {
       const body = {
-        project: project.trim(),
-        period: periodMode === "preset" && period ? period : null,
-        days: periodMode === "window" ? days : 30,
+        project: projectValue.trim(),
+        period: overrideDays ? null : periodMode === "preset" && period ? period : null,
+        days: overrideDays ?? (periodMode === "window" ? days : 30),
         assistant_provider: provider,
         openai_model: openaiModel,
         gemini_model: geminiModel,
@@ -201,6 +220,11 @@ export default function HomePage({
     }
   }
 
+  async function runAnalyze(e: React.FormEvent) {
+    e.preventDefault();
+    await launchAnalysis();
+  }
+
   const requestDraft = useCallback(async (): Promise<DraftResult> => {
     if (!analysisBlock || !activeProjectName) {
       throw new Error("Analyse manquante");
@@ -229,6 +253,8 @@ export default function HomePage({
 
   const showResultPanel = loading || report !== null || error !== null;
   const showPlaceholder = !loading && report === null && !error;
+  const currentWindowDays = periodMode === "window" ? days : Number(period) || 0;
+  const widenDayOptions = [60, 90, 120, 240].filter((n) => n > currentWindowDays);
 
   if (saasEnabled && getAccessToken() && !me) {
     return (
@@ -317,15 +343,20 @@ export default function HomePage({
             className="rounded-2xl border border-border-default bg-surface p-6 shadow-sm"
           >
             <label className="block">
-              <span className="mb-1 block text-sm font-medium text-text-secondary">Projet (filtre)</span>
+              <span className="mb-1 block text-sm font-medium text-text-secondary">
+                Projet (filtre, optionnel)
+              </span>
               <input
                 type="text"
                 value={project}
                 onChange={(e) => setProject(e.target.value)}
-                required
-                placeholder="Ex. BBCI, Nom du client…"
+                placeholder="Laissez vide pour analyser tous les emails…"
                 className="mt-1 w-full rounded-xl border border-border-default bg-bg-tertiary/60 px-3 py-2.5 text-sm text-text-primary outline-none ring-accent-primary transition placeholder:text-text-muted focus:border-accent-primary focus:bg-bg-tertiary focus:ring-2"
               />
+              <span className="mt-1 block text-xs text-text-muted">
+                Sans filtre, l&apos;analyse porte sur tous les emails de la période et vous
+                proposera les sujets détectés.
+              </span>
             </label>
 
             <div className="mt-5">
@@ -377,6 +408,9 @@ export default function HomePage({
                   <option value="3">3 derniers jours</option>
                   <option value="7">7 derniers jours</option>
                   <option value="11">11 derniers jours</option>
+                  <option value="90">90 derniers jours</option>
+                  <option value="120">120 derniers jours</option>
+                  <option value="240">240 derniers jours</option>
                 </select>
               )}
             </div>
@@ -437,7 +471,7 @@ export default function HomePage({
 
             <button
               type="submit"
-              disabled={loading || !project.trim()}
+              disabled={loading}
               className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-accent-primary py-3 text-sm font-semibold text-white shadow-md shadow-black/20 transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
               {loading ? (
@@ -542,7 +576,9 @@ export default function HomePage({
                 >
                   <p className="font-medium">Analyse terminée</p>
                   <p className="mt-0.5 text-success/90">
-                    {reportKeys.length} projet{reportKeys.length > 1 ? "s" : ""} dans le rapport.
+                    {activeProjectName === NO_FILTER_RESULT_KEY
+                      ? "Tous les emails de la période ont été analysés."
+                      : `${reportKeys.length} projet${reportKeys.length > 1 ? "s" : ""} dans le rapport.`}
                   </p>
                 </div>
               ) : null}
@@ -584,6 +620,21 @@ export default function HomePage({
                       <code className="text-xs">.env</code>, défaut INBOX).
                     </li>
                   </ul>
+                  {widenDayOptions.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {widenDayOptions.map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          onClick={() => void launchAnalysis(n)}
+                          disabled={loading}
+                          className="rounded-full border border-border-default px-3 py-1.5 text-xs font-medium text-text-secondary transition hover:bg-bg-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Chercher sur {n} jours
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -595,6 +646,11 @@ export default function HomePage({
                         projectName={activeProjectName}
                         analysis={analysisBlock}
                         onRequestDraft={requestDraft}
+                        onSelectThread={
+                          activeProjectName === NO_FILTER_RESULT_KEY
+                            ? (subject) => void launchAnalysis(undefined, subject)
+                            : undefined
+                        }
                       />
                     ) : (
                       <ConversationalAssistant

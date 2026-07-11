@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { apiFetch } from "./apiClient";
+import { apiFetch, takePendingAutoSync } from "./apiClient";
 import { parseApiError, parseResponseJson } from "./apiUtils";
+
+// Préréglages de fenêtre pour "chercher sur plus de jours" (voir HomePage.tsx,
+// même liste) — proposés quand un premier sync ne trouve rien.
+const WIDEN_WINDOW_DAYS = [60, 90, 120, 240] as const;
 
 // Polling du job de rafraîchissement Fast-Track : même endpoint/cadence que
 // l'analyse pleine (HomePage.tsx) — /api/analyze/{job_id} sert les deux types
@@ -198,37 +202,83 @@ function ProjectCard({
   project,
   onRefreshed,
   onUpdated,
+  autoSyncJobId,
+  onAutoSyncSettled,
 }: {
   project: ProjectListItem;
   onRefreshed: (id: string, patch: Partial<ProjectListItem>) => void;
   onUpdated: (id: string, patch: Partial<ProjectListItem>) => void;
+  autoSyncJobId?: string;
+  onAutoSyncSettled?: (projectId: string) => void;
 }) {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [tagsPreview, setTagsPreview] = useState<{ tag: string; count: number }[]>([]);
+  const [showWidenPrompt, setShowWidenPrompt] = useState(false);
 
-  async function handleRefresh() {
+  function applyRefreshResult(result: Record<string, unknown>, wasFirstSync: boolean) {
+    onRefreshed(project.id, {
+      sentiment: (result.sentiment as Sentiment | null) ?? project.sentiment,
+      summary_content: (result.content as string | null) ?? project.summary_content,
+      last_processed_email_timestamp:
+        (result.last_processed_email_timestamp as string | null) ??
+        project.last_processed_email_timestamp,
+    });
+    setTagsPreview((result.tags_reference as { tag: string; count: number }[] | undefined) ?? []);
+    // Un delta à 0 sur un projet déjà synchronisé est un état normal (pas de
+    // nouvel email depuis le dernier passage) — la proposition d'élargir la
+    // fenêtre ne s'affiche que pour un tout premier sync resté bredouille.
+    setShowWidenPrompt(wasFirstSync && (result.new_emails as number | undefined) === 0);
+  }
+
+  async function handleRefresh(forceDays?: number) {
+    const wasFirstSync = !project.last_processed_email_timestamp;
     setRefreshError(null);
     setRefreshing(true);
     try {
-      const startRes = await apiFetch(`/api/projects/${project.id}/refresh`, { method: "POST" });
+      const qs = forceDays ? `?force_days=${forceDays}` : "";
+      const startRes = await apiFetch(`/api/projects/${project.id}/refresh${qs}`, { method: "POST" });
       const startData = (await parseResponseJson(startRes)) as Record<string, unknown>;
       if (!startRes.ok) throw new Error(parseApiError(startData));
       const jobId = startData.job_id as string | undefined;
       if (!jobId) throw new Error("Réponse inattendue du serveur (job_id manquant).");
       const result = await pollRefreshJob(jobId);
-      onRefreshed(project.id, {
-        sentiment: (result.sentiment as Sentiment | null) ?? project.sentiment,
-        summary_content: (result.content as string | null) ?? project.summary_content,
-        last_processed_email_timestamp:
-          (result.last_processed_email_timestamp as string | null) ??
-          project.last_processed_email_timestamp,
-      });
+      applyRefreshResult(result, wasFirstSync);
     } catch (err) {
       setRefreshError(err instanceof Error ? err.message : "Erreur inconnue");
     } finally {
       setRefreshing(false);
     }
   }
+
+  // Auto-sync déclenché au login (saas_logic.trigger_login_auto_sync) : le job
+  // tourne déjà côté serveur, cette carte n'a qu'à en suivre la progression
+  // (pas de nouveau POST) — même état visuel `refreshing` que le clic manuel.
+  useEffect(() => {
+    if (!autoSyncJobId) return;
+    const wasFirstSync = !project.last_processed_email_timestamp;
+    let cancelled = false;
+    setRefreshError(null);
+    setRefreshing(true);
+    pollRefreshJob(autoSyncJobId)
+      .then((result) => {
+        if (cancelled) return;
+        applyRefreshResult(result, wasFirstSync);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setRefreshError(err instanceof Error ? err.message : "Erreur inconnue");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setRefreshing(false);
+        onAutoSyncSettled?.(project.id);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSyncJobId]);
 
   return (
     <article
@@ -266,7 +316,41 @@ function ProjectCard({
         ) : null}
       </div>
 
+      {tagsPreview.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {tagsPreview.slice(0, 3).map((t) => (
+            <span
+              key={t.tag}
+              className="rounded-full bg-bg-tertiary px-2 py-0.5 text-[11px] font-medium text-text-secondary"
+            >
+              {t.tag} ×{t.count}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       {refreshError ? <p className="text-xs text-danger">{refreshError}</p> : null}
+
+      {showWidenPrompt ? (
+        <div className="rounded-xl border border-dashed border-border-default p-3">
+          <p className="text-xs text-text-muted">
+            Aucun email trouvé sur la fenêtre initiale. Chercher plus loin ?
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {WIDEN_WINDOW_DAYS.map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => void handleRefresh(n)}
+                disabled={refreshing}
+                className="rounded-full border border-border-default px-2.5 py-1 text-xs font-medium text-text-secondary transition hover:bg-bg-tertiary disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {n}j
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-3">
         <button
@@ -393,6 +477,11 @@ export default function ProjectHub() {
   const [projects, setProjects] = useState<ProjectListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  // Jobs Fast-Track déclenchés automatiquement par le login (voir
+  // apiClient.takePendingAutoSync) — project_id -> job_id. Consommé une seule
+  // fois au montage ; chaque entrée est retirée quand sa carte a fini de
+  // suivre son job (onAutoSyncSettled).
+  const [autoSyncJobIds, setAutoSyncJobIds] = useState<Record<string, string>>({});
 
   const loadProjects = useCallback(async () => {
     setError(null);
@@ -410,12 +499,38 @@ export default function ProjectHub() {
     void loadProjects();
   }, [loadProjects]);
 
+  useEffect(() => {
+    const pending = takePendingAutoSync();
+    if (pending.length === 0) return;
+    setAutoSyncJobIds(Object.fromEntries(pending.map((p) => [p.project_id, p.job_id])));
+  }, []);
+
   function patchProject(id: string, patch: Partial<ProjectListItem>) {
     setProjects((prev) => (prev ? prev.map((p) => (p.id === id ? { ...p, ...patch } : p)) : prev));
   }
 
+  function settleAutoSync(projectId: string) {
+    setAutoSyncJobIds((prev) => {
+      if (!(projectId in prev)) return prev;
+      const next = { ...prev };
+      delete next[projectId];
+      return next;
+    });
+  }
+
+  const autoSyncCount = Object.keys(autoSyncJobIds).length;
+
   return (
     <div>
+      {autoSyncCount > 0 ? (
+        <div
+          role="status"
+          className="mb-4 rounded-2xl border border-border-default bg-surface px-4 py-3 text-sm text-text-secondary"
+        >
+          Mise à jour automatique de {autoSyncCount} projet{autoSyncCount > 1 ? "s" : ""} en cours…
+        </div>
+      ) : null}
+
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-text-muted">
           Vos projets, leur santé IA et les actions encore en attente. Rafraîchissez un projet
@@ -461,7 +576,14 @@ export default function ProjectHub() {
       {projects !== null && projects.length > 0 ? (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {projects.map((p) => (
-            <ProjectCard key={p.id} project={p} onRefreshed={patchProject} onUpdated={patchProject} />
+            <ProjectCard
+              key={p.id}
+              project={p}
+              onRefreshed={patchProject}
+              onUpdated={patchProject}
+              autoSyncJobId={autoSyncJobIds[p.id]}
+              onAutoSyncSettled={settleAutoSync}
+            />
           ))}
         </div>
       ) : null}

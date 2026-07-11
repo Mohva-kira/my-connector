@@ -986,6 +986,340 @@ Update this file after every meaningful implementation change.
     (les poids/seuils sont un premier jet raisonnable, pas calibrés sur des
     données réelles) ; rendu/tri réel dans l'UI (pas encore construit).
 
+- **Unit 20 — Classification multi-critères + taxonomie de tags par email** (2026-07-09) :
+  - Contexte : à partir d'une vision produit "Coach IA" très large (classification,
+    tags, décisions, actions, calendrier, base documentaire, recherche hybride,
+    chatbot source-cité, dashboard) transmise par l'utilisateur, plan discuté et
+    scindé — l'utilisateur a choisi de démarrer par « classification + tagging
+    plus intelligents » et de rester 100% cloud pour l'IA (pas de tier LLM local,
+    l'invariant `architecture.md` reste inchangé).
+  - **Découverte confirmant exactement le gap de la vision** : la classification
+    était `EmailProjectAnalyzer.check_project_relevance` (`project_mail.py`) —
+    une simple sous-chaîne du **nom du projet** dans le texte de l'email.
+    `Project.rules_matrix` (JSONB, `db/models.py`) existait déjà avec un
+    commentaire décrivant mots-clés/adresses/domaines mais n'était **lu nulle
+    part** — colonne morte. Aucune taxonomie de tags n'existait sur
+    `Email`/`Project`/`SuggestedAction`.
+  - `email_analyzer/classification.py` (nouveau, module pur sans I/O) :
+    - `ProjectRules.from_dict` formalise enfin le contenu de `rules_matrix`
+      (keywords/sender_domains/sender_emails/client_names/company_names/
+      reference_numbers) ; dégrade silencieusement tout JSON malformé vers des
+      listes vides (jamais d'exception).
+    - `score_project_relevance` : score de confiance 0-100 combinant nom de
+      projet (45 pts — à lui seul égal à `MATCH_THRESHOLD`, donc **bit-à-bit
+      identique à l'ancien comportement en sous-chaîne** quand `rules_matrix`
+      et participants connus sont absents), mots-clés, adresse/domaine
+      expéditeur, participants déjà connus du projet **dans le même balayage**
+      (pas de colonne `sender` persistée sur `Email` → pas de roster durable
+      inter-exécutions, limitation documentée), noms client/société, références
+      internes (regex `[A-Z]{2,}-\d{2,}`).
+    - `derive_tags` : catégorise le dictionnaire plat `risk_keywords`
+      (`ai_intelligent.py`) en tags métier (Urgent, Bloquant, Bug, Finance,
+      Facturation, Livraison, Technique, Client, Sécurité, Juridique, RH,
+      Commercial, Validation, Production, Support) + un tag de priorité
+      (Critique/Haute/Moyenne/Faible) dérivé de `importance_score` déjà calculé
+      (mêmes bornes 80/60/35 que Unit 19). Aucun nouvel appel LLM.
+  - `email_analyzer/project_mail.py` : `check_project_relevance`,
+    `_process_one_email_id`, `search_project_emails`,
+    `search_project_emails_from_list` gagnent un paramètre optionnel
+    `rules_map` (+ `participants_map` construit via `.items()`, jamais un accès
+    par crochet, pour ne pas déclencher la factory du `defaultdict` sur un
+    projet pas encore matché). Sans `rules_map`, comportement inchangé.
+  - `email_analyzer/analyzer.py` : `process_delta` gagne `rules_matrix:
+    Optional[dict] = None`, construit le `rules_map` et le passe à
+    `search_project_emails`. Les autres appelants (`process_latest_emails`,
+    `fetch_last_n_emails_for_chat`, `legacy_cli.py`) restent inchangés.
+  - `email_analyzer/analysis_tasks.py` (`_run_fasttrack_sync`, couvre aussi
+    `run_scheduled_sync` qui appelle la même fonction) : passe
+    `rules_matrix=project.rules_matrix` à `process_delta` ; à la persistance de
+    chaque email, recalcule (pur, sans I/O supplémentaire)
+    `score_project_relevance`/`derive_tags` et les stocke sur
+    `Email.classification_score`/`Email.tags`.
+  - `alembic/versions/005_email_tags_classification.py` (nouveau) : ajoute
+    `emails.tags` (JSONB) et `emails.classification_score` (Integer), nullable,
+    pas de rétro-calcul (même discipline que 004). `db/models.py` mis à jour.
+  - `api/routers/projects.py` : `EmailOut` expose `tags`/`classification_score` ;
+    `ProjectOut`/`_project_out` expose désormais `rules_matrix` en lecture
+    (auparavant write-only via `POST`) ; nouveau `PATCH /api/projects/{id}`
+    (name/rules_matrix), même schéma que `PATCH /api/tenants/{id}/imap`.
+  - `frontend/src/ProjectHub.tsx` : `RulesMatrixEditor` (par carte projet, replié
+    par défaut, PATCH au clic) + section optionnelle repliée dans
+    `CreateProjectForm` pour saisir les 6 signaux en listes séparées par
+    virgules. `top_emails`/`GET /api/projects/{id}` restent non appelés ailleurs
+    dans le frontend (même situation que Unit 19) — pas d'UI de liste d'emails
+    construite, l'API suffit pour rendre `tags`/`classification_score`
+    exploitables plus tard.
+  - Vérifié : `python -m py_compile` sur tous les fichiers backend
+    modifiés/créés. Appels directs sur fixtures construites (sans DB/réseau) :
+    nom de projet seul → `matched=True`, `score==45`, identique au booléen de
+    l'ancienne sous-chaîne sur plusieurs cas construits à la main ; email sans
+    nom de projet mais `sender_email` + participant connu combinés → `matched=
+    True` (nouveau vrai positif) ; email non pertinent + règles vides →
+    `matched=False`, `score==0` ; `derive_tags` sur un email
+    urgent/bloqué/facture avec `importance_score=88` vs `0` → bons tags +
+    bonne bascule de priorité ; `ProjectRules.from_dict` sur entrées
+    malformées (`None`, dict vide, listes mal typées, valeur non-dict comme
+    `"garbage"`/`42`) → ne lève jamais. Cluster PostgreSQL local jetable
+    (`initdb`/`pg_ctl`, port et socket dédiés, démonté après coup) :
+    `alembic upgrade head` 001→005 propre ; `downgrade -1` puis `upgrade head`
+    round-trip confirmant que `tags`/`classification_score` disparaissent puis
+    réapparaissent ; `_run_fasttrack_sync` appelé avec `processor_from_tenant`
+    et `process_delta` mockés (fixtures construites) — confirmé que
+    `rules_matrix` du projet est bien transmis à `process_delta`, que les
+    emails sont persistés avec les bons `tags`/`classification_score`, et
+    qu'un projet sans `rules_matrix` matché uniquement par son nom obtient
+    `classification_score == 45` (non-régression bit-à-bit confirmée en
+    conditions quasi réelles, pas seulement en unitaire pur). `uvicorn` réel
+    lancé contre ce cluster : `POST /api/auth/register` → `POST /api/projects`
+    (avec `rules_matrix`) → `GET /api/projects` (rules_matrix bien exposé) →
+    `PATCH /api/projects/{id}` (mise à jour bien persistée et renvoyée) →
+    `GET /api/projects/{id}` (round-trip confirmé) → `PATCH` sur un id
+    inexistant → `404`. Environnement jetable entièrement démonté après
+    vérification (process uvicorn arrêté, cluster Postgres stoppé et supprimé).
+    `tsc --noEmit` sans erreur ; `vite build` transforme les 49 modules sans
+    erreur (échec ensuite limité au même `EACCES` pré-existant sur `dist/`,
+    sans rapport, déjà documenté dans les unités précédentes).
+  - **Limitation notée en cours de vérification** (pas un bug introduit par
+    cette unité, comportement déjà présent dans `risk_keywords`/
+    `identify_critical_emails`) : le matching par mots-clés est une simple
+    sous-chaîne sans frontière de mot — ex. "rapidement" contient
+    littéralement "api", ce qui peut déclencher le tag Technique par faux
+    positif. Cohérent avec le style existant du reste du fichier
+    `ai_intelligent.py`, non corrigé ici pour rester dans le périmètre défini.
+  - Non fait / hors périmètre explicite (voir le plan) : signaux basés sur les
+    pièces jointes (aucun parsing PDF/Word n'existe) ; classification
+    hiérarchique multi-niveaux et détection de type de document ; auto-
+    découverte cross-mailbox du projet d'un email ("Zero-Touch Project
+    Creation") ; tags au niveau Projet/Action (seul `Email` est tagué) ;
+    roster durable de participants inter-exécutions (nécessiterait une colonne
+    `sender` sur `Email`) ; calibration des poids/seuils sur un vrai corpus.
+
+- **Unit 21 — Auto-sync au login, cron élargi, fenêtres 90/120/240j, tags de
+  référence + fils de discussion, résumé "assistant de direction"** (2026-07-11) :
+  - Contexte : demande utilisateur en 2 temps — (1) remplacer la saisie
+    manuelle du filtre "Projet" par un déclenchement automatique à la
+    connexion, corriger le symptôme "le cron tourne souvent sans rien
+    trouver" (fenêtre de repli Fast-Track figée à 30j), et proposer d'élargir
+    la recherche après un résultat pauvre ; (2) ajouter des préréglages
+    90/120/240 jours, faire remonter des tags de référence et un
+    regroupement des emails par sujet pour affiner le résumé, et élever la
+    qualité du résumé au niveau "assistant de direction".
+  - **Fenêtre de repli Fast-Track paramétrable** (`email_analyzer/analyzer.py::
+    EmailProcessor.process_delta`, nouveau `fallback_days: int = 30`, ne
+    change rien par défaut) :
+    - `analysis_tasks.py::_run_fasttrack_sync`/`run_fasttrack_refresh` :
+      nouveaux `fallback_days`/`force_days` (ce dernier ignore
+      `last_processed_email_timestamp` et force un rescan complet — utilisé
+      par les boutons "chercher sur plus de jours").
+    - `run_scheduled_sync` (cron 7h/19h) : passe désormais `fallback_days=60`
+      (repli plus généreux pour les projets jamais synchronisés — seule
+      fenêtre concernée, les deltas incrémentaux normaux ne sont pas
+      touchés).
+    - `api/main.py::refresh_project` (`POST /api/projects/{id}/refresh`) :
+      nouveau paramètre de requête optionnel `force_days`.
+  - **Auto-sync au login, throttlé 1x/24h/tenant** : `jobs.py::
+    claim_daily_auto_sync` (Redis `SET NX EX 86400`) ; `saas_logic.py::
+    trigger_login_auto_sync` (Fast-Track sur tous les `Project` actifs du
+    tenant, `fallback_days=20`) ; `api/routers/auth.py::login` l'appelle et
+    renvoie `TokenResponse.auto_sync_jobs` (additif, vide pour
+    register/switch). Frontend : `apiClient.ts` (`setPendingAutoSync`/
+    `takePendingAutoSync`, sessionStorage — survit à la redirection
+    `/login` → `/`), `AuthPanel.tsx` (capture au login), `ProjectHub.tsx`
+    (bannière "Mise à jour automatique de N projet(s) en cours…", chaque
+    `ProjectCard` concernée suit son job via `pollRefreshJob` sans nouveau
+    POST, même état visuel `refreshing` que le clic manuel).
+  - **Préréglages 90/120/240 jours** : `config.py::VALID_PERIODS` étendu (la
+    logique jours de `period.py` généralisait déjà `int(period) - 1`, aucun
+    changement de logique nécessaire) ; options ajoutées au `<select>`
+    "Préréglage" de `HomePage.tsx`.
+  - **Regroupement par sujet (fils de discussion)** : `project_mail.py::
+    normalize_subject`/`group_emails_by_subject` (nouveau, aucune base
+    existante — pas de threading par en-têtes In-Reply-To/References,
+    volontairement limité au signal `subject` déjà extrait). Intégré dans
+    `generate_intelligent_summary` : nouvelles clés `threads` (top 10,
+    sans le champ interne `latest_email`) et `tags_reference` (agrégation de
+    `classification.derive_tags` par email, top 10) sur le dict JSON déjà
+    renvoyé par `/api/analyze` — additif, aucune migration DB (résultat
+    transitoire, pas d'historisation). Relayé aussi dans le retour de
+    `_run_fasttrack_sync` pour le Project Hub.
+  - **Résumé "assistant de direction"** : `llm.py::build_llm_thread_corpus`
+    (corpus par fil plutôt que par email brut — un seul représentant par
+    fil, réduit le bruit des relances) + `format_tags_reference_context`
+    (injecte les tags dominants dans le prompt) + nouveau
+    `_EXECUTIVE_SYSTEM_PROMPT` partagé OpenAI/Gemini (structure imposée en 5
+    sections : synthèse en une phrase, points clés, décisions/risques,
+    échéances, recommandation priorisée). `generate_openai_assistant_summary`/
+    `generate_gemini_assistant_summary` prennent désormais `threads` (au lieu
+    d'`emails`) + `tags_reference` optionnel ; seul appelant
+    (`project_mail.py::generate_intelligent_summary`) mis à jour en
+    conséquence. Contrat de sortie inchangé (`{"texte", "modèle", "erreur",
+    ...}`), pas de passage à un JSON structuré multi-champs.
+  - **Rendu frontend (comblait un vide réel)** : `résumé_assistant.texte`
+    n'était jusqu'ici jamais affiché nulle part dans le frontend (confirmé
+    par recherche avant implémentation). `AnalysisDashboard.tsx` : nouvelle
+    carte "Synthèse (assistant de direction)" (premier rendu de ce champ),
+    section "Tags dominants" (chips) et "Fils de discussion" (liste). Mêmes
+    tokens Tailwind que l'existant (`bg-surface`, `border-border-default`,
+    `rounded-full`), aucun nouveau composant lourd.
+  - **Boutons "chercher sur plus de jours" (60/90/120/240)** : `HomePage.tsx`
+    — `runAnalyze` scindé en `launchAnalysis(overrideDays?)` (réutilisable) +
+    wrapper `runAnalyze` pour le submit du formulaire ; boutons affichés dans
+    le bloc "Aucun email trouvé" existant, uniquement pour les valeurs
+    strictement supérieures à la fenêtre courante. `ProjectHub.tsx` —
+    mêmes boutons par carte, affichés seulement si le refresh était un
+    **premier sync** revenu à 0 nouvel email (`new_emails === 0` et
+    `last_processed_email_timestamp` absent avant l'appel) : un delta à 0
+    sur un projet déjà synchronisé reste un état normal, pas un signal
+    d'échec — condition volontairement restrictive pour rester honnête.
+  - Vérifié : `python -m py_compile` sur tous les fichiers backend modifiés
+    (`analyzer.py`, `analysis_tasks.py`, `jobs.py`, `saas_logic.py`,
+    `api/routers/auth.py`, `api/main.py`, `config.py`, `project_mail.py`,
+    `llm.py`, `cli.py`, `legacy_cli.py`) ; `tsc --noEmit` frontend sans
+    erreur ; `vite build` transforme les 49 modules sans erreur (échec
+    ensuite limité au même `EACCES` pré-existant sur `dist/` appartenant à
+    `root`, environnement local, déjà documenté dans les unités
+    précédentes — sans rapport avec ce code).
+  - Non vérifié (pas d'environnement IMAP/Postgres/Redis/navigateur
+    disponible dans cette session) : comportement end-to-end réel (login →
+    jobs auto-sync effectivement enqueués et visibles côté Project Hub ;
+    throttle Redis 24h ; contenu réel du résumé LLM avec le nouveau prompt ;
+    rendu visuel des nouvelles sections). Recommandé à l'utilisateur de
+    vérifier avec `npm run dev` + `uvicorn`/`arq` locaux avant mise en
+    production, en particulier le rendu du résumé exécutif et le
+    déclenchement de l'auto-sync sur un compte réel avec plusieurs projets.
+
+- **Unit 23 — Analyse sans filtre sur la page d'accueil, sujets détectés
+  cliquables (mode autonome)** (2026-07-11) :
+  - Contexte : demande utilisateur « unifier projets et accueils [...]
+    supprimer le filtre projet sur la page d'accueil pour lancer une analyse
+    sans filtre, une fois les emails récupérés proposer les sujets à
+    analyser ». Décision prise en mode autonome (voir
+    `feedback-autonomous-implementation-mode` en mémoire) sur deux points
+    d'ambiguïté réelle plutôt que de bloquer sur une question :
+    1. **Ce que "unifier" signifie concrètement** : pas de fusion des routes
+       `/` et `/projects` (Project Hub reste un CRUD séparé, scope SaaS) —
+       l'unification se fait par le comportement décrit juste après : la page
+       d'accueil ne demande plus un nom de projet à l'avance, elle en propose
+       après coup, à partir du contenu réel de la boîte mail. Option retenue
+       car surface de changement minimale (pas de refonte de navigation) et
+       cohérente avec la préférence utilisateur déjà établie (voir
+       `feedback-ask-before-ambiguous-scope`, "moins de surface touchée").
+    2. **Comment "proposer les sujets" sans fabriquer une fonctionnalité de
+       clustering non demandée** : `evolution-plan.md` classe le "Historical
+       Clustering Worker" (découverte automatique de projets) en Phase 2, non
+       construit (confirmé par exploration du code avant d'implémenter — zéro
+       logique de clustering/proposition nulle part dans le backend). Plutôt
+       que de construire ce sous-système, réutilisation du regroupement par
+       fil de discussion déjà livré aujourd'hui (Unit 21,
+       `project_mail.py::group_emails_by_subject`, champ `threads` du rapport
+       JSON) : une analyse sans filtre récupère tous les emails de la
+       fenêtre dans un seul bucket, le résumé IA généré dessus expose déjà
+       `threads` (sujets groupés) — il ne restait qu'à les rendre cliquables
+       côté frontend pour relancer une analyse ciblée. Aucune nouvelle
+       classification IA, aucun nouveau modèle de données.
+  - `email_analyzer/project_mail.py` : `_process_one_email_id`,
+    `search_project_emails`, `search_project_emails_from_list` gagnent un
+    paramètre optionnel `catch_all_key` — un email qui ne correspond à aucun
+    filtre est tout de même conservé sous cette clé unique au lieu d'être
+    ignoré. Avec `project_filters` vide, `_uid_search_narrow_ids` renvoyait
+    déjà `None` (aucune clause à construire) donc le fallback SINCE large
+    existant suffit à récupérer tous les emails de la fenêtre — aucun
+    changement nécessaire côté recherche IMAP elle-même.
+  - `email_analyzer/analyzer.py` : `EmailProcessor.process_latest_emails`
+    accepte désormais `project_filter: Optional[...]` — `None`/liste vide
+    déclenche le mode sans filtre, tous les emails regroupés sous la nouvelle
+    constante `EmailProcessor.NO_FILTER_RESULT_KEY = "Tous les emails"`
+    (propagée aux chemins IMAP, Gmail et Outlook). Message `_empty` distinct
+    en mode sans filtre (ne parle plus de "filtre" puisqu'il n'y en a pas).
+  - `email_analyzer/analysis_tasks.py` : `_run_legacy_sync`/`_run_saas_sync`
+    (+ les tâches arq `run_analysis_legacy`/`run_analysis_saas`) acceptent
+    `project: Optional[str]` ; chaîne vide/`None` transmise telle quelle à
+    `process_latest_emails`.
+  - `api/main.py` : `AnalyzeRequest.project` devient `Optional[str] = None`
+    (au lieu de `Field(..., min_length=1)`) ; normalisation
+    `(body.project or "").strip() or None` avant `enqueue(...)`, sur les deux
+    branches (legacy et SaaS).
+  - `frontend/src/pages/HomePage.tsx` : champ "Projet (filtre)" devient
+    "Projet (filtre, optionnel)" avec aide contextuelle, `required` retiré,
+    bouton "Lancer l'analyse" n'est plus désactivé par un champ vide ;
+    `launchAnalysis` gagne un second paramètre optionnel `overrideProject`
+    (même pattern qu'`overrideDays` déjà existant) pour relancer une analyse
+    ciblée depuis un sujet cliqué ; nouvelle constante
+    `NO_FILTER_RESULT_KEY = "Tous les emails"` (doit rester synchronisée avec
+    `EmailProcessor.NO_FILTER_RESULT_KEY` côté backend — pas de source
+    partagée entre Python et TypeScript dans ce dépôt) utilisée pour savoir
+    quand proposer les sujets cliquables et adapter le message de succès
+    ("Tous les emails de la période ont été analysés." au lieu de "N
+    projet(s) dans le rapport.").
+  - `frontend/src/AnalysisDashboard.tsx` : nouvelle prop optionnelle
+    `onSelectThread?: (subject: string) => void` — quand fournie, chaque
+    entrée de "Fils de discussion" (déjà affichée depuis Unit 21, jusqu'ici
+    statique) devient un bouton cliquable et le titre de section devient
+    "Sujets détectés — cliquez pour approfondir" ; sans la prop (tous les
+    autres appelants), comportement strictement inchangé.
+  - Vérifié : `python -m py_compile` sur les 4 fichiers backend modifiés ;
+    `tsc --noEmit` sans erreur ; `vite build` transforme les 49 modules sans
+    erreur (échec ensuite limité au même `EACCES` pré-existant sur `dist/`
+    appartenant à `root`, déjà documenté dans toutes les unités précédentes,
+    sans rapport avec ce code). Trois scénarios rejoués en appel direct avec
+    `EmailProjectAnalyzer`/IMAP mockés (aucun environnement IMAP réel
+    disponible dans cette session) : (1) mode sans filtre —
+    `search_project_emails` bien appelé avec `project_filters=[]` et
+    `catch_all_key="Tous les emails"`, résultat du bucket unique bien
+    retourné tel quel ; (2) mode sans filtre + boîte vide sur la fenêtre —
+    `_empty` avec le nouveau message générique (ne mentionne plus de
+    "filtre") ; (3) régression — un filtre simple (`"BBCI"`) produit toujours
+    exactement le même appel/résultat qu'avant cette unité
+    (`catch_all_key=None`, comportement bit-à-bit inchangé). Logique de
+    bascule catch-all de `_process_one_email_id` testée isolément (email sans
+    correspondance + `catch_all_key` fourni → bucketé sous cette clé ; sans
+    `catch_all_key` → toujours ignoré comme avant).
+  - Non vérifié (pas d'environnement IMAP/navigateur disponible dans cette
+    session) : rendu visuel réel (nouveau libellé du champ, sujets cliquables
+    dans `AnalysisDashboard`, message de succès) ; comportement end-to-end
+    avec une vraie boîte IMAP volumineuse (temps de scan sans narrowing IMAP
+    côté serveur — le fallback SINCE large peut ramener plus de candidats
+    qu'un scan filtré, comportement attendu et documenté mais pas mesuré en
+    conditions réelles). Recommandé à l'utilisateur de lancer `npm run dev` +
+    `uvicorn`/`arq` locaux, cliquer "Lancer l'analyse" sans rien saisir dans
+    le champ Projet, et confirmer que les sujets proposés sont pertinents et
+    cliquables.
+  - Non fait / explicitement hors périmètre (voir décision 2 ci-dessus) :
+    classification des emails "sans filtre" contre les `Project` déjà
+    enregistrés du tenant (aurait permis de router automatiquement vers un
+    projet existant plutôt qu'un bucket générique) ; conversion d'un sujet
+    détecté en `Project` persisté (bouton "créer un projet à partir de ce
+    sujet") ; fusion réelle des routes `/` et `/projects`. Ces trois pistes
+    sont des extensions naturelles à prioriser séparément avec l'utilisateur
+    si le comportement actuel s'avère insuffisant à l'usage.
+
+- **Unit 22 — RFC pipeline v2 (document seulement, aucun code)** (2026-07-11) :
+  - Contexte : demande utilisateur d'un document d'architecture complet (RFC/ADR)
+    proposant une refonte du pipeline d'analyse d'emails pour tenir à l'échelle de
+    plusieurs milliers/millions d'emails, plusieurs providers, plusieurs tenants.
+  - `context/rfc-email-pipeline-v2.md` (nouveau) : analyse critique de l'existant
+    (ancrée dans le code réel — `analyzer.py`, `project_mail.py`, `classification.py`,
+    `llm.py`, `db/models.py`, etc., pas une réécriture abstraite), architecture cible
+    en 17 étapes, découpage modulaire, threading JWZ, détection automatique de
+    projets (clustering par thread + pgvector), mémoire projet (`project_aliases`),
+    matching hybride, sync incrémentale par provider (`sync_checkpoints`, UID/
+    historyId/deltaLink), résumé hiérarchique à 3 paliers avec cache par hash,
+    contrat JSON structuré LLM (OpenAI Structured Outputs / Gemini `response_schema`),
+    nouveaux modèles de données, pipeline `arq` à 2 files, gestion d'erreurs,
+    diagrammes Mermaid, roadmap en 9 phases indépendantes (0-8) + tableau Quick Wins
+    vs Long Terme.
+  - Explicitement **cohérent avec** `context/evolution-plan.md` (pgvector déjà
+    décidé, 2 files arq déjà nommées, Historical Clustering Worker/Validation Board
+    déjà nommés) plutôt que de re-débattre ces choix ; **ne modifie pas**
+    `architecture.md`/`evolution-plan.md`/`project-overview.md` (réconciliation des 6
+    fichiers `context/*.md` toujours différée par décision Unit 13, non traitée ici).
+  - Rien n'est implémenté : aucune migration, aucun code applicatif touché. Les 9
+    phases de la roadmap restent toutes à faire — à démarrer par la Phase 0
+    (fondations, migrations additives seulement) si l'utilisateur valide la direction.
+  - Pas de vérification technique applicable (document seul) — relecture de cohérence
+    interne effectuée (chaque section cite le fichier/fonction réel vérifié par 2
+    agents Explore + lecture directe avant rédaction).
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -1015,6 +1349,13 @@ Update this file after every meaningful implementation change.
 - ~~Moteur de scoring d'importance par email~~ — **Fermée par Unit 19**
   (2026-07-09). Reste ouvert : calibration des poids sur un vrai corpus,
   affichage/tri de `top_emails` côté frontend.
+- ~~Classification multi-critères + taxonomie de tags par email (slice 1 de la
+  vision "Coach IA")~~ — **Fermée par Unit 20** (2026-07-09). Reste ouvert :
+  calibration des poids/seuils sur un vrai corpus ; les 9 autres sous-systèmes
+  de la vision Coach IA (décisions, actions, calendrier, base documentaire,
+  recherche hybride, chatbot source-cité, dashboard, tags Projet/Action,
+  roster de participants durable) restent à prioriser séparément avec
+  l'utilisateur.
 - **Doc d'implémentation en attente d'une session dédiée** : les 6 fichiers
   `context/*.md` restent incohérents entre eux et avec le code (voir entrée
   Unit 13 ci-dessus) — non traité par décision utilisateur explicite cette

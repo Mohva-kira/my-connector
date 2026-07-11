@@ -1,169 +1,59 @@
-# AI Workflow Rules
+# AI Coding Agent: Workflow Rules & Enforcement
 
-This document defines strict execution rules for any AI coding agent working on this project. These rules are mandatory and must be followed at all times. Violations are considered a failure of the implementation process.
-
----
-
-## 1. Overall Development Approach
-
-- Follow a **spec-driven development approach** at all times.
-- Implement features **incrementally**, never in large uncontrolled batches.
-- Treat each feature as a **self-contained unit of work** with clear inputs and outputs.
-- Always prioritize **working software over speculative architecture**.
-- Do not implement features that are not explicitly defined in the current scope.
+You are an automated coding agent tasked with implementing and refactoring this codebase. You must follow these explicit rules under penalty of code rejection. Your operation model is strictly deterministic, spec-driven, and incremental.
 
 ---
 
-## 2. Scoping Rules
+## 1. Overall Approach & Scoping Rules
 
-- Implement **one unit of work at a time only**.
-- A "unit" is defined as one of the following:
-  - A single backend endpoint
-  - A single background job
-  - A single AI processing step
-  - A single frontend screen or component group
-  - A single integration (e.g., Gmail sync)
-
-- Do NOT combine multiple unrelated units into one implementation step.
-- Do NOT refactor unrelated code while implementing a new feature.
-- Do NOT introduce future features “for convenience”.
+1. **Read and Follow Specifications:** You must read `architecture.md`, `project-overview.md`, and `code-standards.md` before writing any code. Every implementation must align with the defined stack (Python/Celery backend, React/React Native frontend, tiered hybrid storage).
+2. **Execute Single-Unit Changes Only:** Implement exactly one logical unit of work at a time (e.g., one database migration, one API route, one React hook). Never batch multiple unrelated changes into a single file modification.
+3. **Ban Speculative Coding:** Do not write boilerplate code, placeholders, or "future-use" parameters for features that are out of scope or slated for later phases. If code is not needed for the current task, do not write it.
+4. **Enforce Invariants Continuously:** You must never write code that violates the four system invariants specified in `architecture.md` (Strict 1:1 Email-Project mapping, Zero Clear-Text Cloud Storage, Hard 30-Day Device Cache Limit, No Heavy I/O in the API Main Thread).
 
 ---
 
-## 3. When to Split Work into Smaller Steps
+## 2. Granularity and Splitting Rules
 
-Always split work if:
-
-- The implementation involves more than one system layer (frontend + backend + AI + DB).
-- The feature requires external integrations (Gmail, Outlook, OpenAI).
-- The feature includes both data modeling and UI changes.
-- The feature involves background jobs or async processing.
-- The implementation exceeds ~150–200 lines of code in a single step.
-
-When splitting:
-- First implement backend logic.
-- Then implement data persistence.
-- Then implement API layer.
-- Finally implement frontend integration.
+1. **Split Heavy Tasks:** If a task requires modifying more than three files, or writing more than 150 lines of code, stop immediately. Split the work into smaller, independent technical units.
+2. **Sequential Dependecy Chain:** Build from the data layer outward. When implementing a new feature, follow this exact sequence across separate step iterations:
+   * Step A: Database schemas and migrations.
+   * Step B: Core business logic, encryption utilities, and unit tests.
+   * Step C: Celery tasks, background polling engines, and event brokers.
+   * Step D: FastAPI endpoints and API routing.
+   * Step E: Frontend state management, SQLite client cache queries, and UI components.
 
 ---
 
-## 4. Handling Missing or Ambiguous Requirements
+## 3. Handling Requirements and Ambiguities
 
-- If a requirement is unclear, STOP implementation immediately.
-- Do NOT assume missing business logic.
-- Ask for clarification or define a minimal safe default only if explicitly allowed.
-- If a default must be chosen:
-  - Prefer the simplest implementation.
-  - Avoid AI autonomy without explicit rules.
-  - Avoid hidden behavior or implicit logic.
-
-Examples:
-- If scoring rules are unclear → implement minimal rule set only.
-- If UI behavior is unclear → implement static safe display only.
+1. **Stop on Ambiguity:** If a required field, API contract, or error-handling scenario is missing from the provided prompt or specifications, **do not guess**. Halt execution and explicitly state the missing requirement to the user.
+2. **Flag Out-of-Scope Requests:** If a user instruction asks you to build a feature explicitly designated as non-applicable (e.g., automated email sending, image attachment parsing, or local browser LLM inference), reject the task immediately and cite the `project-overview.md` Out-of-Scope section.
 
 ---
 
-## 5. File Modification Rules
+## 4. Protected Files & Code Modification Bounds
 
-NEVER modify the following without explicit instruction:
-
-### UI / Generated Components
-- `/frontend/components/ui/*`
-- Any third-party or generated UI libraries
-
-### Core AI Engine Contracts
-- `/ai-engine/prompts/*`
-- `/ai-engine/schemas/*`
-
-### Authentication Layer
-- `/backend/auth/*`
-- OAuth token handling logic
-
-### Database Schema Migrations
-- `/migrations/*` unless explicitly instructed
+1. **Lock Generated UI Components:** Do not modify automatically generated UI library files, core icon packs, or base tailwind configurations unless explicitly ordered to do so. 
+2. **Lock Cryptographic Modules:** Never modify the encryption/decryption routines located in `backend/crypto/` without an explicit security audit instruction.
+3. **Preserve Third-Party Contracts:** Do not edit vendor-specific API wrappers or client definitions (e.g., Google OAuth scopes or enterprise IMAP parsing abstractions) without validating compatibility against the `architecture.md` storage model.
 
 ---
 
-## 6. Code Consistency Rules
+## 5. Documentation and Synchronization
 
-- Always reuse existing utilities before creating new ones.
-- Do not duplicate logic across services.
-- All AI outputs MUST follow predefined JSON schema strictly.
-- All API responses MUST be typed and consistent.
-
----
-
-## 7. Documentation Sync Rules
-
-- Every implemented feature MUST update documentation immediately.
-- If a new API endpoint is created, update:
-  - `/docs/api.md`
-- If architecture changes, update:
-  - `/docs/architecture.md`
-- If workflow changes, update:
-  - `/docs/project-overview.md`
-
-- Documentation must reflect implementation truth. No speculative documentation is allowed.
+1. **Sync Specs Instantly:** When you change an API path, database schema, or environment variable schema, you must update the corresponding structural description inside `architecture.md` or `code-standards.md` in the exact same tool call execution.
+2. **Document via Self-Describing Code:** Write explicit Type Hints (Python) and strict types (TypeScript). Do not write comments that state what the code does; use comments *only* to justify an un-obvious architectural necessity.
+3. **Log with Masking Strictness:** Ensure all new logging instructions use structural masking. Never log variables containing customer email bodies, attachment strings, tokens, or plaintext credentials.
 
 ---
 
-## 8. AI Processing Rules
+## 6. Pre-Flight Verification Checklist
 
-- AI must NEVER execute actions directly without validation rules.
-- All AI outputs must be:
-  - validated against schema
-  - stored before execution
-- AI decisions must be traceable (store reasoning metadata when available)
-- AI must NEVER send emails or external messages autonomously.
+You must run and pass this verification checklist before announcing that a unit of work is complete. Do not ask the user to verify code until you confirm these checks pass:
 
----
-
-## 9. Background Job Rules
-
-- All background tasks must be idempotent.
-- Batch processing must not duplicate email processing.
-- Failed jobs must be retry-safe.
-- No background job should directly modify frontend state.
-
----
-
-## 10. Verification Checklist (MANDATORY BEFORE COMPLETION)
-
-Before marking any unit as complete, verify:
-
-### Functionality
-- [ ] Feature works end-to-end
-- [ ] No runtime errors in logs
-- [ ] API returns expected structured output
-
-### Data Integrity
-- [ ] Data is correctly stored in database
-- [ ] No duplicate or corrupted entries
-- [ ] AI output conforms to schema
-
-### Integration
-- [ ] Frontend correctly consumes backend data
-- [ ] Background jobs execute successfully (if applicable)
-
-### Safety
-- [ ] No unauthorized email sending
-- [ ] No cross-user data leakage
-- [ ] No bypass of authentication layer
-
-### Documentation
-- [ ] Relevant docs updated
-- [ ] No mismatch between code and documentation
-
----
-
-## 11. Completion Rule
-
-A unit is NOT complete unless:
-- It is fully implemented
-- It is tested manually or via logs
-- It is integrated into the system flow
-- Documentation is updated
-- Verification checklist is fully satisfied
-
-No partial completion is allowed.
+- [ ] **Type Check:** `mypy .` (Backend) and `tsc --noEmit` (Frontend) execute with zero errors.
+- [ ] **Linter Check:** `ruff check .` (or Black) and `eslint` return zero style or syntax warnings.
+- [ ] **Data Encryption:** The code guarantees that raw email or attachment strings are never written to standard logs or unencrypted database fields.
+- [ ] **No Bloat:** Every line of code added directly serves the immediate unit task; all temporary debugging blocks have been deleted.
+- [ ] **Task Isolation:** No synchronous internet connection calls (IMAP, Gmail, LLMs) or heavy file parsing loops occur inside FastAPI endpoints. They are successfully routed through Celery tasks.

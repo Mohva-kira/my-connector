@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, EmailStr, Field
@@ -12,7 +13,12 @@ from sqlalchemy.orm import Session
 from email_analyzer.auth_jwt import create_access_token, hash_password, verify_password
 from email_analyzer.db.models import Membership, MembershipRole, Tenant, TenantStatus, User
 from email_analyzer.db.session import get_db
-from email_analyzer.saas_logic import authenticate_bearer, saas_enabled, unique_tenant_slug
+from email_analyzer.saas_logic import (
+    authenticate_bearer,
+    saas_enabled,
+    trigger_login_auto_sync,
+    unique_tenant_slug,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -36,6 +42,10 @@ class SwitchTenantBody(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # Jobs Fast-Track déclenchés automatiquement par ce login (voir
+    # saas_logic.trigger_login_auto_sync) — vide hors du endpoint login (register/
+    # switch) ou si le throttle 1x/24h est déjà consommé pour ce tenant.
+    auto_sync_jobs: List[Dict[str, str]] = []
 
 
 class TenantInfo(BaseModel):
@@ -50,6 +60,10 @@ class MeResponse(BaseModel):
     email: str
     active_tenant_id: uuid.UUID
     tenants: List[TenantInfo]
+    # Référence "depuis votre dernière visite" pour le Brief (GET /api/brief) —
+    # voir User.previous_login_at (db/models.py). None pour un tout premier
+    # login (pas de session précédente à comparer).
+    previous_login_at: Optional[datetime] = None
 
 
 def _require_saas() -> None:
@@ -126,8 +140,17 @@ def login(body: LoginBody, db: Session = Depends(get_db)) -> TokenResponse:
         _, tenant = first
         tid = tenant.id
 
+    # Décale la fenêtre "depuis votre dernière visite" (GET /api/brief) : la
+    # valeur qui servait de référence pour la session qui vient de se terminer
+    # devient previous_login_at pour la nouvelle session ; last_login_at avance
+    # à maintenant. Voir User.previous_login_at (db/models.py).
+    user.previous_login_at = user.last_login_at
+    user.last_login_at = datetime.now(timezone.utc)
+    db.commit()
+
+    auto_sync_jobs = trigger_login_auto_sync(db, tid)
     token = create_access_token(user_id=user.id, tenant_id=tid, email=user.email)
-    return TokenResponse(access_token=token)
+    return TokenResponse(access_token=token, auto_sync_jobs=auto_sync_jobs)
 
 
 @router.post("/switch", response_model=TokenResponse)
@@ -180,4 +203,5 @@ def me(
         email=user.email,
         active_tenant_id=tenant.id,
         tenants=tenants,
+        previous_login_at=user.previous_login_at,
     )

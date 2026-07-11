@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from datetime import timedelta
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from jose import JWTError
@@ -236,3 +236,43 @@ def period_end_for_plan(plan_interval: str) -> datetime:
     if plan_interval == "year":
         return now + timedelta(days=365)
     return now + timedelta(days=30)
+
+
+# Fenêtre de repli (premier sync uniquement, voir analyzer.py::process_delta)
+# utilisée par l'auto-sync déclenché au login — délibérément plus courte que le
+# repli du cron (60j) : c'est un aperçu rapide à la connexion, le cron 2x/jour
+# prend ensuite le relais avec une fenêtre plus large.
+_LOGIN_AUTO_SYNC_FALLBACK_DAYS = 20
+
+
+def trigger_login_auto_sync(db: Session, tenant_id: uuid.UUID) -> List[Dict[str, str]]:
+    """Déclenche un Fast-Track sur tous les projets actifs d'un tenant au
+    login, au plus 1x/24h (voir ``jobs.claim_daily_auto_sync``) — remplace le
+    besoin pour l'utilisateur de retaper un filtre "Projet" à chaque
+    connexion. Renvoie la liste des jobs déclenchés (``[]`` si le throttle est
+    déjà consommé ou si le tenant n'a aucun projet actif), pour que le
+    frontend puisse suivre leur progression (voir ``api/routers/auth.py::login``)."""
+    from email_analyzer.jobs import claim_daily_auto_sync, create_job, enqueue
+
+    if not claim_daily_auto_sync(str(tenant_id)):
+        return []
+
+    from email_analyzer.db.models import Project, ProjectStatus
+
+    projects = (
+        db.query(Project)
+        .filter(Project.tenant_id == tenant_id, Project.status == ProjectStatus.active.value)
+        .all()
+    )
+    triggered: List[Dict[str, str]] = []
+    for project in projects:
+        job_id = create_job(tenant_id=str(tenant_id))
+        enqueue(
+            job_id,
+            "run_fasttrack_refresh",
+            str(tenant_id),
+            str(project.id),
+            _LOGIN_AUTO_SYNC_FALLBACK_DAYS,
+        )
+        triggered.append({"project_id": str(project.id), "job_id": job_id})
+    return triggered

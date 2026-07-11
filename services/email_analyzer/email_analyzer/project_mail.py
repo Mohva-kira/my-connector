@@ -7,14 +7,14 @@ import logging
 import os
 import re
 from html import unescape
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from email.header import decode_header
 from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional
 
 from .ai_intelligent import get_shared_analyzer
-from .classification import ProjectRules, score_project_relevance
+from .classification import ProjectRules, derive_tags, score_project_relevance
 from .config import (
     ASSISTANT_PROVIDER_GEMINI,
     ASSISTANT_PROVIDER_NONE,
@@ -30,11 +30,91 @@ from .config import (
 )
 from .llm import (
     build_résumé_assistant_unifié,
+    extract_structured_project_summary_gemini,
+    extract_structured_project_summary_openai,
     generate_gemini_assistant_summary,
     generate_openai_assistant_summary,
     get_gemini_api_key,
 )
-from .period import filter_emails_by_period, imap_days_back_for_period
+from .period import (
+    filter_emails_by_period,
+    imap_days_back_for_period,
+    normalize_datetime_naive_local,
+    parse_email_datetime,
+)
+
+_SUBJECT_PREFIX_RE = re.compile(r"^(re|fwd?|tr)\s*:\s*", re.IGNORECASE)
+
+
+def normalize_subject(subject: Optional[str]) -> str:
+    """Normalise un sujet d'email pour le regroupement par fil de discussion :
+    retire les préfixes de réponse/transfert (Re:/Fwd:/Fw:/Tr:, répétés,
+    insensible à la casse), réduit les espaces, minuscule.
+
+    Volontairement limité à ce signal (sujet brut) : aucun threading par
+    en-têtes In-Reply-To/References, qui ne sont pas extraits aujourd'hui par
+    ``extract_email_content`` — pas demandé, évite d'étendre la surface de
+    parsing IMAP/OAuth pour ce besoin.
+    """
+    text = (subject or "").strip()
+    while True:
+        stripped = _SUBJECT_PREFIX_RE.sub("", text, count=1)
+        if stripped == text:
+            break
+        text = stripped.strip()
+    return re.sub(r"\s+", " ", text).lower()
+
+
+def group_emails_by_subject(emails: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Regroupe des emails (dicts issus de ``extract_email_content``) par sujet
+    normalisé (``normalize_subject``) — approxime un fil de discussion sans
+    dépendre des en-têtes In-Reply-To/References. Renvoie une liste de fils
+    triée par nombre de messages décroissant :
+    ``[{"subject", "count", "first_date", "last_date", "latest_email"}, ...]``
+    — ``latest_email`` (le message le plus récent du fil, ou le dernier de la
+    liste si aucune date n'est exploitable) sert de représentant pour le
+    corpus LLM (voir ``llm.py::build_llm_thread_corpus``), pour éviter de
+    répéter N fois la même conversation dans le prompt.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for idx, em in enumerate(emails):
+        key = normalize_subject(em.get("subject")) or f"__sans_sujet_{idx}__"
+        groups[key].append(em)
+
+    threads: List[Dict[str, Any]] = []
+    for group in groups.values():
+        # normalize_datetime_naive_local ramène tout à du naive (heure locale) :
+        # parse_email_datetime peut renvoyer un mélange de datetimes aware
+        # (en-tête Date avec fuseau) et naive (fuseau absent/imparsable) selon
+        # les emails d'un même fil — comparer les deux directement lève
+        # TypeError ("can't compare offset-naive and offset-aware datetimes").
+        dated = sorted(
+            (
+                (
+                    (
+                        normalize_datetime_naive_local(parsed)
+                        if (parsed := parse_email_datetime(em.get("date"))) is not None
+                        else None
+                    ),
+                    em,
+                )
+                for em in group
+            ),
+            key=lambda pair: pair[0] or datetime.min,
+        )
+        latest_email = dated[-1][1] if dated else group[-1]
+        first_email = dated[0][1] if dated else group[0]
+        threads.append(
+            {
+                "subject": (latest_email.get("subject") or "(sans sujet)").strip(),
+                "count": len(group),
+                "first_date": first_email.get("date"),
+                "last_date": latest_email.get("date"),
+                "latest_email": latest_email,
+            }
+        )
+    threads.sort(key=lambda t: t["count"], reverse=True)
+    return threads
 
 
 class EmailProjectAnalyzer:
@@ -440,11 +520,16 @@ class EmailProjectAnalyzer:
         project_filters: List[str],
         project_data: Dict,
         rules_map: Optional[Dict[str, ProjectRules]] = None,
+        catch_all_key: Optional[str] = None,
     ) -> None:
         """Fetch (cache-aware) + parse un email et l'ajoute à `project_data` s'il
         correspond à un des `project_filters`. Bloc de travail partagé par le
         balayage avant (toutes les correspondances) et le balayage arrière borné
-        (dernières correspondances seulement, cf. `max_matches`)."""
+        (dernières correspondances seulement, cf. `max_matches`).
+
+        `catch_all_key` : si fourni, un email qui ne correspond à aucun filtre
+        est tout de même conservé sous cette clé unique au lieu d'être ignoré —
+        utilisé par le mode "analyse sans filtre" (`project_filters` vide)."""
         try:
             cache_key = email_id.decode(errors="ignore") if isinstance(email_id, bytes) else str(email_id)
             cache_entry = self.email_cache.get(cache_key) if self.use_email_cache else None
@@ -479,11 +564,15 @@ class EmailProjectAnalyzer:
             # encore matché — sinon on changerait silencieusement le jeu de
             # clés retourné par search_project_emails.
             participants_map = {name: data["participants"] for name, data in project_data.items()}
+            if not email_content:
+                return
             matching_projects = self.check_project_relevance(
                 email_content, project_filters, rules_map=rules_map, participants_map=participants_map
             )
-            if not matching_projects or not email_content:
-                return
+            if not matching_projects:
+                if not catch_all_key:
+                    return
+                matching_projects = [catch_all_key]
 
             for project in matching_projects:
                 project_data[project]["emails"].append(email_content)
@@ -499,6 +588,7 @@ class EmailProjectAnalyzer:
         on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
         max_matches: Optional[int] = None,
         rules_map: Optional[Dict[str, ProjectRules]] = None,
+        catch_all_key: Optional[str] = None,
     ) -> Dict:
         """Recherche les emails concernant les projets spécifiés.
 
@@ -514,6 +604,13 @@ class EmailProjectAnalyzer:
         les derniers emails d'un projet sont utiles (contexte de `/api/chat`).
         `on_batch` est ignoré si `max_matches` est fourni (balayage non séquentiel,
         pas de notion de "lot" à rapporter).
+
+        Si `project_filters` est vide, `_uid_search_narrow_ids` renvoie `None`
+        (aucune clause à construire) et on retombe naturellement sur le SINCE
+        large — donc tous les emails de la fenêtre sont candidats. Combiné à
+        `catch_all_key`, ceci fournit le mode "analyse sans filtre" (une seule
+        clé de résultat regroupant tous les emails, voir `analyzer.py::
+        process_latest_emails`).
         """
         if not self.mail:
             return {}
@@ -559,7 +656,12 @@ class EmailProjectAnalyzer:
                 remaining = set(project_filters)
                 for email_id in reversed(email_ids):
                     self._process_one_email_id(
-                        email_id, use_uid_fetch, project_filters, project_data, rules_map=rules_map
+                        email_id,
+                        use_uid_fetch,
+                        project_filters,
+                        project_data,
+                        rules_map=rules_map,
+                        catch_all_key=catch_all_key,
                     )
                     remaining = {
                         pf
@@ -584,7 +686,12 @@ class EmailProjectAnalyzer:
                 if i % 20 == 0:
                     logging.info("Traitement: %s/%s emails", i + 1, total)
                 self._process_one_email_id(
-                    email_id, use_uid_fetch, project_filters, project_data, rules_map=rules_map
+                    email_id,
+                    use_uid_fetch,
+                    project_filters,
+                    project_data,
+                    rules_map=rules_map,
+                    catch_all_key=catch_all_key,
                 )
                 if chunked and (i + 1) % chunk_size == 0:
                     self._emit_batch_progress(on_batch, i + 1, total, project_data)
@@ -605,13 +712,14 @@ class EmailProjectAnalyzer:
         emails: List[Dict],
         project_filters: List[str],
         rules_map: Optional[Dict[str, ProjectRules]] = None,
+        catch_all_key: Optional[str] = None,
     ) -> Dict:
         """Variante de `search_project_emails` pour une source déjà normalisée
         et déjà récupérée (pas d'IMAP) — ex. emails Gmail
         (`gmail_oauth.fetch_emails`, même format de dict : `subject/from/to/
         date/body/normalized_text`). Réutilise le même matching par projet
         (`check_project_relevance`/`extract_participants`) que le chemin IMAP,
-        sans connexion ni cache IMAP."""
+        sans connexion ni cache IMAP. `catch_all_key` : voir `search_project_emails`."""
         project_data: Dict = defaultdict(
             lambda: {"emails": [], "participants": set(), "keywords": defaultdict(int), "dates": []}
         )
@@ -620,6 +728,8 @@ class EmailProjectAnalyzer:
             matching_projects = self.check_project_relevance(
                 email_content, project_filters, rules_map=rules_map, participants_map=participants_map
             )
+            if not matching_projects and catch_all_key:
+                matching_projects = [catch_all_key]
             for project in matching_projects:
                 project_data[project]["emails"].append(email_content)
                 project_data[project]["dates"].append(email_content.get("date"))
@@ -707,6 +817,7 @@ class EmailProjectAnalyzer:
         openai_max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
         openai_max_input_chars: int = DEFAULT_OPENAI_MAX_INPUT_CHARS,
         openai_body_chars: int = DEFAULT_OPENAI_BODY_CHARS,
+        include_structured: bool = False,
     ) -> Dict:
         """Génère un résumé intelligent avec IA."""
         intelligent_summary = {}
@@ -741,6 +852,24 @@ class EmailProjectAnalyzer:
             participants_list = list(data["participants"])
             email_count = len(emails_all)
 
+            # Tags de référence agrégés (derive_tags est par email, classification.py) :
+            # utile pour un aperçu rapide des thèmes dominants d'une analyse, et
+            # injecté comme contexte dans le prompt LLM ci-dessous.
+            tag_counts: Counter = Counter()
+            for em in emails_all:
+                tag_counts.update(derive_tags(em))
+            tags_reference = [
+                {"tag": tag, "count": count} for tag, count in tag_counts.most_common(10)
+            ]
+
+            # Regroupement par sujet normalisé (fils de discussion) : réduit le
+            # bruit des relances/réponses répétées avant l'appel LLM et donne un
+            # aperçu des sujets les plus actifs (voir group_emails_by_subject).
+            threads_full = group_emails_by_subject(emails_all)
+            threads_public = [
+                {k: v for k, v in t.items() if k != "latest_email"} for t in threads_full[:10]
+            ]
+
             intelligent_summary[project_name] = {
                 "nb_emails": email_count,
                 "nb_participants": len(participants_list),
@@ -755,6 +884,8 @@ class EmailProjectAnalyzer:
                 "priorité_attention": (
                     "HAUTE" if risk_assessment.get("niveau_risque") == "CRITIQUE" else "NORMALE"
                 ),
+                "tags_reference": tags_reference,
+                "threads": threads_public,
             }
 
             if assistant_provider == ASSISTANT_PROVIDER_NONE:
@@ -777,13 +908,14 @@ class EmailProjectAnalyzer:
             elif assistant_provider == ASSISTANT_PROVIDER_OPENAI:
                 openai_start = perf_counter()
                 raw_oa = generate_openai_assistant_summary(
-                    emails_all,
+                    threads_full,
                     project_name,
                     openai_model,
                     os.environ.get("OPENAI_API_KEY"),
                     max_tokens=openai_max_tokens,
                     max_input_chars=openai_max_input_chars,
                     max_body_chars=openai_body_chars,
+                    tags_reference=tags_reference,
                 )
                 self.record_timing("openai_assistant", perf_counter() - openai_start)
                 intelligent_summary[project_name]["résumé_assistant"] = build_résumé_assistant_unifié(
@@ -793,13 +925,14 @@ class EmailProjectAnalyzer:
             elif assistant_provider == ASSISTANT_PROVIDER_GEMINI:
                 gemini_start = perf_counter()
                 raw_g = generate_gemini_assistant_summary(
-                    emails_all,
+                    threads_full,
                     project_name,
                     gemini_model,
                     get_gemini_api_key(),
                     max_tokens=openai_max_tokens,
                     max_input_chars=openai_max_input_chars,
                     max_body_chars=openai_body_chars,
+                    tags_reference=tags_reference,
                 )
                 self.record_timing("gemini_assistant", perf_counter() - gemini_start)
                 intelligent_summary[project_name]["résumé_assistant"] = build_résumé_assistant_unifié(
@@ -815,6 +948,39 @@ class EmailProjectAnalyzer:
                 intelligent_summary[project_name]["résumé_assistant"] = build_résumé_assistant_unifié(
                     assistant_provider, raw_unk
                 )
+
+            # Extraction structurée (décisions/risques/échéances/prochaines
+            # étapes, voir llm.ProjectSummaryLLM) : appel LLM additionnel,
+            # activé uniquement quand l'appelant va persister le résultat
+            # (Fast-Track, analysis_tasks.py::_run_fasttrack_sync) — pas pour
+            # /api/analyze (résultat éphémère, non lié à un ProjectSummary),
+            # afin de ne pas doubler le coût/latence LLM sans bénéfice.
+            if include_structured and assistant_provider != ASSISTANT_PROVIDER_NONE:
+                structured_start = perf_counter()
+                if assistant_provider == ASSISTANT_PROVIDER_OPENAI:
+                    structured = extract_structured_project_summary_openai(
+                        threads_full,
+                        project_name,
+                        openai_model,
+                        os.environ.get("OPENAI_API_KEY"),
+                        tags_reference=tags_reference,
+                    )
+                elif assistant_provider == ASSISTANT_PROVIDER_GEMINI:
+                    structured = extract_structured_project_summary_gemini(
+                        threads_full,
+                        project_name,
+                        gemini_model,
+                        get_gemini_api_key(),
+                        tags_reference=tags_reference,
+                    )
+                else:
+                    structured = {"data": None, "erreur": f"Fournisseur inconnu: {assistant_provider}"}
+                self.record_timing("structured_extraction", perf_counter() - structured_start)
+                data = structured.get("data")
+                intelligent_summary[project_name]["structured_content"] = (
+                    data.model_dump() if data is not None else None
+                )
+                intelligent_summary[project_name]["_structured_erreur"] = structured.get("erreur")
 
         return intelligent_summary
 

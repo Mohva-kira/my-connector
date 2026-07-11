@@ -12,8 +12,24 @@ PERIOD_YESTERDAY = "yesterday"
 PERIOD_3_DAYS = "3"
 PERIOD_7_DAYS = "7"
 PERIOD_11_DAYS = "11"
+# Préréglages longue portée (recherches sur plusieurs mois) — mêmes règles
+# d'arithmétique que les valeurs numériques ci-dessus (period.py::
+# imap_days_back_for_period / get_period_bounds gèrent déjà int(period) - 1
+# de façon générique, aucun changement de logique nécessaire).
+PERIOD_90_DAYS = "90"
+PERIOD_120_DAYS = "120"
+PERIOD_240_DAYS = "240"
 VALID_PERIODS = frozenset(
-    {PERIOD_TODAY, PERIOD_YESTERDAY, PERIOD_3_DAYS, PERIOD_7_DAYS, PERIOD_11_DAYS}
+    {
+        PERIOD_TODAY,
+        PERIOD_YESTERDAY,
+        PERIOD_3_DAYS,
+        PERIOD_7_DAYS,
+        PERIOD_11_DAYS,
+        PERIOD_90_DAYS,
+        PERIOD_120_DAYS,
+        PERIOD_240_DAYS,
+    }
 )
 
 # Limites par défaut pour l'API OpenAI (entrée / sortie)

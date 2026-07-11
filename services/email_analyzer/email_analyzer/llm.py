@@ -5,6 +5,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel
+
 from .config import (
     CHAT_MAX_OUTPUT_TOKENS,
     DEFAULT_GEMINI_MODEL,
@@ -66,17 +68,85 @@ def build_llm_email_corpus(
 build_openai_email_corpus = build_llm_email_corpus
 
 
+def build_llm_thread_corpus(
+    threads: List[Dict],
+    max_total_chars: int = DEFAULT_OPENAI_MAX_INPUT_CHARS,
+    max_body_chars: int = DEFAULT_OPENAI_BODY_CHARS,
+) -> str:
+    """Même rôle que ``build_llm_email_corpus``, mais un bloc par fil de
+    discussion (``project_mail.py::group_emails_by_subject``) plutôt que par
+    email brut : réduit le bruit des relances/réponses répétées sur un même
+    sujet avant l'appel LLM. Un seul représentant par fil (le message le plus
+    récent, ``latest_email``) porte le corps, précédé du nombre de messages et
+    de la période couverte."""
+    parts: List[str] = []
+    total = 0
+    for t in threads:
+        latest = t.get("latest_email") or {}
+        subj = (t.get("subject") or latest.get("subject") or "").strip()
+        body = (latest.get("body") or "").strip()
+        excerpt = body[:max_body_chars] if body else ""
+        count = t.get("count", 1)
+        first_date = t.get("first_date")
+        last_date = t.get("last_date")
+        if first_date and last_date and first_date != last_date:
+            span = f", du {first_date} au {last_date}"
+        elif last_date:
+            span = f", le {last_date}"
+        else:
+            span = ""
+        block = (
+            f"Sujet: {subj} ({count} message{'s' if count > 1 else ''}{span})\n"
+            f"De: {latest.get('from', '')}\n\n{excerpt}"
+        )
+        if total + len(block) > max_total_chars:
+            remain = max_total_chars - total
+            if remain > 200:
+                parts.append(block[:remain] + "\n[...tronqué]")
+            break
+        parts.append(block)
+        total += len(block) + 4
+    return "\n\n---\n\n".join(parts)
+
+
+def format_tags_reference_context(tags_reference: Optional[List[Dict]]) -> str:
+    """Formate les tags de référence agrégés (``project_mail.py::
+    generate_intelligent_summary``) en une ligne de contexte à injecter dans
+    le prompt LLM, pour orienter le poids relatif donné à chaque thème."""
+    if not tags_reference:
+        return ""
+    parts = [f"{t.get('tag')} ({t.get('count')})" for t in tags_reference if t.get("tag")]
+    if not parts:
+        return ""
+    return "Tags dominants observés dans ces emails : " + ", ".join(parts) + "."
+
+
+_EXECUTIVE_SYSTEM_PROMPT = (
+    "Tu es le/la chef(fe) de cabinet d'un dirigeant : tu prépares une synthèse "
+    "exécutive du suivi de projets par email, pensée pour être lue en moins d'une "
+    "minute. Réponds en français, dans un style dense, factuel, orienté décision, "
+    "sans jargon inutile ; n'invente jamais d'information absente des emails. "
+    "Structure impérativement ta réponse en 5 sections numérotées : "
+    "1) Synthèse en une phrase. 2) Points clés. 3) Décisions à prendre ou risques "
+    "identifiés. 4) Échéances repérées dans les emails. 5) Recommandation d'action "
+    "priorisée."
+)
+
+
 def generate_openai_assistant_summary(
-    emails: List[Dict],
+    threads: List[Dict],
     project_name: str,
     model: str,
     api_key: Optional[str],
     max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
     max_input_chars: int = DEFAULT_OPENAI_MAX_INPUT_CHARS,
     max_body_chars: int = DEFAULT_OPENAI_BODY_CHARS,
+    tags_reference: Optional[List[Dict]] = None,
 ) -> Dict:
     """
-    Résumé structuré via l'API Chat Completions OpenAI (assistant virtuel).
+    Résumé exécutif structuré via l'API Chat Completions OpenAI, à partir des
+    fils de discussion regroupés par sujet (``threads``, voir
+    ``project_mail.py::group_emails_by_subject``) plutôt que des emails bruts.
     """
     result: Dict = {
         "texte": None,
@@ -89,12 +159,12 @@ def generate_openai_assistant_summary(
     if not api_key:
         result["erreur"] = "OPENAI_API_KEY non définie dans l'environnement"
         return result
-    if not emails:
+    if not threads:
         result["erreur"] = "Aucun email à résumer pour cette période"
         return result
 
-    corpus = build_llm_email_corpus(
-        emails,
+    corpus = build_llm_thread_corpus(
+        threads,
         max_total_chars=max_input_chars,
         max_body_chars=max_body_chars,
     )
@@ -102,16 +172,13 @@ def generate_openai_assistant_summary(
         result["erreur"] = "Contenu vide après agrégation"
         return result
 
-    system_prompt = (
-        "Tu es un assistant de synthèse pour le suivi de projets par email. "
-        "Réponds en français. Structure ta réponse avec des sections claires "
-        "(faits saillants, décisions, risques ou blocages, prochaines étapes). "
-        "Ton professionnel et concis ; n'invente pas d'informations absentes des emails."
-    )
+    system_prompt = _EXECUTIVE_SYSTEM_PROMPT
+    tags_context = format_tags_reference_context(tags_reference)
     user_prompt = (
         f"Projet : {project_name}\n\n"
-        "Voici les emails (extraits) à synthétiser :\n\n"
-        f"{corpus}"
+        + (f"{tags_context}\n\n" if tags_context else "")
+        + "Voici les fils de discussion (regroupés par sujet, extraits) à synthétiser :\n\n"
+        + corpus
     )
 
     try:
@@ -146,16 +213,19 @@ def generate_openai_assistant_summary(
 
 
 def generate_gemini_assistant_summary(
-    emails: List[Dict],
+    threads: List[Dict],
     project_name: str,
     model: str,
     api_key: Optional[str],
     max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
     max_input_chars: int = DEFAULT_OPENAI_MAX_INPUT_CHARS,
     max_body_chars: int = DEFAULT_OPENAI_BODY_CHARS,
+    tags_reference: Optional[List[Dict]] = None,
 ) -> Dict:
     """
-    Résumé structuré via l'API Gemini (google-generativeai).
+    Résumé exécutif structuré via l'API Gemini (google-generativeai), à partir
+    des fils de discussion regroupés par sujet (``threads``, voir
+    ``project_mail.py::group_emails_by_subject``) plutôt que des emails bruts.
     """
     result: Dict = {
         "texte": None,
@@ -171,12 +241,12 @@ def generate_gemini_assistant_summary(
             "(clé depuis https://aistudio.google.com)"
         )
         return result
-    if not emails:
+    if not threads:
         result["erreur"] = "Aucun email à résumer pour cette période"
         return result
 
-    corpus = build_llm_email_corpus(
-        emails,
+    corpus = build_llm_thread_corpus(
+        threads,
         max_total_chars=max_input_chars,
         max_body_chars=max_body_chars,
     )
@@ -184,16 +254,13 @@ def generate_gemini_assistant_summary(
         result["erreur"] = "Contenu vide après agrégation"
         return result
 
-    system_instruction = (
-        "Tu es un assistant de synthèse pour le suivi de projets par email. "
-        "Réponds en français. Structure ta réponse avec des sections claires "
-        "(faits saillants, décisions, risques ou blocages, prochaines étapes). "
-        "Ton professionnel et concis ; n'invente pas d'informations absentes des emails."
-    )
+    system_instruction = _EXECUTIVE_SYSTEM_PROMPT
+    tags_context = format_tags_reference_context(tags_reference)
     user_prompt = (
         f"Projet : {project_name}\n\n"
-        "Voici les emails (extraits) à synthétiser :\n\n"
-        f"{corpus}"
+        + (f"{tags_context}\n\n" if tags_context else "")
+        + "Voici les fils de discussion (regroupés par sujet, extraits) à synthétiser :\n\n"
+        + corpus
     )
 
     try:
@@ -258,6 +325,200 @@ def generate_gemini_assistant_summary(
             result["erreur"] = raw
 
     return result
+
+
+_STRUCTURED_EXECUTIVE_SYSTEM_PROMPT = (
+    "Tu es le/la chef(fe) de cabinet d'un dirigeant : tu extrais, à partir de fils "
+    "de discussion email d'un projet, une synthèse structurée exploitable par une "
+    "application (pas un texte à lire). Réponds en français, reste factuel, "
+    "n'invente jamais un fait, une date ou un nom absent des emails. Si une "
+    "information demandée est absente, laisse la liste correspondante vide plutôt "
+    "que d'inventer une valeur plausible. `decisions` = décisions déjà prises "
+    "d'après les emails (pas des recommandations). `risques` = risques ou blocages "
+    "identifiés. `next_steps` = prochaines actions concrètes à mener, chacune "
+    "courte et actionnable. `deadlines` = échéances explicitement mentionnées. "
+    "`llm_risk_level` doit valoir 'FAIBLE', 'MODÉRÉ' ou 'CRITIQUE'."
+)
+
+
+# Pas de valeur par défaut sur aucun champ ci-dessous (y compris `Optional`) :
+# le schéma JSON envoyé aux deux fournisseurs doit lister tous les champs comme
+# "required" — Gemini (google-generativeai 0.8) rejette explicitement toute
+# clé "default" dans un schéma ("Unknown field for Schema: default"), et
+# OpenAI Structured Outputs impose la même contrainte en mode strict. Un champ
+# `Optional[str]` sans défaut reste correctement "requis mais nullable" pour
+# les deux — le LLM doit toujours renvoyer la clé, avec `null` si absent.
+class DecisionItem(BaseModel):
+    description: str
+    date_iso: Optional[str]
+    confidence: Optional[str]
+
+
+class RiskItem(BaseModel):
+    description: str
+    niveau: Optional[str]
+    source: Optional[str]
+
+
+class NextStepItem(BaseModel):
+    description: str
+    responsable: Optional[str]
+    priorite: Optional[str]
+
+
+class DeadlineItem(BaseModel):
+    description: str
+    date_iso: Optional[str]
+    confiance: Optional[str]
+
+
+class ProjectSummaryLLM(BaseModel):
+    """Contrat JSON structuré du résumé projet (rfc-email-pipeline-v2.md §11).
+
+    Additif à `résumé_assistant` (texte libre, inchangé) : ce schéma alimente
+    `ProjectSummary.structured_content`/`llm_risk_level` (db/models.py), pas le
+    champ `content` existant. `llm_risk_level` ne remplace jamais
+    `ai_intelligent.calculate_risk_score` — les deux sont stockés séparément
+    (voir analysis_tasks.py::_run_fasttrack_sync). `schema_version` n'est pas
+    demandé au LLM : c'est une constante de code (voir `structured_content`
+    persisté par `_run_fasttrack_sync`), pas une valeur qu'il doit déduire."""
+
+    synthese: str
+    points_cles: List[str]
+    decisions: List[DecisionItem]
+    risques: List[RiskItem]
+    next_steps: List[NextStepItem]
+    deadlines: List[DeadlineItem]
+    participants: List[str]
+    companies: List[str]
+    products: List[str]
+    sentiment_trend: Optional[str]
+    llm_risk_level: Optional[str]
+    missing_information: List[str]
+    project_updates: List[str]
+
+
+def _structured_user_prompt(threads: List[Dict], project_name: str, tags_reference: Optional[List[Dict]]) -> Optional[str]:
+    corpus = build_llm_thread_corpus(threads)
+    if not corpus.strip():
+        return None
+    tags_context = format_tags_reference_context(tags_reference)
+    return (
+        f"Projet : {project_name}\n\n"
+        + (f"{tags_context}\n\n" if tags_context else "")
+        + "Voici les fils de discussion (regroupés par sujet, extraits) à analyser :\n\n"
+        + corpus
+    )
+
+
+def extract_structured_project_summary_openai(
+    threads: List[Dict],
+    project_name: str,
+    model: str,
+    api_key: Optional[str],
+    tags_reference: Optional[List[Dict]] = None,
+) -> Dict[str, Any]:
+    """Extraction structurée via OpenAI Structured Outputs (schéma
+    `ProjectSummaryLLM`). Retourne ``{"data": ProjectSummaryLLM, "erreur": None}``
+    ou ``{"data": None, "erreur": "..."}`` — jamais d'exception qui remonte au
+    worker arq (même discipline que `generate_openai_assistant_summary`)."""
+    if not api_key:
+        return {"data": None, "erreur": "OPENAI_API_KEY non définie dans l'environnement"}
+    if not threads:
+        return {"data": None, "erreur": "Aucun email à analyser pour cette période"}
+    user_prompt = _structured_user_prompt(threads, project_name, tags_reference)
+    if not user_prompt:
+        return {"data": None, "erreur": "Contenu vide après agrégation"}
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, timeout=llm_timeout_seconds())
+        completion = client.chat.completions.parse(
+            model=model,
+            messages=[
+                {"role": "system", "content": _STRUCTURED_EXECUTIVE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            response_format=ProjectSummaryLLM,
+        )
+        message = completion.choices[0].message
+        if message.refusal:
+            return {"data": None, "erreur": f"Réponse refusée par le modèle : {message.refusal}"}
+        if message.parsed is None:
+            return {"data": None, "erreur": "Extraction structurée vide"}
+        return {"data": message.parsed, "erreur": None}
+    except Exception as ex:
+        logging.warning("Échec extraction structurée OpenAI: %s", ex)
+        return {"data": None, "erreur": str(ex)}
+
+
+def extract_structured_project_summary_gemini(
+    threads: List[Dict],
+    project_name: str,
+    model: str,
+    api_key: Optional[str],
+    tags_reference: Optional[List[Dict]] = None,
+) -> Dict[str, Any]:
+    """Équivalent Gemini de ``extract_structured_project_summary_openai`` —
+    ``response_schema=ProjectSummaryLLM`` (google-generativeai >= 0.8, déjà la
+    version installée), une tentative puis retry unique sur échec de
+    validation Pydantic (rfc-email-pipeline-v2.md §11)."""
+    if not api_key:
+        return {
+            "data": None,
+            "erreur": "GEMINI_API_KEY ou GOOGLE_API_KEY non définie dans l'environnement",
+        }
+    if not threads:
+        return {"data": None, "erreur": "Aucun email à analyser pour cette période"}
+    user_prompt = _structured_user_prompt(threads, project_name, tags_reference)
+    if not user_prompt:
+        return {"data": None, "erreur": "Contenu vide après agrégation"}
+
+    try:
+        import google.generativeai as genai
+        from pydantic import ValidationError
+
+        genai.configure(api_key=api_key)
+        generation_config = genai.GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=ProjectSummaryLLM,
+            temperature=0.2,
+        )
+        try:
+            gen_model = genai.GenerativeModel(
+                model_name=model,
+                system_instruction=_STRUCTURED_EXECUTIVE_SYSTEM_PROMPT,
+            )
+            prompt = user_prompt
+        except TypeError:
+            gen_model = genai.GenerativeModel(model_name=model)
+            prompt = f"{_STRUCTURED_EXECUTIVE_SYSTEM_PROMPT}\n\n{user_prompt}"
+
+        last_error: Optional[str] = None
+        for attempt in range(2):
+            response = gen_model.generate_content(
+                prompt,
+                generation_config=generation_config,
+                request_options={"timeout": llm_timeout_seconds()},
+            )
+            if not response.candidates:
+                block_reason = getattr(response.prompt_feedback, "block_reason", None)
+                last_error = "Réponse Gemini vide ou bloquée" + (
+                    f" (raison: {block_reason})" if block_reason else ""
+                )
+                continue
+            try:
+                data = ProjectSummaryLLM.model_validate_json(response.text)
+                return {"data": data, "erreur": None}
+            except (ValidationError, ValueError) as ve:
+                last_error = f"Sortie JSON non conforme au schéma : {ve}"
+                continue
+        return {"data": None, "erreur": last_error or "Échec d'extraction structurée"}
+    except Exception as ex:
+        logging.warning("Échec extraction structurée Gemini: %s", ex)
+        return {"data": None, "erreur": str(ex)}
 
 
 def serialize_analysis_for_chat(analysis: Dict[str, Any], max_chars: int) -> str:

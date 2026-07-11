@@ -50,6 +50,16 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    # Horodatage du login le plus récent — mis à jour à chaque POST /api/auth/login.
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Horodatage du login précédent (avant celui ci-dessus) — c'est LUI qui sert
+    # de référence "depuis votre dernière visite" (GET /api/brief) : il reste
+    # stable pendant toute la session en cours (contrairement à last_login_at,
+    # qui avance à chaque nouveau login), pour ne pas remettre le Brief à zéro
+    # à chaque rechargement de page.
+    previous_login_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     memberships: Mapped[list["Membership"]] = relationship(back_populates="user")
 
@@ -295,6 +305,19 @@ class ProjectSummary(Base):
     )
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sentiment: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Sortie LLM structurée (décisions/risques/échéances/prochaines étapes,
+    # voir email_analyzer.llm.ProjectSummaryLLM et rfc-email-pipeline-v2.md §11) ;
+    # additif à `content` (texte libre, inchangé) — NULL pour les résumés
+    # générés avant l'ajout de cette colonne ou en cas d'échec d'extraction.
+    structured_content: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Niveau de risque perçu par le LLM (rfc-email-pipeline-v2.md §11) — jamais
+    # fusionné avec `sentiment` (dérivé des règles déterministes,
+    # ai_intelligent.calculate_risk_score) : un désaccord entre les deux est un
+    # signal, pas un conflit à résoudre silencieusement.
+    llm_risk_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Version du schéma de `structured_content`, pour faire évoluer le contrat
+    # JSON sans migration bloquante des résumés déjà persistés.
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
     # Curseur d'incrémentalité du Fast-Track (architecture.md, Process 2) : seuls
     # les emails reçus après cette date sont récupérés lors d'un rafraîchissement.
     last_processed_email_timestamp: Mapped[Optional[datetime]] = mapped_column(

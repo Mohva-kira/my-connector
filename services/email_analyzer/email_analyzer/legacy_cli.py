@@ -45,7 +45,7 @@ def main() -> None:
         metavar="PÉRIODE",
         help=(
             "Filtre temporel sur la date des messages: today, yesterday, "
-            "3 (3 derniers jours), 7, 11. Remplace --days pour la recherche IMAP."
+            "3 (3 derniers jours), 7, 11, 90, 120, 240. Remplace --days pour la recherche IMAP."
         ),
     )
     parser.add_argument(

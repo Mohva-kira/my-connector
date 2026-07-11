@@ -85,9 +85,14 @@ class EmailProcessor:
             not in ("0", "false", "no")
         )
 
+    # Clé de résultat utilisée quand aucun filtre de projet n'est fourni (mode
+    # "analyse sans filtre") : tous les emails de la fenêtre sont regroupés
+    # sous cette clé unique — voir `search_project_emails`/`catch_all_key`.
+    NO_FILTER_RESULT_KEY = "Tous les emails"
+
     def process_latest_emails(
         self,
-        project_filter: Union[str, List[str]],
+        project_filter: Optional[Union[str, List[str]]],
         period: Optional[str] = None,
         days: int = 30,
         assistant_provider: str = ASSISTANT_PROVIDER_OPENAI,
@@ -102,8 +107,12 @@ class EmailProcessor:
         Récupère les emails correspondant aux projets, applique la période optionnelle,
         retourne le même JSON structuré que `generate_intelligent_summary` (par nom de projet).
 
-        :param project_filter: un nom de projet ou une liste de noms.
-        :param period: today | yesterday | 3 | 7 | 11 (optionnel) ; sinon fenêtre `days` pour IMAP.
+        :param project_filter: un nom de projet, une liste de noms, ou ``None``/liste
+            vide pour analyser tous les emails de la fenêtre sans filtre — le résultat
+            regroupe alors tout sous la clé unique ``NO_FILTER_RESULT_KEY`` (mode
+            "propose les sujets à analyser" du frontend, via les fils de discussion déjà
+            calculés par `generate_intelligent_summary`).
+        :param period: today | yesterday | 3 | 7 | 11 | 90 | 120 | 240 (optionnel) ; sinon fenêtre `days` pour IMAP.
         :param on_batch: callback optionnel(processed, total, partial) appelé après chaque
             lot lorsque le nombre d'emails candidats dépasse le seuil de chunking. Ignoré
             sur le chemin Gmail (pas de notion de lot, un seul appel API).
@@ -125,11 +134,15 @@ class EmailProcessor:
         if assistant_provider not in VALID_ASSISTANT_PROVIDERS:
             return {"_error": f"assistant_provider invalide: {assistant_provider}"}
 
-        projects: List[str] = (
-            [project_filter] if isinstance(project_filter, str) else list(project_filter)
-        )
+        if project_filter is None:
+            projects: List[str] = []
+        else:
+            projects = (
+                [project_filter] if isinstance(project_filter, str) else list(project_filter)
+            )
+        catch_all_key: Optional[str] = None
         if not projects:
-            return {"_error": "project_filter vide."}
+            catch_all_key = self.NO_FILTER_RESULT_KEY
 
         analyzer = EmailProjectAnalyzer(
             self.email_address or "",
@@ -148,14 +161,18 @@ class EmailProcessor:
         if use_gmail:
             source_label = "Gmail"
             try:
-                project_data = self._fetch_gmail_project_data(analyzer, projects, imap_days)
+                project_data = self._fetch_gmail_project_data(
+                    analyzer, projects, imap_days, catch_all_key=catch_all_key
+                )
             except Exception as exc:
                 logging.exception("Échec de la récupération Gmail")
                 return {"_error": f"Échec de la récupération Gmail : {exc}"}
         elif use_outlook:
             source_label = "Outlook"
             try:
-                project_data = self._fetch_outlook_project_data(analyzer, projects, imap_days)
+                project_data = self._fetch_outlook_project_data(
+                    analyzer, projects, imap_days, catch_all_key=catch_all_key
+                )
             except Exception as exc:
                 logging.exception("Échec de la récupération Outlook")
                 return {"_error": f"Échec de la récupération Outlook : {exc}"}
@@ -163,18 +180,29 @@ class EmailProcessor:
             if not analyzer.connect():
                 return {"_error": "Échec de la connexion IMAP."}
             try:
-                project_data = analyzer.search_project_emails(projects, imap_days, on_batch=on_batch)
+                project_data = analyzer.search_project_emails(
+                    projects, imap_days, on_batch=on_batch, catch_all_key=catch_all_key
+                )
             finally:
                 analyzer.disconnect()
 
         if not project_data:
-            filter_label = projects[0] if len(projects) == 1 else ", ".join(projects)
-            return {
-                "_empty": True,
-                "_message": (
+            filter_label = (
+                catch_all_key
+                if catch_all_key
+                else (projects[0] if len(projects) == 1 else ", ".join(projects))
+            )
+            message = (
+                f"Aucun email dans {source_label} sur la période analysée."
+                if catch_all_key
+                else (
                     f"Aucun email ne correspond au filtre dans {source_label} sur la période "
                     "analysée (recherche dans le sujet et le corps)."
-                ),
+                )
+            )
+            return {
+                "_empty": True,
+                "_message": message,
                 "_filter": filter_label,
                 "_imap_folder": self.imap_folder if not (use_gmail or use_outlook) else None,
                 "_days_back": imap_days,
@@ -201,6 +229,7 @@ class EmailProcessor:
         analyzer: EmailProjectAnalyzer,
         projects: List[str],
         days_back: int,
+        catch_all_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Récupère les emails récents via Gmail OAuth (aucune connexion IMAP) et
         les fait matcher par ``analyzer`` exactement comme le chemin IMAP —
@@ -222,13 +251,14 @@ class EmailProcessor:
         )
         if token_refresh:
             self.last_gmail_token_refresh = token_refresh
-        return analyzer.search_project_emails_from_list(emails, projects)
+        return analyzer.search_project_emails_from_list(emails, projects, catch_all_key=catch_all_key)
 
     def _fetch_outlook_project_data(
         self,
         analyzer: EmailProjectAnalyzer,
         projects: List[str],
         days_back: int,
+        catch_all_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Miroir de `_fetch_gmail_project_data` pour Outlook (Microsoft Graph) —
         même limitation connue (200 messages, une seule page, pas de pagination)."""
@@ -244,7 +274,7 @@ class EmailProcessor:
         )
         if token_refresh:
             self.last_outlook_token_refresh = token_refresh
-        return analyzer.search_project_emails_from_list(emails, projects)
+        return analyzer.search_project_emails_from_list(emails, projects, catch_all_key=catch_all_key)
 
     def process_delta(
         self,
@@ -254,12 +284,16 @@ class EmailProcessor:
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = DEFAULT_GEMINI_MODEL,
         rules_matrix: Optional[dict] = None,
+        fallback_days: int = 30,
+        include_structured: bool = False,
     ) -> Dict[str, Any]:
         """Fast-Track : récupère uniquement les emails reçus après ``since`` et
         régénère le résumé à partir de ce seul delta (architecture.md, Process 2).
 
         Si ``since`` est ``None`` (premier rafraîchissement d'un projet), retombe
-        sur une fenêtre par défaut de 30 jours, comme ``process_latest_emails``.
+        sur une fenêtre de ``fallback_days`` jours (30 par défaut, comme
+        ``process_latest_emails`` — le cron et l'auto-sync au login passent des
+        valeurs plus généreuses, voir ``email_analyzer/analysis_tasks.py``).
 
         Contrairement à ``process_latest_emails``, expose aussi la liste brute
         des emails du delta (clé ``"emails"``) pour permettre leur persistance
@@ -269,6 +303,10 @@ class EmailProcessor:
         classification multi-critères (``email_analyzer/classification.py``)
         en plus du simple nom de projet ; ``None`` reproduit exactement
         l'ancien comportement (recherche du nom de projet en sous-chaîne).
+
+        ``include_structured`` : déclenche un appel LLM additionnel
+        (``llm.ProjectSummaryLLM``) — à réserver aux appelants qui persistent
+        le résultat (Fast-Track), pas à ``process_latest_emails``.
         """
         if not self.email_address or not self.password:
             return {"_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD)."}
@@ -284,7 +322,7 @@ class EmailProcessor:
             days_back = max(1, (datetime.now(timezone.utc) - since_utc).days + 2)
         else:
             since_utc = None
-            days_back = 30
+            days_back = fallback_days
 
         analyzer = EmailProjectAnalyzer(
             self.email_address,
@@ -352,6 +390,7 @@ class EmailProcessor:
                 assistant_provider=assistant_provider,
                 openai_model=openai_model,
                 gemini_model=gemini_model,
+                include_structured=include_structured,
             )
             return {"emails": emails, "summary": summary.get(key, {})}
         finally:

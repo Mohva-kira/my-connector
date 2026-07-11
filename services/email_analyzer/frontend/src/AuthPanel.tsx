@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { apiFetch, setAccessToken } from "./apiClient";
+import { apiFetch, setAccessToken, setPendingAutoSync } from "./apiClient";
 
 type Mode = "login" | "register";
 
@@ -46,6 +46,9 @@ export default function AuthPanel({
           throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail ?? data));
         }
         setAccessToken((data as { access_token: string }).access_token);
+        setPendingAutoSync(
+          (data as { auto_sync_jobs?: { project_id: string; job_id: string }[] }).auto_sync_jobs ?? [],
+        );
       }
       onSuccess();
     } catch (err) {

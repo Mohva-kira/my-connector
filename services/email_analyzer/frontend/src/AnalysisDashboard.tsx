@@ -14,6 +14,8 @@ export type ProjectAnalysis = {
   entités_extraites?: { technologies?: string[] };
   résumé_assistant?: { texte?: string; erreur?: string; fournisseur?: string };
   emails_critiques?: Array<{ subject?: string; date?: string }>;
+  tags_reference?: Array<{ tag: string; count: number }>;
+  threads?: Array<{ subject: string; count: number; first_date?: string | null; last_date?: string | null }>;
 };
 
 export type DraftResult = {
@@ -28,6 +30,9 @@ type Props = {
   analysis: ProjectAnalysis;
   initialDraft?: DraftResult | null;
   onRequestDraft?: () => Promise<DraftResult>;
+  // Fournie par HomePage après une analyse sans filtre : chaque fil devient un
+  // sujet cliquable pour relancer une analyse ciblée sur ce sujet.
+  onSelectThread?: (subject: string) => void;
 };
 
 function riskBadgeClass(niveau?: string): string {
@@ -58,6 +63,7 @@ export function AnalysisDashboard({
   analysis,
   initialDraft = null,
   onRequestDraft,
+  onSelectThread,
 }: Props) {
   const [draft, setDraft] = useState<DraftResult | null>(initialDraft);
   const [loading, setLoading] = useState(false);
@@ -68,6 +74,9 @@ export function AnalysisDashboard({
   const risk = analysis.évaluation_risque;
   const sentiment = analysis.analyse_sentiment;
   const techs = analysis.entités_extraites?.technologies?.slice(0, 8) || [];
+  const executiveSummary = analysis.résumé_assistant?.texte;
+  const tagsReference = analysis.tags_reference || [];
+  const threads = analysis.threads || [];
 
   async function handleDraft() {
     if (!onRequestDraft) return;
@@ -103,6 +112,63 @@ export function AnalysisDashboard({
           Risque : {risk?.niveau_risque || "—"} ({risk?.score_risque ?? "—"}/100)
         </span>
       </div>
+
+      {executiveSummary ? (
+        <div className="mt-4 rounded-2xl border border-border-default bg-surface p-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+            Synthèse (assistant de direction)
+          </h2>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-text-primary">
+            {executiveSummary}
+          </p>
+        </div>
+      ) : null}
+
+      {tagsReference.length > 0 ? (
+        <div className="mt-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+            Tags dominants
+          </h2>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {tagsReference.map((t) => (
+              <span
+                key={t.tag}
+                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium ${riskBadgeClass()}`}
+              >
+                {t.tag}
+                <span className="text-text-muted">×{t.count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {threads.length > 0 ? (
+        <div className="mt-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+            {onSelectThread ? "Sujets détectés — cliquez pour approfondir" : "Fils de discussion"}
+          </h2>
+          <ul className="mt-2 space-y-1 text-sm text-text-secondary">
+            {threads.map((t) =>
+              onSelectThread ? (
+                <li key={t.subject}>
+                  <button
+                    type="button"
+                    onClick={() => onSelectThread(t.subject)}
+                    className="w-full truncate rounded-lg px-1.5 py-1 text-left text-text-secondary underline decoration-border-default underline-offset-2 transition hover:bg-bg-tertiary hover:text-text-primary"
+                  >
+                    {t.subject || "(sans sujet)"} — {t.count} message{t.count > 1 ? "s" : ""}
+                  </button>
+                </li>
+              ) : (
+                <li key={t.subject} className="truncate">
+                  {t.subject || "(sans sujet)"} — {t.count} message{t.count > 1 ? "s" : ""}
+                </li>
+              ),
+            )}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <div className="rounded-xl bg-ai-glow p-4">

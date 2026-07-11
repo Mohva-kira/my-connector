@@ -1,4 +1,7 @@
 const TOKEN_KEY = "email_analyzer_token";
+const PENDING_AUTO_SYNC_KEY = "email_analyzer_pending_auto_sync";
+
+export type PendingAutoSyncJob = { project_id: string; job_id: string };
 
 /**
  * Base URL de l'API, figée au build via VITE_API_BASE.
@@ -29,6 +32,34 @@ export function setAccessToken(token: string | null): void {
     else localStorage.removeItem(TOKEN_KEY);
   } catch {
     /* ignore */
+  }
+}
+
+/**
+ * Jobs Fast-Track déclenchés automatiquement par le login (voir
+ * api/routers/auth.py::login, TokenResponse.auto_sync_jobs) — passés via
+ * sessionStorage plutôt qu'un state React levé, pour survivre à la
+ * redirection /login -> / sans re-plomberie de contexte. Consommés une seule
+ * fois par ProjectHub (takePendingAutoSync supprime la clé).
+ */
+export function setPendingAutoSync(jobs: PendingAutoSyncJob[]): void {
+  try {
+    if (jobs.length > 0) sessionStorage.setItem(PENDING_AUTO_SYNC_KEY, JSON.stringify(jobs));
+    else sessionStorage.removeItem(PENDING_AUTO_SYNC_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function takePendingAutoSync(): PendingAutoSyncJob[] {
+  try {
+    const raw = sessionStorage.getItem(PENDING_AUTO_SYNC_KEY);
+    sessionStorage.removeItem(PENDING_AUTO_SYNC_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as PendingAutoSyncJob[]) : [];
+  } catch {
+    return [];
   }
 }
 

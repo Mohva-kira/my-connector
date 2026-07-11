@@ -37,6 +37,11 @@ _JOB_TTL_SECONDS = 30 * 60
 
 _KEY_PREFIX = "myconnector:job:"
 
+# Throttle de l'auto-sync au login (Fast-Track sur tous les projets actifs
+# d'un tenant, voir saas_logic.trigger_login_auto_sync) — au plus 1x/24h/tenant.
+_AUTO_SYNC_KEY_PREFIX = "myconnector:auto_sync:"
+_AUTO_SYNC_TTL_SECONDS = 24 * 60 * 60
+
 _redis: Optional["redis_lib.Redis"] = None
 
 
@@ -138,3 +143,15 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Retourne l'état du job (status/result/error/tenant_id/processed/total/partial)
     ou ``None`` si absent/expiré."""
     return _read(job_id)
+
+
+def claim_daily_auto_sync(tenant_id: str) -> bool:
+    """Renvoie ``True`` au plus une fois par 24h par tenant (``SET NX EX``,
+    claim atomique), ``False`` sinon — évite de relancer un Fast-Track sur
+    tous les projets d'un tenant à chaque connexion (voir
+    ``saas_logic.trigger_login_auto_sync``)."""
+    return bool(
+        _client().set(
+            f"{_AUTO_SYNC_KEY_PREFIX}{tenant_id}", "1", nx=True, ex=_AUTO_SYNC_TTL_SECONDS
+        )
+    )

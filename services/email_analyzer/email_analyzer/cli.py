@@ -19,7 +19,7 @@ def main() -> None:
     parser.add_argument(
         "--period",
         default=None,
-        help="today, yesterday, 3, 7, 11 (optionnel)",
+        help="today, yesterday, 3, 7, 11, 90, 120, 240 (optionnel)",
     )
     parser.add_argument("--days", type=int, default=30, help="Fenêtre IMAP si pas de --period")
     parser.add_argument(
