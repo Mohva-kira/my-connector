@@ -40,6 +40,22 @@ body {
   }
 }
 
+/* Fiche détail d'une action (ActionsPage) : ouverture douce, pas d'à-coup */
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-modal-in {
+  animation: modal-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
 @keyframes skeleton-pulse {
   0%,
   100% {

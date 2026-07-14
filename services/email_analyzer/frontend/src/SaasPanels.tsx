@@ -13,6 +13,7 @@ export type Me = {
   email: string;
   active_tenant_id: string;
   tenants: TenantRow[];
+  previous_login_at: string | null;
 };
 
 type PlanRow = {

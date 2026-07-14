@@ -2,8 +2,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { apiFetch } from "./apiClient";
 import { parseResponseJson, type Health } from "./apiUtils";
+import ActionsPage from "./pages/ActionsPage";
+import AgendaPage from "./pages/AgendaPage";
+import AssistantPage from "./pages/AssistantPage";
 import HomePage from "./pages/HomePage";
 import LoginPage from "./pages/LoginPage";
+import ProjectDetailPage from "./pages/ProjectDetailPage";
 import ProjectHubPage from "./pages/ProjectHubPage";
 import SettingsPage from "./pages/SettingsPage";
 
@@ -83,6 +87,22 @@ export default function App() {
       <Route
         path="/projects"
         element={<ProjectHubPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
+      />
+      <Route
+        path="/projects/:projectId"
+        element={<ProjectDetailPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
+      />
+      <Route
+        path="/agenda"
+        element={<AgendaPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
+      />
+      <Route
+        path="/actions"
+        element={<ActionsPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
+      />
+      <Route
+        path="/assistant"
+        element={<AssistantPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
       />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

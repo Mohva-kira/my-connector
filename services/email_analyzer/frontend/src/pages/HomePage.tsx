@@ -7,8 +7,8 @@ import AnalysisDashboard, {
 import ConversationalAssistant, { type ChatTurn } from "../ConversationalAssistant";
 import { apiFetch, getAccessToken } from "../apiClient";
 import { parseApiError, parseResponseJson, type Health } from "../apiUtils";
-import AppShell from "../components/AppShell";
 import { useSaasSession } from "../SaasPanels";
+import BriefPage from "./BriefPage";
 import { applyAnalyzeTickToStore, type AnalyzeJobTick } from "../sync-experience/bridgeAnalyzeJob";
 import { useSyncStore } from "../store/syncStore";
 
@@ -23,9 +23,9 @@ const ANALYZE_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 // Messages courts qui tournent pendant le chargement (gamification sobre :
 // donne un retour vivant sans bruit visuel — cf. context/ui-context.md).
 const LOADING_STATUS_MESSAGES = [
-  "Récupération des emails…",
-  "Analyse en cours…",
-  "Repérage des emails critiques…",
+  "Je récupère vos emails…",
+  "Je les analyse…",
+  "Je repère ce qui compte vraiment…",
 ];
 
 type AnalyzeProgress = { processed: number; total: number };
@@ -574,11 +574,11 @@ export default function HomePage({
                   className="rounded-2xl border border-success/30 bg-success/10 px-4 py-3 text-sm text-success shadow-sm"
                   role="status"
                 >
-                  <p className="font-medium">Analyse terminée</p>
+                  <p className="font-medium">J&apos;ai terminé l&apos;analyse de vos échanges</p>
                   <p className="mt-0.5 text-success/90">
                     {activeProjectName === NO_FILTER_RESULT_KEY
-                      ? "Tous les emails de la période ont été analysés."
-                      : `${reportKeys.length} projet${reportKeys.length > 1 ? "s" : ""} dans le rapport.`}
+                      ? "Tous les emails de la période ont été passés en revue."
+                      : `${reportKeys.length} projet${reportKeys.length > 1 ? "s" : ""} à jour.`}
                   </p>
                 </div>
               ) : null}
@@ -732,7 +732,11 @@ export default function HomePage({
   );
 
   if (saasEnabled && me) {
-    return <AppShell me={me}>{inner}</AppShell>;
+    // L'ancien formulaire "Lancer l'analyse" (JSX `inner` ci-dessus) reste
+    // utilisé en mode legacy (voir plus bas) : en SaaS, la synchronisation
+    // est déjà automatique (cron 2x/jour + auto-sync au login,
+    // saas_logic.trigger_login_auto_sync) — l'accueil devient le Brief.
+    return <BriefPage me={me} />;
   }
 
   return (
