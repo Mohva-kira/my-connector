@@ -62,8 +62,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from api.routers import actions as actions_router
+from api.routers import agenda as agenda_router
+from api.routers import assistant as assistant_router
 from api.routers import auth as auth_router
 from api.routers import billing as billing_router
+from api.routers import brief as brief_router
 from api.routers import oauth as oauth_router
 from api.routers import projects as projects_router
 from api.routers import tenants as tenants_router
@@ -111,6 +114,9 @@ app.include_router(billing_router.router)
 app.include_router(oauth_router.router)
 app.include_router(projects_router.router)
 app.include_router(actions_router.router)
+app.include_router(agenda_router.router)
+app.include_router(brief_router.router)
+app.include_router(assistant_router.router)
 
 
 class AnalyzeRequest(BaseModel):

@@ -32,8 +32,12 @@ STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
 
-# Durée de rétention d'un job dans Redis (secondes) — gérée nativement par EXPIRE.
-_JOB_TTL_SECONDS = 30 * 60
+# Durée de rétention d'un job dans Redis (secondes) — gérée nativement par
+# EXPIRE, rafraîchie à chaque écriture (voir `_write`). Doit dépasser le plus
+# long `job_timeout`/`timeout` arq (run_domain_discovery : 7200s, voir
+# analysis_tasks.WorkerSettings) avec une marge, sinon la clé pourrait expirer
+# entre deux checkpoints de progression sur un job inhabituellement lent.
+_JOB_TTL_SECONDS = 2 * 60 * 60 + 5 * 60
 
 _KEY_PREFIX = "myconnector:job:"
 

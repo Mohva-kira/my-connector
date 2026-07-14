@@ -2,6 +2,32 @@ Markdown# Architecture Documentation: Intelligent Project Management & Email Ass
 
 Ce document décrit l'architecture technique, le modèle de données et les règles d'intégrité du système. L'application utilise une approche hybride cloud/edge pour maximiser la confidentialité des données tout en garantissant des performances de traitement et d'analyse élevées.
 
+> **Note (Unit 24, 2026-07-12)** — Ce document reste globalement
+> incohérent avec le code réel (Celery/RabbitMQ, base vectorielle,
+> React Native mentionnés ci-dessous ne sont pas implémentés — la pile
+> réelle est FastAPI + `arq`/Redis + PostgreSQL, un frontend React/Vite web
+> seul ; voir `context/rfc-email-pipeline-v2.md` §0 et Unit 13 de
+> `progress-tracker.md` pour le constat détaillé). Cette réconciliation
+> complète reste différée par décision explicite. Seuls les ajouts réels de
+> l'Unit 24 sont documentés ici, additivement :
+> - `email_analyzer.db.models.ProjectSummary` gagne `structured_content`
+>   (JSONB — décisions/risques/échéances/prochaines étapes structurés par
+>   LLM, voir `llm.ProjectSummaryLLM`), `llm_risk_level`, `schema_version`.
+> - Nouvelle table `assistant_messages` (`AssistantMessage`) : mémoire
+>   persistée de l'assistant conversationnel portefeuille (tenant + user),
+>   distincte de `/api/chat` (scoped à un projet, éphémère côté frontend).
+> - `User` gagne `last_login_at`/`previous_login_at` — référence pour le
+>   Brief ("depuis votre dernière visite", `GET /api/brief`).
+> - Nouveaux endpoints additifs (contrats existants inchangés, cohérent
+>   avec le principe de stabilité du RFC §12) : `GET /api/brief`,
+>   `GET/PATCH /api/actions`, `GET /api/timeline`, `GET /api/assistant/messages`,
+>   `POST /api/assistant/chat`.
+> - Frontend : nouvelle IA en sidebar (Brief/Projets/Agenda/Actions/
+>   Assistant/Paramètres) pour les utilisateurs SaaS, remplaçant l'accueil
+>   "formulaire d'analyse" — le mode legacy (`.env`, sans DB) garde l'ancien
+>   comportement inchangé. Palette et jetons UI documentés à jour dans
+>   `context/ui-context.md`.
+
 ---
 
 ## 1. Stack Technique (Technology Stack)

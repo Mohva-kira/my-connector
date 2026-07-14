@@ -31,6 +31,13 @@ class ActionOut(BaseModel):
     deadline: Optional[datetime]
     status: str
     created_at: datetime
+    # Détail pour la fiche "ouvrir une action" (frontend) : pourquoi elle est
+    # recommandée, qui est concerné, conseil pour éviter la récidive. NULL
+    # pour les actions créées avant cette colonne ou via le repli sans
+    # extraction structurée (voir analysis_tasks.py).
+    rationale: Optional[str]
+    stakeholder: Optional[str]
+    advice: Optional[str]
 
 
 class UpdateActionStatusBody(BaseModel):
@@ -42,7 +49,7 @@ def _require_saas() -> None:
         raise HTTPException(status_code=503, detail="Mode SaaS non activé")
 
 
-def _action_out(action: SuggestedAction, project: Project) -> ActionOut:
+def action_out(action: SuggestedAction, project: Project) -> ActionOut:
     return ActionOut(
         id=action.id,
         project_id=project.id,
@@ -51,6 +58,9 @@ def _action_out(action: SuggestedAction, project: Project) -> ActionOut:
         deadline=action.deadline,
         status=action.status,
         created_at=action.created_at,
+        rationale=action.rationale,
+        stakeholder=action.stakeholder,
+        advice=action.advice,
     )
 
 
@@ -72,7 +82,7 @@ def list_actions(
     rows = query.order_by(
         SuggestedAction.deadline.asc().nullslast(), SuggestedAction.created_at.desc()
     ).all()
-    return [_action_out(a, p) for a, p in rows]
+    return [action_out(a, p) for a, p in rows]
 
 
 @router.patch("/{action_id}", response_model=ActionOut)
@@ -101,4 +111,4 @@ def update_action_status(
     action.status = body.status
     db.commit()
     db.refresh(action)
-    return _action_out(action, project)
+    return action_out(action, project)

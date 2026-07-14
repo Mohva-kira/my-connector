@@ -36,7 +36,7 @@ _REPO_ROOT = _SERVICE_ROOT.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 load_dotenv(_SERVICE_ROOT / ".env")
 
-from email_analyzer.config import redis_url
+from email_analyzer.config import agenda_refresh_cron_hours, redis_url
 from email_analyzer.jobs import (
     STATUS_DONE,
     STATUS_ERROR,
@@ -157,6 +157,88 @@ def _run_saas_sync(
         db.close()
 
 
+def _existing_domain_project_map(db: Any, tenant_id: str) -> Dict[str, Dict[str, str]]:
+    """Construit domaine minuscule -> {id, name} à partir des
+    ``rules_matrix.sender_domains`` des projets actifs du tenant — signal
+    utilisé pour annoter la découverte (voir ``_run_domain_discovery_sync``)
+    afin que le frontend propose une mise à jour plutôt qu'une création en
+    double pour un domaine déjà suivi."""
+    from email_analyzer.db.models import Project, ProjectStatus
+
+    mapping: Dict[str, Dict[str, str]] = {}
+    projects = (
+        db.query(Project)
+        .filter(Project.tenant_id == tenant_id, Project.status == ProjectStatus.active.value)
+        .all()
+    )
+    for project in projects:
+        domains = (project.rules_matrix or {}).get("sender_domains") or []
+        for domain in domains:
+            normalized = str(domain).strip().lower()
+            if normalized:
+                mapping[normalized] = {"id": str(project.id), "name": project.name}
+    return mapping
+
+
+def _run_domain_discovery_sync(job_id: str, tenant_id: str, days: int) -> Dict[str, Any]:
+    """Découverte de domaines expéditeurs (bouton "Analyser" du Brief) : scanne
+    toute la boîte mail sans filtre projet et regroupe par domaine, hors le
+    domaine interne de l'entreprise (mediasoftci.net) et celui du tenant lui-même
+    — aucune persistance, aucun appel LLM (voir email_analyzer/analyzer.py::
+    discover_sender_domains). ``job_id`` alimente ``report_progress`` via
+    ``on_batch`` : un scan sans filtre sur 90 jours peut porter sur plusieurs
+    milliers d'emails (mesuré en conditions réelles, voir progress-tracker.md),
+    sans progression le job resterait plusieurs minutes sans aucun signal côté
+    client.
+
+    Chaque domaine du résultat est annoté ``existing_project_id``/
+    ``existing_project_name`` (``None`` si aucun projet actif du tenant ne
+    couvre déjà ce domaine) — ``discover_sender_domains`` reste une fonction
+    pure côté ``analyzer.py`` (pas d'accès DB), l'annotation se fait ici où la
+    session DB est déjà ouverte. Permet au frontend
+    (``DiscoverProjectsModal.tsx``) de proposer une mise à jour (Fast-Track)
+    au lieu d'une création en double pour un domaine déjà suivi."""
+    from email_analyzer.db.models import Tenant
+    from email_analyzer.db.session import SessionLocal
+    from email_analyzer.saas_logic import processor_from_tenant
+
+    if SessionLocal is None:
+        raise RuntimeError("DATABASE_URL non configuré")
+    db = SessionLocal()
+    try:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if tenant is None:
+            raise RuntimeError("Organisation introuvable")
+        proc = processor_from_tenant(tenant)
+        exclude_domains = {"mediasoftci.net"}
+        tenant_email = (tenant.imap_user or "").strip().lower()
+        if "@" in tenant_email:
+            exclude_domains.add(tenant_email.rsplit("@", 1)[-1])
+        on_batch = lambda processed, total, partial: report_progress(job_id, processed, total, partial)
+        result = proc.discover_sender_domains(
+            days_back=days, exclude_domains=exclude_domains, on_batch=on_batch
+        )
+        # Même discipline que _run_saas_sync : un rafraîchissement de token OAuth
+        # réussi ne doit pas être perdu si la découverte échoue plus loin.
+        if proc.last_gmail_token_refresh:
+            _persist_oauth_token_refresh(proc.gmail_connection, proc.last_gmail_token_refresh)
+            db.commit()
+        if proc.last_outlook_token_refresh:
+            _persist_oauth_token_refresh(proc.outlook_connection, proc.last_outlook_token_refresh)
+            db.commit()
+        if isinstance(result, dict) and result.get("_error"):
+            raise RuntimeError(str(result["_error"]))
+        if isinstance(result, dict) and result.get("domains"):
+            domain_map = _existing_domain_project_map(db, tenant_id)
+            for entry in result["domains"]:
+                match = domain_map.get(str(entry.get("domain", "")).strip().lower())
+                entry["existing_project_id"] = match["id"] if match else None
+                entry["existing_project_name"] = match["name"] if match else None
+        return result
+    finally:
+        db.close()
+
+
 def _persist_oauth_token_refresh(connection: Any, token_refresh: Dict[str, Any]) -> None:
     """Persiste un access token OAuth rafraîchi (Gmail ou Outlook — voir
     gmail_oauth._get_valid_access_token / outlook_oauth._get_valid_access_token),
@@ -196,6 +278,7 @@ def _run_fasttrack_sync(
     from email_analyzer.ai_intelligent import get_shared_analyzer
     from email_analyzer.classification import ProjectRules, derive_tags, score_project_relevance
     from email_analyzer.db.models import (
+        Appointment,
         Email,
         Project,
         ProjectSummary,
@@ -207,6 +290,7 @@ def _run_fasttrack_sync(
     from email_analyzer.db.session import SessionLocal
     from email_analyzer.period import parse_email_datetime
     from email_analyzer.saas_logic import processor_from_tenant
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     if SessionLocal is None:
         raise RuntimeError("DATABASE_URL non configuré")
@@ -265,7 +349,12 @@ def _run_fasttrack_sync(
         # sans I/O supplémentaire (déjà en mémoire à ce stade).
         project_rules = ProjectRules.from_dict(project.rules_matrix)
 
-        persisted = 0
+        known_external_ids = {
+            row[0]
+            for row in db.query(Email.external_id).filter(Email.tenant_id == tenant.id).all()
+        }
+        email_rows: list[dict] = []
+        seen_external_ids: set = set()
         for email_content in new_emails:
             message_id = (email_content.get("message_id") or "").strip()
             if not message_id:
@@ -273,13 +362,13 @@ def _run_fasttrack_sync(
                 # email de façon fiable, on ne le persiste pas (il reste compté
                 # dans le résumé ci-dessous, seule sa persistance est sautée).
                 continue
-            exists = (
-                db.query(Email.id)
-                .filter(Email.tenant_id == tenant.id, Email.external_id == message_id)
-                .first()
-            )
-            if exists:
+            if message_id in known_external_ids or message_id in seen_external_ids:
+                # Déjà en base, ou déjà vu dans ce même delta (process_delta peut
+                # renvoyer le même message plusieurs fois s'il correspond à
+                # plusieurs dossiers IMAP scannés) — évite un doublon dans le
+                # batch d'insertion ci-dessous.
                 continue
+            seen_external_ids.add(message_id)
             to_field = (email_content.get("to") or "").lower()
             recipient_status = (
                 RecipientStatus.cc.value
@@ -291,8 +380,8 @@ def _run_fasttrack_sync(
             )
             relevance = score_project_relevance(email_content, project.name, project_rules)
             tags = derive_tags(email_content, importance_score=importance_score)
-            db.add(
-                Email(
+            email_rows.append(
+                dict(
                     tenant_id=tenant.id,
                     project_id=project.id,
                     external_id=message_id,
@@ -305,7 +394,18 @@ def _run_fasttrack_sync(
                     classification_score=relevance.score,
                 )
             )
-            persisted += 1
+
+        persisted = 0
+        if email_rows:
+            # ON CONFLICT DO NOTHING plutôt qu'un simple check-then-insert : un
+            # autre sync concurrent du même projet (cron 2x/jour vs. rafraîchissement
+            # manuel/login) peut insérer le même (tenant_id, external_id) entre notre
+            # SELECT de dédup ci-dessus et ce commit — sans ceci, le second des deux
+            # échoue toute la transaction sur uq_email_tenant_external_id.
+            insert_stmt = pg_insert(Email.__table__).values(email_rows).on_conflict_do_nothing(
+                index_elements=["tenant_id", "external_id"]
+            ).returning(Email.__table__.c.id)
+            persisted = len(db.execute(insert_stmt).fetchall())
 
         if summary_row is None:
             summary_row = ProjectSummary(project_id=project.id)
@@ -316,9 +416,19 @@ def _run_fasttrack_sync(
         tags_reference: list = []
         if new_emails:
             summary_block = delta.get("summary") or {}
+            # "résumé_automatique" est lui-même un dict ({"résumé_automatique": <texte>,
+            # "emails_analysés": ..., "méthode": ...}, voir ai_intelligent.generate_auto_summary/
+            # generate_basic_summary) — même double-déballage que project_mail.py/templates.py,
+            # sinon `content` (colonne Text) reçoit un dict et le commit échoue.
+            auto_summary_block = summary_block.get("résumé_automatique")
+            auto_summary_text = (
+                auto_summary_block.get("résumé_automatique")
+                if isinstance(auto_summary_block, dict)
+                else None
+            )
             content = (
                 (summary_block.get("résumé_assistant") or {}).get("texte")
-                or summary_block.get("résumé_automatique")
+                or auto_summary_text
                 or content
             )
             tags_reference = summary_block.get("tags_reference") or []
@@ -354,6 +464,9 @@ def _run_fasttrack_sync(
                             project_id=project.id,
                             description=description,
                             status=SuggestedActionStatus.pending.value,
+                            rationale=step.get("raison"),
+                            stakeholder=step.get("responsable"),
+                            advice=step.get("conseil_prevention"),
                         )
                     )
                 for item in deadline_items:
@@ -366,6 +479,9 @@ def _run_fasttrack_sync(
                             description=description,
                             deadline=_parse_iso_date(item.get("date_iso")),
                             status=SuggestedActionStatus.pending.value,
+                            rationale=item.get("raison"),
+                            stakeholder=item.get("responsable"),
+                            advice=item.get("conseil_prevention"),
                         )
                     )
             else:
@@ -383,6 +499,46 @@ def _run_fasttrack_sync(
                         )
                     )
 
+            # Rendez-vous extraits par l'IA (llm.AppointmentItem) : même
+            # discipline idempotente que SuggestedAction ci-dessus (wipe +
+            # rebuild à chaque resynchronisation, pas d'historique de rendez-
+            # vous annulés/modifiés à préserver).
+            db.query(Appointment).filter(Appointment.project_id == project.id).delete()
+            for appt in (structured_content or {}).get("appointments") or []:
+                description = (appt.get("description") or "").strip()
+                scheduled_at = _parse_iso_date(appt.get("date_iso"))
+                if not description or scheduled_at is None:
+                    # Un rendez-vous sans date exploitable n'est pas
+                    # affichable dans l'Agenda — on ne le persiste pas plutôt
+                    # que d'inventer une date.
+                    continue
+                db.add(
+                    Appointment(
+                        tenant_id=tenant.id,
+                        project_id=project.id,
+                        description=description,
+                        scheduled_at=scheduled_at,
+                        participants=appt.get("participants") or [],
+                    )
+                )
+
+            # Date de retour probable (llm.ProbableContactItem) — n'existe que
+            # si le LLM a trouvé un signal réel dans les emails (voir prompt) ;
+            # remis à None sinon plutôt que de garder une estimation périmée
+            # d'un précédent rafraîchissement.
+            probable_contact = (structured_content or {}).get("probable_next_contact")
+            if probable_contact:
+                summary_row.probable_next_contact_date = _parse_iso_date(
+                    probable_contact.get("date_iso")
+                )
+                summary_row.probable_next_contact_reason = probable_contact.get("reason")
+                summary_row.probable_next_contact_confidence = probable_contact.get("confidence")
+            else:
+                summary_row.probable_next_contact_date = None
+                summary_row.probable_next_contact_reason = None
+                summary_row.probable_next_contact_confidence = None
+            summary_row.agenda_updated_at = refreshed_at
+
         summary_row.last_processed_email_timestamp = refreshed_at
         db.commit()
 
@@ -392,6 +548,7 @@ def _run_fasttrack_sync(
             "persisted_emails": persisted,
             "sentiment": sentiment,
             "content": content,
+            "structured_content": summary_row.structured_content,
             "tags_reference": tags_reference,
             "last_processed_email_timestamp": refreshed_at.isoformat(),
         }
@@ -416,8 +573,14 @@ async def run_fasttrack_refresh(
             _run_fasttrack_sync, job_id, tenant_id, project_id, fallback_days, force_days
         )
         set_status(job_id, STATUS_DONE, result=result)
-    except Exception as exc:  # noqa: BLE001 — frontière du worker : rien ne doit remonter
-        set_status(job_id, STATUS_ERROR, error=str(exc))
+    except (Exception, asyncio.CancelledError) as exc:
+        # CancelledError (job_timeout arq ou worker interrompu) n'est pas une
+        # sous-classe d'Exception depuis Python 3.8 : sans ce cas explicite,
+        # le job restait figé à "running" dans Redis pour toujours (aucun
+        # signal jamais renvoyé au polling frontend) — voir
+        # progress-tracker.md, jobs bloqués observés en conditions réelles.
+        set_status(job_id, STATUS_ERROR, error=str(exc) or "Analyse interrompue (délai dépassé ou worker redémarré).")
+        raise
 
 
 async def run_analysis_legacy(
@@ -436,8 +599,11 @@ async def run_analysis_legacy(
             _run_legacy_sync, job_id, project, period, days, assistant_provider, openai_model, gemini_model
         )
         set_status(job_id, STATUS_DONE, result=result)
-    except Exception as exc:  # noqa: BLE001 — frontière du worker : rien ne doit remonter
-        set_status(job_id, STATUS_ERROR, error=str(exc))
+    except (Exception, asyncio.CancelledError) as exc:
+        # Voir run_fasttrack_refresh ci-dessus : CancelledError doit être
+        # capturée explicitement, sinon le job reste "running" pour toujours.
+        set_status(job_id, STATUS_ERROR, error=str(exc) or "Analyse interrompue (délai dépassé ou worker redémarré).")
+        raise
 
 
 async def run_analysis_saas(
@@ -465,8 +631,28 @@ async def run_analysis_saas(
             gemini_model,
         )
         set_status(job_id, STATUS_DONE, result=result)
-    except Exception as exc:  # noqa: BLE001 — frontière du worker : rien ne doit remonter
-        set_status(job_id, STATUS_ERROR, error=str(exc))
+    except (Exception, asyncio.CancelledError) as exc:
+        # Voir run_fasttrack_refresh ci-dessus : CancelledError doit être
+        # capturée explicitement, sinon le job reste "running" pour toujours.
+        set_status(job_id, STATUS_ERROR, error=str(exc) or "Analyse interrompue (délai dépassé ou worker redémarré).")
+        raise
+
+
+async def run_domain_discovery(
+    ctx: Dict[str, Any],
+    job_id: str,
+    tenant_id: str,
+    days: int,
+) -> None:
+    set_status(job_id, STATUS_RUNNING)
+    try:
+        result = await asyncio.to_thread(_run_domain_discovery_sync, job_id, tenant_id, days)
+        set_status(job_id, STATUS_DONE, result=result)
+    except (Exception, asyncio.CancelledError) as exc:
+        # Voir run_fasttrack_refresh ci-dessus : CancelledError doit être
+        # capturée explicitement, sinon le job reste "running" pour toujours.
+        set_status(job_id, STATUS_ERROR, error=str(exc) or "Analyse interrompue (délai dépassé ou worker redémarré).")
+        raise
 
 
 async def on_startup(ctx: Dict[str, Any]) -> None:
@@ -541,6 +727,117 @@ async def run_scheduled_sync(ctx: Dict[str, Any]) -> None:
     logger.info("Sync planifiée terminée : %s/%s projet(s) rafraîchi(s)", succeeded, len(rows))
 
 
+def _agenda_relevant_project_rows(db: Any) -> list:
+    """Projets actifs "en attente"/"en rouge" (même prédicat que
+    api/routers/brief.py::at_risk_projects pour la partie risque) — portée
+    volontairement réduite par rapport à `run_scheduled_sync` : c'est un sous-
+    ensemble bon marché à rafraîchir plus souvent, pas un remplacement de la
+    sync générale 2x/jour."""
+    from email_analyzer.db.models import Project, ProjectStatus, ProjectSummary
+    from sqlalchemy import or_
+
+    return (
+        db.query(Project.id, Project.tenant_id)
+        .join(ProjectSummary, ProjectSummary.project_id == Project.id)
+        .filter(
+            Project.status == ProjectStatus.active.value,
+            or_(
+                ProjectSummary.sentiment.in_(["awaiting_feedback", "under_tension"]),
+                ProjectSummary.llm_risk_level == "CRITIQUE",
+            ),
+        )
+        .all()
+    )
+
+
+async def run_agenda_refresh(ctx: Dict[str, Any]) -> None:
+    """Tâche cron arq dédiée à l'Agenda (voir `WorkerSettings.cron_jobs`,
+    cadence `config.agenda_refresh_cron_hours()`) : régénère uniquement les
+    projets "en attente"/"en rouge" via la même logique Fast-Track que
+    `run_scheduled_sync` (`_run_fasttrack_sync`) — c'est ce qui alimente
+    `Appointment` et `ProjectSummary.probable_next_contact_*`/
+    `agenda_updated_at` pour `GET /api/agenda`. Même discipline d'échec par
+    projet, sans bloquer le lot."""
+    from email_analyzer.db.session import SessionLocal
+
+    if SessionLocal is None:
+        logger.error("Rafraîchissement Agenda annulé : DATABASE_URL non configuré")
+        return
+
+    db = SessionLocal()
+    try:
+        rows = _agenda_relevant_project_rows(db)
+    finally:
+        db.close()
+
+    logger.info("Rafraîchissement Agenda : %s projet(s) concerné(s)", len(rows))
+    succeeded = 0
+    for project_id, tenant_id in rows:
+        try:
+            await asyncio.to_thread(
+                _run_fasttrack_sync,
+                f"agenda:{project_id}",
+                str(tenant_id),
+                str(project_id),
+                30,
+            )
+            succeeded += 1
+        except Exception:
+            logger.exception(
+                "Rafraîchissement Agenda : échec pour project_id=%s tenant_id=%s",
+                project_id,
+                tenant_id,
+            )
+    logger.info("Rafraîchissement Agenda terminé : %s/%s projet(s)", succeeded, len(rows))
+
+
+def _run_agenda_refresh_for_tenant_sync(job_id: str, tenant_id: str) -> Dict[str, Any]:
+    """Variante à la demande de `run_agenda_refresh`, scopée à un seul tenant
+    (bouton "Rafraîchir" de l'Agenda, `POST /api/agenda/refresh`) — même
+    sélection de projets, mais synchrone/bloquante comme les autres tâches
+    `_run_*_sync` (exécutée via `asyncio.to_thread` par la tâche arq)."""
+    from email_analyzer.db.models import Project
+    from email_analyzer.db.session import SessionLocal
+
+    if SessionLocal is None:
+        raise RuntimeError("DATABASE_URL non configuré")
+
+    db = SessionLocal()
+    try:
+        rows = [
+            (pid, tid)
+            for pid, tid in _agenda_relevant_project_rows(db)
+            if str(tid) == str(tenant_id)
+        ]
+    finally:
+        db.close()
+
+    refreshed = 0
+    failed = 0
+    for project_id, tid in rows:
+        try:
+            _run_fasttrack_sync(f"{job_id}:{project_id}", str(tid), str(project_id), 30)
+            refreshed += 1
+        except Exception:
+            logger.exception(
+                "Rafraîchissement Agenda (tenant %s) : échec pour project_id=%s", tenant_id, project_id
+            )
+            failed += 1
+    return {"refreshed_projects": refreshed, "failed_projects": failed, "total_projects": len(rows)}
+
+
+async def run_agenda_refresh_for_tenant(ctx: Dict[str, Any], job_id: str, tenant_id: str) -> None:
+    set_status(job_id, STATUS_RUNNING)
+    try:
+        result = await asyncio.to_thread(_run_agenda_refresh_for_tenant_sync, job_id, tenant_id)
+        set_status(job_id, STATUS_DONE, result=result)
+    except (Exception, asyncio.CancelledError) as exc:
+        # Voir run_fasttrack_refresh ci-dessus : CancelledError doit être
+        # capturée explicitement, sinon le job reste "running" pour toujours.
+        set_status(job_id, STATUS_ERROR, error=str(exc) or "Rafraîchissement Agenda interrompu.")
+        raise
+
+
 class WorkerSettings:
     # run_analysis_legacy/run_analysis_saas ne sont pas idempotents : un retry
     # après timeout refait entièrement le fetch IMAP + les résumés LLM au lieu
@@ -552,12 +849,25 @@ class WorkerSettings:
         func(run_analysis_legacy, max_tries=1),
         func(run_analysis_saas, max_tries=1),
         run_fasttrack_refresh,
+        # Timeout dédié (au lieu d'hériter des 1800s globaux) : même en lecture
+        # headers-only (voir project_mail.py::_process_one_email_id), un scan
+        # sans filtre sur une grosse boîte peut porter sur plusieurs milliers
+        # d'emails. 7200s est un filet de sécurité, pas le temps attendu.
+        func(run_domain_discovery, max_tries=1, timeout=7200),
+        func(run_agenda_refresh_for_tenant, max_tries=1),
     ]
     # Sync planifiée 2x/jour (7h/19h, heure du process worker — cf.
     # project-overview.md "briefing matin/soir") ; max_tries=1 car
     # run_scheduled_sync gère déjà ses échecs par projet en interne, un retry
     # global ne ferait que retraiter des projets déjà réussis.
-    cron_jobs = [cron(run_scheduled_sync, hour={7, 19}, minute=0, max_tries=1)]
+    # run_agenda_refresh : cadence dédiée et configurable (config.py::
+    # agenda_refresh_cron_hours(), défaut toutes les 2h en heures ouvrées) —
+    # même discipline d'échec par projet, portée réduite aux projets "en
+    # attente"/"en rouge" (voir _agenda_relevant_project_rows).
+    cron_jobs = [
+        cron(run_scheduled_sync, hour={7, 19}, minute=0, max_tries=1),
+        cron(run_agenda_refresh, hour=agenda_refresh_cron_hours(), minute=0, max_tries=1),
+    ]
     on_startup = on_startup
     redis_settings = RedisSettings.from_dsn(redis_url())
     # Le défaut arq (300s) est trop court pour run_analysis_saas/legacy dès que

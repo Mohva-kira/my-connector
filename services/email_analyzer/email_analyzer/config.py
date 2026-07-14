@@ -129,6 +129,40 @@ def batch_chunk_size() -> int:
         return DEFAULT_BATCH_CHUNK_SIZE
 
 
+# Au-delà de ce nombre d'emails candidats, la progression est remontée par
+# lots plus larges (150 au lieu de 10) — un checkpoint tous les 10 emails sur
+# un scan de plusieurs milliers d'emails ajoute un aller-retour Redis inutile
+# sans améliorer la perception de progression côté client.
+DEFAULT_LARGE_SCAN_THRESHOLD = 1000
+DEFAULT_LARGE_SCAN_CHUNK_SIZE = 150
+
+
+def large_scan_threshold() -> int:
+    """Nb d'emails candidats au-delà duquel `large_scan_chunk_size()` remplace
+    `batch_chunk_size()` (env EMAIL_ANALYZER_LARGE_SCAN_THRESHOLD, défaut 1000)."""
+    raw = (os.environ.get("EMAIL_ANALYZER_LARGE_SCAN_THRESHOLD") or "").strip()
+    if not raw:
+        return DEFAULT_LARGE_SCAN_THRESHOLD
+    try:
+        val = int(raw)
+        return val if val > 0 else DEFAULT_LARGE_SCAN_THRESHOLD
+    except ValueError:
+        return DEFAULT_LARGE_SCAN_THRESHOLD
+
+
+def large_scan_chunk_size() -> int:
+    """Taille de lot utilisée au-delà de `large_scan_threshold()` (env
+    EMAIL_ANALYZER_LARGE_SCAN_CHUNK_SIZE, défaut 150)."""
+    raw = (os.environ.get("EMAIL_ANALYZER_LARGE_SCAN_CHUNK_SIZE") or "").strip()
+    if not raw:
+        return DEFAULT_LARGE_SCAN_CHUNK_SIZE
+    try:
+        val = int(raw)
+        return val if val > 0 else DEFAULT_LARGE_SCAN_CHUNK_SIZE
+    except ValueError:
+        return DEFAULT_LARGE_SCAN_CHUNK_SIZE
+
+
 # Store de jobs (jobs.py) et queue arq : Redis partagé entre le process API
 # (uvicorn) et le(s) process worker (arq), ce qui lève la contrainte historique
 # de un-seul-worker-uvicorn du store en mémoire.
@@ -139,3 +173,25 @@ def redis_url() -> str:
     """URL de connexion Redis (env REDIS_URL, défaut redis://localhost:6379/0)."""
     raw = (os.environ.get("REDIS_URL") or "").strip()
     return raw or DEFAULT_REDIS_URL
+
+
+# Cadence du cron dédié à l'Agenda (run_agenda_refresh, analysis_tasks.py) :
+# plus fréquent que la sync générale 2x/jour (run_scheduled_sync) puisqu'il ne
+# porte que sur les projets "en attente"/"en rouge" (sous-ensemble bon marché) —
+# heures ouvrées, toutes les 2h. Surchargeable via env (liste d'heures 0-23
+# séparées par des virgules).
+DEFAULT_AGENDA_REFRESH_CRON_HOURS = frozenset({7, 9, 11, 13, 15, 17, 19, 21})
+
+
+def agenda_refresh_cron_hours() -> frozenset:
+    """Heures (0-23) auxquelles `run_agenda_refresh` s'exécute (env
+    AGENDA_REFRESH_CRON_HOURS, ex. "7,9,11,13,15,17,19,21", défaut ci-dessus)."""
+    raw = (os.environ.get("AGENDA_REFRESH_CRON_HOURS") or "").strip()
+    if not raw:
+        return DEFAULT_AGENDA_REFRESH_CRON_HOURS
+    try:
+        hours = frozenset(int(part.strip()) for part in raw.split(",") if part.strip())
+        valid = frozenset(h for h in hours if 0 <= h <= 23)
+        return valid or DEFAULT_AGENDA_REFRESH_CRON_HOURS
+    except ValueError:
+        return DEFAULT_AGENDA_REFRESH_CRON_HOURS

@@ -1,55 +1,89 @@
 # UI Design Tokens & Context
 
-Ce fichier centralise l'ensemble des jetons de design graphiques pour l'application Web (ReactJS) et Mobile (React Native). L'identité visuelle repose sur un mode sombre "Tech/Security" rehaussé par un vert cyber (Fiabilité/Chiffrement) et un violet électrique (Intelligence Artificielle).
+Ce fichier centralise les jetons de design de l'application Web (ReactJS,
+`services/email_analyzer/frontend/`). L'identité visuelle est un thème clair
+et sobre — "bureau", pas "dashboard technique" : fond blanc cassé/gris très
+clair, bleu profond pour les actions/l'IA, et les couleurs vives (vert/
+orange/rouge) réservées aux statuts sémantiques (santé projet, attention,
+urgence critique). Ce choix remplace un thème sombre "Tech/Security" (violet
+électrique + vert cyber) qui a existé plus tôt dans le projet.
+
+Les noms de jetons ci-dessous sont ceux réellement définis dans
+`services/email_analyzer/frontend/tailwind.config.js` (source de vérité —
+pas de jetons `bg-base`/`ai-surface`/`status-*` distincts de ceux du code :
+ce document décrivait auparavant une palette qui n'a jamais correspondu au
+code réel, voir `context/rfc-email-pipeline-v2.md` §0 pour le même constat
+côté backend).
 
 ---
 
 ## 1. Palette de Couleurs & Jetons Sémantiques (Color Tokens)
 
-| Catégorie                 | Jeton (Token Name)    | Valeur HEX | Usage & Rôle UI                                                                   |
-| :------------------------ | :-------------------- | :--------- | :-------------------------------------------------------------------------------- |
-| **Fond (Background)**     | `bg-base`             | `#0B0F19`  | Fond d'écran principal de l'application (Sombre profond).                         |
-|                           | `bg-surface`          | `#161B26`  | Arrière-plan des cartes (Cards), encadrés de projets et lignes de tableau.        |
-|                           | `bg-surface-elevated` | `#1F2635`  | État survolé (Hover), menus déroulants et modales de validation.                  |
-| **Texte (Text)**          | `text-primary`        | `#F3F4F6`  | Titres majeurs, texte principal des emails et données critiques (Lisibilité max). |
-|                           | `text-secondary`      | `#9CA3AF`  | Descriptions de projets, métadonnées IMAP, horodatages (Timestamps).              |
-|                           | `text-muted`          | `#6B7280`  | Texte d'aide secondaire, placeholders de formulaires et éléments désactivés.      |
-| **Bordures (Border)**     | `border-dim`          | `#242C3D`  | Séparateurs discrets entre les projets ou lignes de logs.                         |
-|                           | `border-focus`        | `#10B981`  | Contour actif lors de la sélection d'un champ ou d'une boîte mail connectée.      |
-| **Accent IA (AI Assist)** | `ai-primary`          | `#7C3AED`  | Violet électrique : Boutons d'analyse IA, badges d'insights, triggers de RAG.     |
-|                           | `ai-surface`          | `#2E1065`  | Fond des blocs de résumés d'emails ou de suggestions de projets par l'IA.         |
-|                           | `ai-text`             | `#DDD6FE`  | Texte explicatif généré par le LLM ou suggestions de brouillons.                  |
-| **Statuts (Semantic)**    | `status-success`      | `#059669`  | Vert : Synchronisation réussie, email chiffré stocké en DB, alias résolu.         |
-|                           | `status-warning`      | `#D97706`  | Orange : Nouveau projet détecté en attente de validation manuelle.                |
-|                           | `status-error`        | `#DC2626`  | Rouge : Échec de connexion IMAP/OAuth, tâche Celery en échec, token expiré.       |
+| Catégorie             | Jeton Tailwind     | Valeur HEX                    | Usage & Rôle UI                                                                 |
+| :--------------------- | :------------------ | :----------------------------- | :-------------------------------------------------------------------------------- |
+| **Fond (Background)** | `bg-primary`        | `#FAFAF8`                      | Fond d'écran principal (blanc cassé).                                             |
+|                        | `bg-secondary`      | `#F4F4F1`                      | Fonds secondaires (bandeaux, zones de repli).                                     |
+|                        | `bg-tertiary`       | `#ECECE7`                      | Champs de saisie, badges neutres, skeletons de chargement.                        |
+|                        | `surface`           | `#FFFFFF`                      | Cartes (projets, panneaux, modales) — contraste avec le fond off-white.           |
+| **Texte (Text)**       | `text-primary`      | `#1E2530`                      | Titres, corps de texte principal.                                                 |
+|                        | `text-secondary`    | `#59636F`                      | Descriptions, métadonnées, labels de section.                                     |
+|                        | `text-muted`        | `#8A94A0`                      | Texte d'aide, placeholders, éléments désactivés ("Bientôt").                      |
+| **Bordures (Border)** | `border-default`    | `#E2E1DC`                      | Bordures de cartes, séparateurs, champs de saisie.                                |
+|                        | `border-subtle`     | `#ECEBE6`                      | Séparateurs discrets à l'intérieur d'une carte (ex. chat).                        |
+| **Statuts (Semantic)** | `success`           | `#16A34A`                      | Vert : projet sur la bonne voie (`sentiment: on_track`).                          |
+|                        | `warning`           | `#D97706`                      | Orange : point d'attention (échéance proche, action en attente).                  |
+|                        | `danger`            | `#DC2626`                      | Rouge : urgence critique uniquement (`sentiment: under_tension`, risque critique). |
+|                        | `info`              | `#2563EB`                      | Bleu : informations neutres, compteurs du Brief.                                  |
+| **Accent (Actions/IA)** | `accent-primary`   | `#1D4ED8`                      | Bleu profond : boutons principaux, liens actifs, sidebar active.                  |
+|                        | `accent-hover`      | `#1E40AF`                      | État survolé des éléments `accent-primary`.                                       |
+|                        | `accent-soft`       | `rgba(29, 78, 216, 0.08)`      | Fond des éléments actifs légers (item de nav sélectionné).                        |
+|                        | `ai-primary`        | `#1E3A8A`                      | Bleu plus profond : indicateurs "assistant"/IA (points de saisie, bulles).        |
+|                        | `ai-secondary`      | `#3B5BDB`                      | Variante IA secondaire.                                                           |
+|                        | `ai-glow`           | `rgba(30, 58, 138, 0.08)`      | Fond des blocs liés à l'IA (bandeau réponse rapide).                              |
+| **Priorité (legacy)**  | `priority-high/medium/low` | `#DC2626` / `#D97706` / `#16A34A` | Alias de `danger`/`warning`/`success`, utilisés par l'ancien tableau de bord.  |
+| **Fast-Track**         | `fasttrack-active`  | `#2563EB`                      | Pulsation d'une carte projet en cours de rafraîchissement.                        |
+|                        | `fasttrack-bg`      | `rgba(37, 99, 235, 0.08)`      | Fond associé à `fasttrack-active`.                                                 |
+
+Le thème est unique (pas de variante sombre) : aucune classe Tailwind `dark:`
+n'est utilisée dans le code, tout passe par ces jetons nommés.
 
 ---
 
 ## 2. Recommandations Typographiques (Typography Scale)
 
-L'utilisation de polices de caractères géométriques et prévisibles renforce l'aspect technique et facilite la lecture des blocs d'emails denses.
+Police système définie dans `tailwind.config.js::theme.extend.fontFamily` :
 
-| Jeton Typo          | Taille (Web) | Taille (Mobile) | Graisse (Weight) | Usage UI                                                                 |
-| :------------------ | :----------- | :-------------- | :--------------- | :----------------------------------------------------------------------- |
-| `font-mono-code`    | `13px`       | `13pt`          | Regular (400)    | Contenu brut de l'email, logs des tâches Celery, IDs de projets.         |
-| `font-sans-body`    | `14px`       | `14pt`          | Regular (400)    | Corps des résumés d'IA, listes de projets, texte général de l'interface. |
-| `font-sans-label`   | `12px`       | `12pt`          | Medium (500)     | Badges de statut, en-têtes de colonnes, noms des alias de projets.       |
-| `font-sans-title`   | `18px`       | `18pt`          | SemiBold (600)   | Titres des cartes de projets, objets des emails prioritaires.            |
-| `font-sans-display` | `24px`       | `24pt`          | Bold (700)       | Titre principal du tableau de bord, vue macro de l'assistant.            |
+- **Sans-serif (`font-sans`, par défaut) :** `Inter`, puis `system-ui`, `sans-serif`.
+- **Monospace (`font-mono`) :** `JetBrains Mono`, puis `monospace` — code, IDs, contenu brut.
 
-- **Police recommandée (Sans-Serif) :** `Inter` ou `Geist Sans` (Web), `System Default` (Mobile).
-- **Police recommandée (Monospace) :** `JetBrains Mono` ou `Fira Code` (Web/Mobile).
+Le reste de l'échelle (tailles/graisses) suit les classes Tailwind standard
+(`text-xs` → `text-2xl`, `font-medium`/`font-semibold`) directement dans les
+composants plutôt que des jetons nommés séparés.
 
 ---
 
 ## 3. Échelle des Rayons de Bordure (Border Radius Scale)
 
-Une échelle de coins subtilement arrondis maintient un aspect "logiciel pro / dashboard technique" sans tomber dans un style trop grand public ou trop rigide.
+Définie dans `tailwind.config.js::theme.extend.borderRadius` :
 
-| Jeton Rayon   | Valeur (Pixel) | Application UI Concrete                                                            |
-| :------------ | :------------- | :--------------------------------------------------------------------------------- |
-| `radius-none` | `0px`          | Séparateurs stricts, bordures de l'écran ou de conteneurs pleine largeur.          |
-| `radius-sm`   | `4px`          | Cases à cocher (Checkboxes), badges de statut (Success/Warning) et infobulles.     |
-| `radius-md`   | `8px`          | Boutons d'action ("Synchroniser", "Valider le projet"), champs de saisie (Inputs). |
-| `radius-lg`   | `12px`         | Boîtes de dialogue, modales d'analyse approfondie, cartes de projet (Cards).       |
-| `radius-full` | `9999px`       | Boutons d'avatars utilisateurs, indicateurs de bascule (Toggle switches).          |
+| Jeton Tailwind | Valeur (Pixel) | Usage typique                                              |
+| :-------------- | :-------------- | :----------------------------------------------------------- |
+| `rounded-sm`     | `6px`            | Badges, petits éléments interactifs.                          |
+| `rounded-md`     | `10px`           | Boutons standards, champs de saisie.                           |
+| `rounded-lg`     | `14px`           | Cartes de projet, panneaux (sidebar, assistant).                |
+| `rounded-xl`     | `18px`           | Cartes principales (Brief, modales), boutons d'action primaires.|
+| `rounded-full`   | `9999px`         | Avatars, pastilles de statut, boutons ronds.                    |
+
+---
+
+## 4. Principes de mise en page
+
+Hérités de la vision produit "assistante proactive" (voir
+`context/project-overview.md`) :
+
+- Beaucoup d'espace blanc, cartes peu chargées, une information par bloc.
+- La sidebar (`components/AppShell.tsx`) est la seule navigation persistante :
+  Brief / Projets / Agenda / Actions / Assistant / Paramètres, plus une barre
+  de recherche en langage naturel en haut.
+- Le rouge (`danger`) est réservé aux urgences réelles — ne jamais l'utiliser
+  pour un état neutre ou informatif.

@@ -2,6 +2,22 @@
 
 An AI-powered project management assistant that automatically ingests, organizes, and analyzes communications across professional communication channels to eliminate manual tracking for Project Managers. By connecting to Gmail and enterprise IMAP servers, the application securely captures historical and incoming emails, extracts distinct client and product entities, resolves duplicates through an intelligent aliasing system, and builds a tiered, hybrid knowledge base (local 30-day device cache coupled with an encrypted PostgreSQL cloud archive). The system proactively crafts context-aware draft responses, surfaces deep analytical project insights, and parses complex document attachments (PDFs and Excel spreadsheets) without impacting device performance or exposing raw customer data.
 
+> **Note (Unit 24, 2026-07-12)** — This document's stack references (Node.js
+> backend, Celery, client-side vector DB, React Native) predate the actual
+> implementation and remain unreconciled (see Unit 13 of
+> `progress-tracker.md`). The **product framing itself changed with Unit
+> 24**, though: for SaaS users, the app repositions from an on-demand
+> "run an analysis" tool to a proactive daily-briefing assistant — on
+> login, the home page ("Brief") surfaces what changed since the user's
+> last visit and recommended actions, with a persistent portfolio-wide
+> assistant (not a per-analysis chat) as the primary way to interact,
+> reachable from a sidebar (Brief/Projects/Agenda/Actions/Assistant/
+> Settings) instead of a single-page form. The legacy `.env`-only mode
+> (no database) keeps the original on-demand form, since the Brief/Actions/
+> Assistant surfaces all depend on persisted data that mode doesn't have.
+> "Documents" and "Clients" appear in the sidebar but are disabled — no
+> attachment parsing or client/contact entity exists yet.
+
 ## Project Goals
 
 1. **Automate Zero-Touch Project Creation:** Eliminate manual project onboarding by discovering and clustering technical and business initiatives from raw email streams within 5 minutes of setup.

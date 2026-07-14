@@ -4,7 +4,9 @@ Update this file after every meaningful implementation change.
 
 ## Current Phase
 
-- Assessment & Alignment
+- Assistant-first frontend/backend refonte (Brief, sidebar, portfolio
+  assistant) — see Unit 24. Legacy per-project analysis tool remains for
+  non-SaaS (`.env`-only) users.
 
 ## Current Goal
 
@@ -1320,6 +1322,883 @@ Update this file after every meaningful implementation change.
     interne effectuée (chaque section cite le fichier/fonction réel vérifié par 2
     agents Explore + lecture directe avant rédaction).
 
+- **Unit 24 — Refonte "assistante proactive" : Brief quotidien, sidebar,
+  assistant permanent portefeuille (2026-07-12)** :
+  - Contexte : proposition produit détaillée de l'utilisateur (voir le plan
+    approuvé, `~/.claude/plans/frontend-transform-ai-une-sharded-creek.md`)
+    demandant de transformer l'outil d'analyse à la demande en assistante
+    proactive — page d'accueil "Brief" (« Bonjour Mohamed, voici ce qui a
+    changé… »), sidebar (Brief/Projets/Agenda/Actions/Assistant/Paramètres),
+    chat permanent comme point d'entrée principal, palette claire "bureau".
+    5 décisions clarifiées via questions ciblées : refonte complète (mais
+    livrée en petites unités, `ai-workflow-rules.md` §2), backend structuré
+    inclus, assistant = point d'entrée principal, Brief livré en premier,
+    formulaire classique retiré pour les utilisateurs SaaS. Découverte clé en
+    amont : `context/rfc-email-pipeline-v2.md` (Unit 22) propose déjà en
+    Phase 5 exactement le schéma structuré nécessaire (`structured_content`
+    JSONB additif sur `ProjectSummary`) — ce chantier en dépend explicitement
+    plutôt que d'inventer un schéma concurrent ; les autres phases du RFC
+    (0-4, 6-8 : checkpoints de sync, threading, mémoire projet, clustering)
+    restent hors périmètre, non traitées ici.
+  - **Backend — B1 (schéma LLM structuré)** : `email_analyzer/llm.py` gagne
+    `ProjectSummaryLLM`/`DecisionItem`/`RiskItem`/`NextStepItem`/`DeadlineItem`
+    (Pydantic, aucun champ avec valeur par défaut — voir bug ci-dessous) et
+    `extract_structured_project_summary_openai`/`_gemini` (OpenAI Structured
+    Outputs via `chat.completions.parse`, Gemini via
+    `response_schema=ProjectSummaryLLM`). `db/models.py::ProjectSummary`
+    gagne `structured_content` (JSONB), `llm_risk_level`, `schema_version` —
+    additifs, jamais fusionnés avec `sentiment`/`ai_intelligent.
+    calculate_risk_score` (garde-fou explicite du RFC §11). Migration Alembic
+    `006_structured_content` (le dépôt a un vrai setup Alembic —
+    `alembic/versions/001-005` déjà présents ; la DB locale était en retard
+    de 2 migrations, `alembic upgrade head` appliqué avant d'ajouter la
+    nouvelle). `project_mail.py::generate_intelligent_summary` gagne un
+    paramètre `include_structured: bool = False` (appel LLM additionnel coûte
+    cher — n'active l'extraction structurée que pour le chemin persisté,
+    jamais pour `/api/analyze` éphémère) ; `analyzer.py::process_delta` le
+    propage. **Bug réel trouvé en vérification live** : Gemini
+    (`google-generativeai` 0.8) rejette toute clé `"default"` dans le schéma
+    JSON envoyé (`Unknown field for Schema: default`) — corrigé en retirant
+    toute valeur par défaut Python des modèles Pydantic (y compris
+    `Optional[...] = None`), les rendant "requis mais nullable" plutôt
+    qu'optionnels, ce qui satisfait aussi le mode strict d'OpenAI.
+  - **Backend — B2 (actions multiples)** : `analysis_tasks.py::
+    _run_fasttrack_sync` remplace l'unique `SuggestedAction` dérivée de
+    `recommandation` par une ligne par item de `structured_content.next_steps`
+    + `.deadlines` (nouveau helper `_parse_iso_date`) ; repli sur l'ancien
+    comportement (une action depuis `recommandation`) si l'extraction
+    structurée est absente/en échec.
+  - **Backend — B4 (depuis votre dernière visite)** : `User.last_login_at` +
+    `User.previous_login_at` (migration `007_user_login_timestamps`) —
+    `previous_login_at` est décalé (`= last_login_at` puis `last_login_at =
+    now()`) uniquement dans `api/routers/auth.py::login`, jamais `switch` ;
+    exposé via `MeResponse.previous_login_at`. C'est `previous_login_at` (pas
+    `last_login_at`) qui sert de référence au Brief — reste stable pendant
+    toute la session en cours au lieu de se réinitialiser à chaque
+    rechargement de page.
+  - **Backend — B3 (agrégation portefeuille)** : nouveaux routers
+    `api/routers/actions.py` (`GET/PATCH /api/actions`, tenant-wide,
+    n'existait nulle part avant — `SuggestedAction` n'était visible que
+    nichée dans `GET /api/projects/{id}`) et `api/routers/brief.py`
+    (`GET /api/brief` — compteurs "depuis votre dernière visite" + top 5
+    actions recommandées ; `GET /api/timeline` — fusion `Email.received_at` +
+    `ProjectSummary.updated_at` de tous les projets, aucune nouvelle table).
+  - **Backend — B5 (assistant permanent)** : nouvelle table
+    `assistant_messages` (migration `008_assistant_messages`,
+    `AssistantMessage` model) — persiste la conversation par (tenant, user),
+    contrairement à `/api/chat` existant (scoped à un projet, éphémère côté
+    frontend). `llm.py` gagne `build_portfolio_context`/
+    `build_portfolio_chat_system_prompt` (contexte = tous les projets du
+    tenant, pas le corpus IMAP brut d'un seul) et
+    `portfolio_assistant_chat_openai`/`_gemini` (mêmes mécaniques que
+    `project_assistant_chat_*`, system prompt différent). Nouveau
+    `api/routers/assistant.py` (`GET /api/assistant/messages`,
+    `POST /api/assistant/chat`). **Bug réel trouvé en vérification live** :
+    le chat renvoyait "OPENAI_API_KEY non définie" car le frontend imposait
+    `assistant_provider: "openai"` alors que seul `GEMINI_API_KEY` est
+    configuré dans cet environnement — corrigé en rendant
+    `ChatBody.assistant_provider` optionnel et en ajoutant
+    `_select_provider()` côté serveur (choisit le premier fournisseur dont la
+    clé est réellement configurée) ; le frontend n'envoie plus de préférence.
+  - **Frontend — F1 (thème)** : `tailwind.config.js` — palette sombre
+    indigo remplacée par une palette claire "bureau" (fond blanc cassé
+    `#FAFAF8`, bleu profond `#1D4ED8` en accent, vert/orange/rouge réservés
+    aux statuts). Mêmes noms de jetons qu'avant → aucun composant à
+    retoucher pour ce point seul (confirmé : `ProjectHub`/`AnalysisDashboard`
+    héritent du nouveau thème sans modification).
+  - **Frontend — F2 (sidebar)** : `components/AppShell.tsx` — nav plate à 3
+    liens remplacée par une sidebar (Brief/Projets/Agenda/Actions/Assistant/
+    Paramètres + Documents/Clients grisés "Bientôt", aucune page derrière
+    faute de données réelles — parsing de pièces jointes et entité
+    client/contact non implémentés). Uniquement pour `saasEnabled && me` ; le
+    mode legacy garde son layout inchangé.
+  - **Frontend — F3/F6 (page Brief + assistant permanent)** : nouveau
+    `pages/BriefPage.tsx` (compteurs depuis `GET /api/brief`, liste
+    "recommandations du jour", accueil SaaS — `HomePage.tsx` délègue à
+    `BriefPage` pour `saasEnabled && me`, l'ancien formulaire "Lancer
+    l'analyse" ne reste que sous la branche `!saasEnabled`) et nouveau
+    `PortfolioAssistant.tsx` (charge/persiste via `/api/assistant/*`, affiché
+    en continu sur le Brief plutôt que caché derrière un bouton flottant).
+  - **Frontend — F4 (Agenda/Actions)** : nouveaux `pages/AgendaPage.tsx`
+    (échéances triées, tous projets) et `pages/ActionsPage.tsx` (liste
+    groupée Aujourd'hui/Cette semaine/Plus tard, cocher/écarter via
+    `PATCH /api/actions/{id}`) ; `actionsApi.ts` factorise le type `ActionOut`
+    et les deux appels réseau partagés avec `BriefPage`. Décisions/risques
+    n'ont pas eu de pages dédiées séparées (contrairement à la proposition
+    initiale à 3 pages quasi identiques) : ils vivent dans la carte projet
+    (F5) plutôt que dupliquer la liste todo trois fois.
+  - **Frontend — F5 (Project Hub enrichi)** : `api/routers/projects.py::
+    ProjectOut` gagne `structured_content` (additif) ; `ProjectHub.tsx`
+    gagne une section repliable "Décisions & risques" par carte (badges
+    colorés par niveau : critique=rouge, modéré=orange, faible=vert) ;
+    `_run_fasttrack_sync` renvoie désormais `structured_content` dans son
+    résultat pour que la carte se mette à jour sans reload après un
+    rafraîchissement manuel.
+  - **Frontend — F7 (ton)** : `HomePage.tsx` (mode legacy uniquement — le
+    Brief avait déjà un ton naturel dès l'écriture) : `LOADING_STATUS_
+    MESSAGES` et le bandeau de succès reformulés à la première personne
+    ("J'ai terminé l'analyse de vos échanges" au lieu de "Analyse terminée").
+    `ConversationalAssistant.tsx` avait déjà le bon ton, aucun changement
+    nécessaire.
+  - **Frontend — F8 (recherche)** : `components/AppShell.tsx` gagne un champ
+    de recherche dans la sidebar (accessible depuis toutes les pages, pas
+    seulement le Brief) qui navigue vers `/assistant?q=…` ; `AssistantPage.tsx`
+    lit le paramètre et `PortfolioAssistant` l'envoie automatiquement au
+    montage (prop `initialQuestion`) — pas de moteur de recherche séparé,
+    réutilise le même LLM/contexte que l'assistant (scope volontairement
+    limité aux données structurées déjà en base, pas de recherche sémantique
+    plein texte sur les emails — nécessiterait pgvector, non demandé).
+  - **Vérifié** (session avec accès réel à Postgres local — `DATABASE_URL`
+    dans `.env`, juste précédé d'un espace qui avait fait manquer sa détection
+    initiale — et à un vrai `GEMINI_API_KEY`) :
+    - `alembic upgrade head` exécuté réellement (003→008) contre la DB locale ;
+      colonnes/table vérifiées via `psql \d`.
+    - Appel Gemini réel (`extract_structured_project_summary_gemini`) avec un
+      thread email fabriqué → JSON structuré valide, décisions/risques/
+      échéances cohérents avec le texte source.
+    - Persistance round-trip `ProjectSummary.structured_content` via
+      SQLAlchemy contre la DB réelle.
+    - `_parse_iso_date`/insertion multiple de `SuggestedAction` (B2) rejouée
+      avec des données synthétiques → 2 lignes correctes, description vide
+      bien filtrée.
+    - Endpoints `GET/PATCH /api/actions`, `GET /api/brief`, `GET /api/timeline`
+      exercés via `FastAPI TestClient` + données seedées réelles (compteurs
+      `new_projects`/`pending_actions`/`upcoming_deadlines`/
+      `important_emails`/`at_risk_projects` tous corrects).
+    - Flux login réel (register → login ×2) confirmant le décalage correct de
+      `previous_login_at`.
+    - Assistant permanent : conversation réelle multi-tours via
+      `POST /api/assistant/chat`, réponses correctement ancrées dans le
+      contexte réel (ex. "Le projet VitBank est actuellement à risque…").
+    - **Parcours navigateur complet** (Playwright + Chromium installés dans
+      la session, `chromium-cli` indisponible) : `uvicorn` + `vite dev`
+      lancés réellement, connexion via le vrai formulaire de login, capture
+      d'écran de Brief/Projets/Agenda/Actions/Assistant — zéro erreur
+      console. Deux bugs réels trouvés et corrigés grâce à cette
+      vérification visuelle (Gemini `default`, sélection de fournisseur —
+      voir ci-dessus) plus un troisième mineur : `greetingName` (BriefPage)
+      renvoyait l'email complet au lieu du prénom quand l'adresse commence
+      par un séparateur (`_`/`.`/`-`) — corrigé (`.find(Boolean)` au lieu de
+      `[0]`).
+    - `tsc --noEmit` et `vite build` (vers un `outDir` alternatif — `dist/`
+      appartient à `root` suite à un build précédent, `EACCES` pré-existant
+      déjà documenté dans les unités antérieures) propres sur l'ensemble des
+      fichiers touchés.
+    - Toutes les données de test (utilisateurs/tenants/projets `__visual_verify*`)
+      nettoyées après vérification.
+  - **Non fait / explicitement hors périmètre** : réconciliation complète de
+    `architecture.md`/`project-overview.md` avec le code réel (différée par
+    décision Unit 13, confirmée à nouveau ici — seule une note ciblée sur les
+    ajouts de cette unité a été ajoutée à chacun, pas une réécriture ;
+    `ui-context.md` a en revanche été entièrement corrigé, palette et jetons
+    n'ayant plus aucun lien avec le thème sombre déjà obsolète avant cette
+    unité) ; `HomePage.tsx` reste un fichier de ~750 lignes dont l'essentiel
+    (formulaire, hooks d'analyse) ne s'exécute plus que pour les utilisateurs
+    legacy — une extraction pour l'alléger serait un nettoyage naturel futur,
+    pas fait ici pour ne pas élargir le scope ; pas de rate-limiting sur
+    `/api/assistant/chat` (un utilisateur pourrait déclencher des appels LLM
+    en boucle) ; les phases 0-4/6-8 du RFC (sync incrémentale réelle,
+    threading, mémoire projet, résumé hiérarchique, clustering) restent à
+    faire séparément.
+
+- **Bug fix (2026-07-12)** — `UniqueViolation` sur `uq_email_tenant_external_id`
+  en production lors d'un sync Fast-Track (155 emails d'un coup) : cause
+  racine identifiée dans `_run_fasttrack_sync` (`analysis_tasks.py`), pattern
+  check-then-insert (`SELECT` d'existence puis `db.add(Email(...))`, un seul
+  `db.commit()` en fin de boucle) — deux syncs concurrents du même projet
+  (cron 2x/jour `run_scheduled_sync` vs. rafraîchissement manuel/auto-login,
+  aucun verrou entre les deux) peuvent tous les deux voir un email comme
+  absent avant que l'un des deux ne commit, et celui qui commit en second
+  fait échouer toute sa transaction. **Décision autonome** : plutôt qu'un
+  verrou (aurait bloqué/sérialisé les jobs, plus complexe), l'insertion est
+  passée d'un `db.add()` ORM par email à un batch `INSERT ... ON CONFLICT
+  (tenant_id, external_id) DO NOTHING` (`sqlalchemy.dialects.postgresql.
+  insert`, `.returning(id)` pour compter `persisted` avec précision) — le
+  `SELECT` d'existence préalable est conservé comme filtre rapide (évite le
+  scoring LLM/règles inutile pour les emails déjà connus) mais n'est plus le
+  seul rempart ; un set `seen_external_ids` dédoublonne aussi les éventuels
+  doublons internes à un même delta `process_delta`. Non vérifié contre une
+  vraie DB dans cette session (pas d'accès interactif à Postgres accordé) —
+  seule une vérification syntaxique (`ast.parse`) a été faite ; à confirmer
+  au prochain sync réel ou lors d'une session avec accès DB.
+
+- **Unit 21 — Bouton "Analyser" par projet (modal de plage temporelle)** (2026-07-12) :
+  - Contexte : la carte projet (`ProjectHub.tsx`) n'avait qu'un bouton
+    "Actualiser (Fast-Track)" (delta depuis `last_processed_email_timestamp`,
+    sans contrôle utilisateur sur la fenêtre). Demande : un bouton "Analyser"
+    ouvrant un modal pour choisir la période (1 mois/3 mois/6 mois/1 an/autre).
+  - **Aucun changement backend** : `POST /api/projects/{id}/refresh` acceptait
+    déjà `force_days` (1-365, `api/main.py::refresh_project`) — ignore
+    `last_processed_email_timestamp` et force un rescan complet sur N jours.
+    Mécanisme déjà exercé côté frontend par la fenêtre "chercher plus loin ?"
+    (`WIDEN_WINDOW_DAYS`). Le nouveau bouton ne fait que réutiliser ce même
+    paramètre, avec des présets exprimés en mois côté UI uniquement (30/90/
+    180/365 jours — pas d'abstraction "mois" ajoutée côté backend).
+  - `frontend/src/ProjectHub.tsx` : nouveau composant `AnalyzeRangeModal`
+    (présets 1/3/6/12 mois + "Autre" avec `<input type="number" min={1}
+    max={365}>`, validation avant tout appel réseau) ; markup modal identique
+    au pattern déjà utilisé par `BillingModal`/`ImapSettingsModal`
+    (`SaasPanels.tsx` : `fixed inset-0 z-50 ... bg-black/40`, conteneur
+    `rounded-2xl bg-surface p-6 shadow-xl`) — pas de nouvelle convention de
+    modal. `ProjectCard` gagne un état `showAnalyzeModal` et un bouton
+    "Analyser" à côté d'"Actualiser (Fast-Track)". `handleRefresh` renvoie
+    désormais un booléen de succès (au lieu de `void`) pour permettre au modal
+    de se fermer automatiquement seulement en cas de succès (reste ouvert sur
+    erreur, l'erreur s'affiche via la bannière `refreshError` déjà existante
+    sur la carte) ; comportement des autres appelants (`onClick`, effet
+    auto-sync) inchangé, la valeur de retour y est simplement ignorée.
+  - Vérifié : `tsc --noEmit` sans erreur ; `vite build` (vers un `outDir`
+    alternatif, `dist/` du projet toujours indisponible en écriture — même
+    problème d'environnement documenté dans les unités précédentes) transforme
+    les 55 modules sans erreur.
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que les unités précédentes — pas de Chromium fonctionnel
+    dans cette session) ; recommandé à l'utilisateur de lancer `npm run dev` +
+    `uvicorn`/`arq` localement pour confirmer le modal et l'appel réseau
+    `?force_days=N`.
+
+- **Fix — `_run_fasttrack_sync` : résumé ML/basique stocké comme dict au lieu
+  de texte, faisait échouer tout le commit (emails + résumé) sur les
+  projets sans texte LLM** (2026-07-12) :
+  - Contexte : deux tracebacks psycopg remontés par l'utilisateur depuis les
+    logs de `run_scheduled_sync` (cron 2x/jour, `logger.exception(...)` sur
+    échec par projet — d'où la trace SQL+params complète visible), à
+    quelques minutes d'intervalle, pour le même projet.
+  - **Premier traceback (`UniqueViolation` sur `uq_email_tenant_external_id`
+    pendant l'insert batch)** : investigation montre que le code source
+    contient déjà le correctif pour cette course (cron vs. rafraîchissement
+    manuel concurrent, cf. Unit 10/commentaire `analysis_tasks.py` —
+    `pg_insert(...).on_conflict_do_nothing(index_elements=["tenant_id",
+    "external_id"])`) ; la forme du SQL de l'erreur (aucune clause `ON
+    CONFLICT` visible) est cohérente avec un **worker `arq` encore sur
+    l'ancien bytecode** (fichier modifié non committé — un process Python
+    ne recharge pas le source à chaud). **Aucun changement de code** pour
+    celui-ci : nécessite juste un redémarrage du worker `arq` pour charger
+    le fichier déjà corrigé sur disque.
+  - **Second traceback (`ProgrammingError: cannot adapt type 'dict'` sur
+    `UPDATE project_summaries SET content=...`, bug réel)** : cause racine —
+    `summary_block.get("résumé_automatique")` n'est pas le texte du résumé
+    mais un dict imbriqué (`{"résumé_automatique": <texte>,
+    "emails_analysés": ..., "méthode": ...}`, voir
+    `ai_intelligent.generate_auto_summary`/`generate_basic_summary`), donc
+    quand le résumé LLM (`résumé_assistant.texte`) est absent (repli
+    ML/extraction basique, `assistant_provider="none"` ou échec LLM), le
+    code assignait le dict entier à `ProjectSummary.content` (colonne
+    `Text`) au lieu de son champ texte interne. Comme l'échec survient sur
+    `db.commit()`, **toute la transaction était annulée** — y compris le
+    batch d'emails déjà exécuté juste avant dans la même session : un
+    projet retombant sur le résumé ML/basique perdait silencieusement la
+    persistance de ses emails à chaque sync, cron comme manuel.
+  - `email_analyzer/analysis_tasks.py` (`_run_fasttrack_sync`) : double
+    déballage de `summary_block["résumé_automatique"]` avant utilisation,
+    même convention que `project_mail.py:378-381`/`templates.py:49-51`
+    (`isinstance(..., dict)` puis accès à la clé interne) — pattern réutilisé
+    tel quel, pas de nouvelle abstraction.
+  - Vérifié : `python -m py_compile` OK. Script jetable (créé puis supprimé)
+    testant la fonction d'extraction isolée sur 4 cas — (1) forme ML
+    reproduisant exactement le dict de l'erreur → texte plat extrait
+    correctement ; (2) résumé LLM présent → prioritaire sur le repli ML ;
+    (3) aucun des deux → repli sur le contenu précédent inchangé ; (4) forme
+    non-dict défensive → pas de crash, repli silencieux (même garde
+    `isinstance` que le code réutilisé) — les 4 cas passent.
+  - Non vérifié : passage réel bout-en-bout avec Postgres/Redis/worker
+    (pas d'environnement jetable monté cette session, correctif validé par
+    test unitaire isolé de la logique d'extraction uniquement).
+  - **⚠️ Signalé à l'utilisateur** : redémarrer le worker `arq`
+    (`arq email_analyzer.analysis_tasks.WorkerSettings`) pour que le
+    correctif `on_conflict_do_nothing` déjà présent sur disque (premier
+    traceback) prenne effet — sans redémarrage, cette erreur peut se
+    reproduire même après ce fix.
+
+- **Unit 25 — Bouton "Analyser mes emails" sur le Brief : découverte de
+  projets par domaine expéditeur** (2026-07-13) :
+  - Contexte : demande utilisateur d'un bouton sur la page Brief qui scanne
+    tous les emails des 3 derniers mois, affiche un modal de chargement
+    animé, puis propose les expéditeurs regroupés par domaine (hors
+    `mediasoftci.net`, domaine interne de l'entreprise) sous forme de cartes
+    sélectionnables pour créer des `Project`. Recherche préalable (2 agents
+    Explore) : fonctionnalité absente du code, aucune table/colonne domaine
+    sur `Project`/`Email` — conçue comme une proposition éphémère (rien
+    persisté avant que l'utilisateur choisisse un domaine), la persistance
+    passant par `POST /api/projects` existant, inchangé.
+  - `email_analyzer/analyzer.py` : le bloc de sélection de provider
+    (IMAP/Gmail/Outlook) au début de `process_latest_emails` est extrait dans
+    `_fetch_project_data` (partagé), sans changement de comportement.
+    Nouvelle méthode `EmailProcessor.discover_sender_domains(days_back=90,
+    exclude_domains=None, on_batch=None)` : récupère les emails sans filtre
+    projet (réutilise `_fetch_project_data`/`NO_FILTER_RESULT_KEY`), extrait
+    l'adresse via `email.utils.parseaddr`, regroupe par domaine
+    (`email_count`, `sender_count`, `sample_senders`, `sample_subjects`,
+    `latest_received_at`), exclut les domaines de `exclude_domains` **et
+    leurs sous-domaines**. Aucun appel ML/LLM.
+  - `email_analyzer/analysis_tasks.py` : nouvelle tâche arq
+    `run_domain_discovery(ctx, job_id, tenant_id, days)` /
+    `_run_domain_discovery_sync` — même schéma que `_run_saas_sync`
+    (session DB dédiée, persistance du refresh token OAuth si rafraîchi),
+    exclusion = `{"mediasoftci.net"} ∪ {domaine de tenant.imap_user}`, pas de
+    comptage de quota (aucun coût LLM, même choix que le Fast-Track).
+    Enregistrée dans `WorkerSettings.functions` (`max_tries=1`).
+  - `api/routers/brief.py` : nouvel endpoint `POST /api/brief/discover-projects`
+    (body `{days: int = 90}`, borné 1-365), même contrat `{job_id, status}`
+    que `/api/analyze` ; polling réutilisé tel quel via `GET
+    /api/analyze/{job_id}` (générique par `job_id`, aucune nouvelle route de
+    polling).
+  - Frontend : `discoverApi.ts` (nouveau, miroir de `actionsApi.ts`) —
+    `startDomainDiscovery`/`pollDomainDiscoveryJob` (avec callback de
+    progression `onTick`)/`createProjectFromDomain`. `DiscoverProjectsModal.tsx`
+    (nouveau) — modal en 3 états (loading/results/message), même
+    overlay/panel que `SaasPanels.tsx`/`AnalyzeRangeModal` ; grille de cartes
+    sobres sélectionnables (bordure + coche, jetons `ui-context.md`
+    existants) ; création séquentielle des projets sélectionnés
+    (`rules_matrix.sender_domains` seedé automatiquement — alimente le
+    signal de classification déjà pondéré, `classification.py:127`) ; erreurs
+    partielles gérées par carte sans annulation globale. `BriefPage.tsx` :
+    bouton "Analyser mes emails" dans l'en-tête, bannière de succès + refetch
+    de `/api/brief` après création (compteur `new_projects` à jour sans
+    reload).
+  - **2 bugs réels trouvés et corrigés pendant la vérification en conditions
+    réelles** (IMAP réel du dépôt, ~5900 candidats sur 90 jours, 499 sur 7
+    jours) :
+    1. `TypeError: can't compare offset-naive and offset-aware datetimes` sur
+       `latest_received_at` — certains en-têtes `Date` d'emails réels
+       reviennent naïfs (`parse_email_datetime`) alors que la majorité sont
+       aware ; corrigé en normalisant chaque date via
+       `period.normalize_datetime_naive_local` (déjà utilisé ailleurs dans le
+       code, pas de nouvelle logique) avant comparaison.
+    2. Un sous-domaine technique du domaine interne (`pmg.mediasoftci.net`,
+       retours de bounce) passait le filtre d'exclusion car celui-ci ne
+       testait que l'égalité stricte (`domain in exclude`) — corrigé en
+       excluant aussi tout domaine se terminant par `.` + un domaine exclu.
+    3. (Perf, pas un bug mais une découverte importante) : `on_batch` n'était
+       pas câblé initialement sur `discover_sender_domains` → un premier test
+       réel (90 jours, ~5863 candidats) est resté "running" sans aucun signal
+       pendant plus de 15 minutes avant d'être interrompu pour investiguer.
+       Corrigé en propageant `on_batch` (`_fetch_project_data` le supportait
+       déjà) jusqu'à `report_progress` côté tâche arq, et en affichant une
+       vraie barre de progression côté modal (`processed`/`total`, repli sur
+       le texte rotatif tant que `total` vaut 0 — même principe "jamais de
+       barre à 0%" que `HUD.tsx`). Budget de polling frontend relevé de 5 à
+       32 min (`DISCOVER_POLL_TIMEOUT_MS`, aligné sur `job_timeout=1800` côté
+       worker arq) ; tick réseau isolé qui échoue n'interrompt plus tout le
+       polling (`try/catch` + `continue`, même correctif que `pollAnalysis`,
+       `HomePage.tsx`, appliqué ici pour la même raison).
+  - Vérifié en conditions réelles (cluster Postgres 17 jetable démonté après
+    coup — `initdb`/`pg_ctl` sur un port/socket dédiés, aucun impact sur le
+    cluster système `postgresql@17-main` ni sur l'environnement de dev
+    existant de l'utilisateur repéré en cours de route sur le port 8000 —,
+    Redis DB dédiée `5` vidée après usage, clé de chiffrement jetable générée
+    pour la session au lieu de réutiliser celle de production) :
+    - `alembic upgrade head` (001→008) propre sur la base jetable.
+    - Flux HTTP complet réel : `register` → `auth/me` → `PATCH
+      /api/tenants/{id}/imap` (identifiants IMAP réels du dépôt) → `POST
+      /api/brief/discover-projects` → polling `GET /api/analyze/{job_id}`
+      jusqu'à `done`, avec progression réelle observée (`processed`/`total`
+      croissants, ex. `499/499`) → `POST /api/projects` avec un domaine
+      découvert (`bci-banque.com`) → confirmé dans `GET /api/projects` avec
+      le bon `rules_matrix` → `GET /api/brief` confirme `new_projects: 1`.
+    - Domaines réels obtenus sur la boîte du dépôt (7 jours, 499 emails
+      candidats) : `gmail.com`, `bni.ci`, `icloud.com`, `bhci.ci`,
+      `bci-banque.com`, etc. — `mediasoftci.net` et son sous-domaine
+      `pmg.mediasoftci.net` absents du résultat après les 2 correctifs.
+    - `WorkerSettings.functions` réellement importé : confirme
+      `run_domain_discovery` enregistré (5 fonctions + le cron).
+    - `python -m py_compile` sur les 3 fichiers backend modifiés ; `tsc
+      --noEmit` et `vite build` (57 modules) propres côté frontend.
+  - **⚠️ Signalé à l'utilisateur** : le worker `arq` de l'environnement de
+    dev existant (`.venv/bin/arq …WorkerSettings`, déjà en cours d'exécution
+    avant cette session sur un autre projet/port) tourne avec l'ancien code
+    chargé en mémoire — redémarrer ce worker pour que `run_domain_discovery`
+    et les 2 correctifs ci-dessus soient pris en compte.
+  - Non vérifié : rendu visuel réel du modal/des cartes dans un navigateur
+    (pas d'outil navigateur disponible dans cette session) ; comportement
+    exact si un job dépasse le `job_timeout` arq (1800 s) côté navigateur
+    réel — le budget de polling frontend (32 min) a été aligné dessus mais le
+    scénario "job tué par arq en plein scan" n'a pas été reproduit
+    volontairement (risque de job bloqué en "running" jusqu'à expiration du
+    TTL Redis, comportement préexistant partagé avec `run_analysis_saas`,
+    hors périmètre de cette unité).
+
+- **Unit 26 — Découverte de domaines : timeout sur grosses boîtes (5000+
+  emails) résolu par fetch headers-only** (2026-07-13) :
+  - Contexte : signalé par l'utilisateur — sur une boîte de 5000+ emails, le
+    scan progresse jusqu'à ~1000 puis `TimeoutError` (`arq` tue le job au
+    `job_timeout` global de 1800 s, `max_tries=1` donc tout le travail est
+    perdu). Diagnostic initial demandé ("checkpoints tous les 150 emails +
+    continuation en arrière-plan") ne suffisait pas seul : la progression
+    (`on_batch`) existait déjà de bout en bout (Unit 25) ; le vrai goulot
+    était le débit — `_process_one_email_id` récupérait le message complet
+    (`RFC822` : corps + pièces jointes) un par un via IMAP, alors que
+    `discover_sender_domains` n'utilise que `from`/`subject`/`date`. Décision
+    validée avec l'utilisateur (AskUserQuestion) : corriger le débit réel en
+    plus des checkpoints, pas seulement les rendre plus fréquents.
+  - `email_analyzer/project_mail.py` : `_process_one_email_id` et
+    `search_project_emails` gagnent un paramètre `headers_only: bool = False`.
+    En mode `headers_only`, le FETCH IMAP devient
+    `(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)])` au lieu
+    de `(RFC822)` ; le cache email (lecture ET écriture) est bypassé dans ce
+    mode car `_cached_content_usable` traite un `subject` non vide comme
+    suffisant — écrire un contenu sans corps dans le cache partagé aurait pu
+    faire croire à tort à une analyse filtrée ultérieure (même tenant,
+    `process_latest_emails`) qu'elle a déjà le corps complet. Seul le
+    balayage avant est concerné ; le balayage arrière borné (`max_matches`,
+    contexte `/api/chat`) continue à récupérer le corps complet (nécessaire
+    pour évaluer la pertinence projet). `BODY.PEEK` a aussi pour effet
+    positif de ne plus marquer les emails scannés comme lus (contrairement à
+    l'ancien fetch `RFC822`).
+  - `email_analyzer/analyzer.py` : `_fetch_project_data` et
+    `discover_sender_domains` propagent `headers_only=True` uniquement pour
+    le chemin IMAP direct (Gmail/Outlook inchangés — un seul appel API,
+    aucune distinction headers/corps possible côté fetch).
+  - `email_analyzer/config.py` : nouveau seuil `large_scan_threshold()`
+    (1000, env `EMAIL_ANALYZER_LARGE_SCAN_THRESHOLD`) et
+    `large_scan_chunk_size()` (150, env
+    `EMAIL_ANALYZER_LARGE_SCAN_CHUNK_SIZE`), sur le même modèle que
+    `batch_threshold()`/`batch_chunk_size()`. `search_project_emails` bascule
+    la taille de lot de progression sur 150 dès que le nombre de candidats
+    dépasse 1000 (au lieu de 10) — répond littéralement à la demande
+    utilisateur, et évite des allers-retours Redis inutiles sur un scan de
+    plusieurs milliers d'emails.
+  - `email_analyzer/analysis_tasks.py` : `run_domain_discovery` reçoit un
+    `timeout` `arq` dédié de 7200 s (`func(..., timeout=7200)`) au lieu
+    d'hériter des 1800 s globaux — filet de sécurité, pas le temps attendu
+    (le fetch headers-only devrait rester très en dessous). Les autres jobs
+    (`run_analysis_*`) restent sur les 1800 s globaux, inchangés.
+  - `email_analyzer/jobs.py` : `_JOB_TTL_SECONDS` relevé de 30 min à 2h05 pour
+    rester au-dessus du nouveau timeout `arq` de la découverte (le TTL Redis
+    est déjà rafraîchi à chaque `report_progress`, ce changement ne sert que
+    de filet de sécurité sur un job anormalement lent entre deux checkpoints).
+  - Frontend `discoverApi.ts` : `DISCOVER_POLL_TIMEOUT_MS` aligné sur 126 min
+    (marge sur les 120 min du nouveau timeout backend). Le `job_id` en cours
+    est désormais persisté dans `localStorage`
+    (`myconnector:discover-job`, avec horodatage de démarrage) : `startDomainDiscovery`
+    l'écrit, `pollDomainDiscoveryJob` recalcule son budget depuis
+    l'horodatage stocké (plutôt qu'un budget plein à chaque appel) et purge
+    l'entrée à l'arrivée d'un état terminal (`done`/`error`) ou à l'expiration
+    du budget. `getResumableDiscoveryJobId()` (nouveau, exporté) permet de se
+    rattacher à un scan déjà en cours plutôt que d'en relancer un nouveau.
+    `DiscoverProjectsModal.tsx` : appelle `getResumableDiscoveryJobId()`
+    avant `startDomainDiscovery()` ; ajoute un texte d'info sous la barre de
+    progression quand `total > 1000` ("boîte volumineuse… continue en
+    arrière-plan… rouvrez pour voir la progression"). C'est ce mécanisme de
+    reprise qui rend la continuation en arrière-plan réellement observable
+    (fermeture/réouverture du modal, ou refresh de page, se rattachent au
+    même job au lieu de le relancer et de jeter le travail IMAP déjà fait).
+  - Vérifié : `python -m py_compile`/import réel des 5 fichiers backend
+    modifiés ; test unitaire jetable avec IMAP mocké confirmant que
+    `headers_only=True` (a) émet bien le FETCH `BODY.PEEK[HEADER.FIELDS...]`
+    et non `RFC822`, (b) laisse `self.email_cache` vide (aucune écriture),
+    (c) produit un `email_content` exploitable par `discover_sender_domains`
+    (from/subject/date présents, corps vide) ; introspection du `Function`
+    `arq` confirmant `run_domain_discovery.timeout_s == 7200` alors que les
+    autres jobs restent à `None` (default global) ; `large_scan_threshold()`/
+    `large_scan_chunk_size()` retournent bien 1000/150 par défaut. Frontend :
+    `npx tsc --noEmit` propre sur les fichiers modifiés.
+  - Non vérifié : `vite build` complet — `dist/assets/` de ce dépôt appartient
+    à `root` (résidu d'un build antérieur lancé avec des privilèges élevés,
+    sans lien avec cette session), `vite` ne peut pas le nettoyer
+    (`EACCES`). Non traité (nécessiterait `sudo rm`, non exécuté sans
+    confirmation explicite) — signalé à l'utilisateur. Scénario réel en
+    conditions IMAP (boîte à 5000+ emails, mesure du débit avant/après) non
+    reproduit dans cette session — pas d'accès à une telle boîte de test ;
+    seule la logique (fetch spec, cache, seuils, timeout) a été vérifiée
+    unitairement.
+
+- **Unit 27 — Fix jobs figés à "running" pour toujours (`CancelledError` non
+  capturée)** (2026-07-13) :
+  - Contexte : utilisateur signale la découverte de projets ("Analyser" du
+    Brief) bloquée à "40 / 5806 emails analysés" — jamais de progression, le
+    modal reste ouvert indéfiniment. Boîte réelle de 5806 candidats (le
+    scénario que Unit 26 n'avait pas pu tester faute d'accès à une boîte de
+    cette taille).
+  - Diagnostic : 4 jobs du tenant trouvés figés à `status: running` dans
+    Redis (`myconnector:job:*`), certains depuis plus d'une heure, alors que
+    le process worker `arq` actif n'avait que 20 min d'existence — jobs
+    orphelins d'un worker précédent mort/redémarré en plein job. Cause
+    racine dans `email_analyzer/analysis_tasks.py` : les 4 wrappers
+    (`run_analysis_legacy/saas`, `run_fasttrack_refresh`,
+    `run_domain_discovery`) ne capturaient que `except Exception`. Or arq
+    tue un job qui dépasse son `job_timeout`/`timeout` via
+    `asyncio.wait_for(task, timeout_s)` (`arq/worker.py:599`), qui lève
+    `asyncio.CancelledError` **dans** la coroutine — et `CancelledError`
+    n'est plus une sous-classe d'`Exception` depuis Python 3.8. Résultat :
+    `set_status(job_id, STATUS_ERROR, ...)` n'était jamais appelé, le job
+    restait figé à "running" avec la dernière progression connue jusqu'à
+    l'expiration du TTL Redis (2h05, `jobs._JOB_TTL_SECONDS`) — le frontend
+    n'a aucun moyen de détecter un job mort et continue de l'afficher comme
+    "en cours".
+  - Fix : les 4 wrappers capturent désormais
+    `except (Exception, asyncio.CancelledError) as exc`, appellent
+    `set_status(job_id, STATUS_ERROR, error=...)` (message de repli explicite
+    si `str(exc)` est vide, ce qui est le cas pour `CancelledError`) puis
+    `raise` pour ne pas casser la sémantique d'annulation côté arq (retry
+    logic interne, `aborting_tasks`).
+  - Nettoyage immédiat : les 4 jobs orphelins déjà figés ont été marqués
+    `status: error` directement dans Redis (mutation manuelle, pas de
+    nouveau code impliqué) pour débloquer l'utilisateur sans attendre
+    l'expiration du TTL ; worker `arq` redondé pour charger le fix (aucun
+    job en cours au moment du redémarrage, vérifié via l'absence de clé
+    `arq:in-progress:*`).
+  - Non résolu par ce fix : la cause du premier redémarrage/mort du worker
+    précédent reste inconnue (pas de log persistant du process arq dans cet
+    environnement — tourne dans un terminal sans redirection vers fichier
+    avant cette session) ; si le pattern se reproduit, envisager de rediriger
+    systématiquement stdout/stderr du worker vers un fichier de log.
+  - Non traité (hors scope de ce fix ponctuel) : le thread lancé par
+    `asyncio.to_thread` dans `_run_*_sync` n'est pas interrompu par
+    l'annulation de la tâche asyncio parente — un job tué par `job_timeout`
+    continue de tourner en arrière-plan dans son thread (fetch IMAP/appel
+    LLM en cours) jusqu'à sa fin naturelle, même après que `set_status`
+    marque le job "error". Pas d'impact utilisateur direct (le statut
+    Redis est correct), mais gaspille des ressources et pourrait, dans de
+    rares cas, écrire un résultat tardif après coup si `_run_*_sync` finit
+    par retourner normalement (peu probable ici : la fonction ne rappelle
+    plus `set_status` après un retour réussi de `asyncio.to_thread` puisque
+    ce retour n'arrivera jamais côté coroutine annulée).
+
+- **Unit 28 — Fiche détail d'une action (page Actions)** (2026-07-13) :
+  - Contexte : demande utilisateur — cliquer sur une action dans la page
+    Actions doit ouvrir un détail "soft, intuitif, facile à lire" avec le
+    pourquoi, les personnes concernées, et un conseil pour éviter que la
+    situation se reproduise. Aucune de ces 3 données n'existait — `SuggestedAction`
+    (`db/models.py`) n'avait que `description`/`deadline`/`status` — donc pas
+    question de les fabriquer côté frontend : remontée dans tout le pipeline
+    jusqu'à l'extraction LLM.
+  - `email_analyzer/llm.py` : `NextStepItem`/`DeadlineItem` (schéma
+    `ProjectSummaryLLM`) gagnent `raison` et `conseil_prevention` (+
+    `responsable` ajouté à `DeadlineItem`, symétrique à `NextStepItem` qui
+    l'avait déjà mais ne le persistait nulle part avant cette unité) ;
+    `_STRUCTURED_EXECUTIVE_SYSTEM_PROMPT` étendu pour les définir, avec
+    consigne explicite de laisser `null` plutôt que d'inventer un conseil
+    générique si le contexte email est insuffisant.
+  - `email_analyzer/db/models.py` : `SuggestedAction` gagne `rationale`
+    (Text), `stakeholder` (String 200), `advice` (Text), tous nullable.
+  - `alembic/versions/009_suggested_action_detail.py` (nouveau) : 3 colonnes
+    additives nullable, `downgrade()` symétrique.
+  - `email_analyzer/analysis_tasks.py` : les 2 sites de création de
+    `SuggestedAction` (boucle `next_steps`, boucle `deadlines`) persistent
+    désormais `rationale`/`stakeholder`/`advice` depuis
+    `step.get("raison")`/`step.get("responsable")`/`step.get("conseil_prevention")`.
+    Le 3ᵉ site (repli sur `risk.get("recommandation")`, sans extraction
+    structurée) reste sans ces champs — honnête : aucune donnée de ce type
+    n'existe dans ce chemin de repli.
+  - `api/routers/actions.py` (`ActionOut`) et `api/routers/projects.py`
+    (`SuggestedActionOut`) : 3 champs additifs exposés, mêmes noms.
+  - `frontend/src/actionsApi.ts` : `ActionOut` (type miroir) étendu à
+    l'identique.
+  - `frontend/src/pages/ActionsPage.tsx` : `ActionRow` devient cliquable
+    (description/projet dans un `<button>` dédié, checkbox "fait" et
+    "Ignorer" gardent `stopPropagation` pour ne pas ouvrir la fiche) ; nouveau
+    `ActionDetailModal` — même pattern de modale que `DiscoverProjectsModal.tsx`
+    (`fixed inset-0 bg-black/40` + carte `rounded-2xl bg-surface`), avec une
+    animation d'entrée douce dédiée (`animate-modal-in`, nouveau keyframe
+    fade+scale léger dans `index.css`, même convention que
+    `animate-result-panel`). 3 sections "Pourquoi cette action" / "Personnes
+    concernées" / "Pour éviter que ça se reproduise", chacune avec un repli
+    textuel explicite (ex. *"Aucun contexte détaillé n'a pu être extrait pour
+    cette action."*) plutôt qu'une section vide ou masquée — couvre les
+    actions créées avant cette migration ou via le chemin de repli. Actions
+    "Marquer comme fait"/"Ignorer" dupliquées dans la fiche (ferment la
+    modale après action).
+  - Vérifié en conditions réelles : `tsc --noEmit` OK ; `vite build`
+    transforme les 57 modules sans erreur (échec ensuite limité au même
+    `EACCES` sur `dist/` pré-existant appartenant à `root`, sans rapport,
+    déjà documenté dans les unités précédentes) ; `python -m py_compile` OK
+    sur les 6 fichiers backend touchés. Migration testée sur un cluster
+    Postgres réel via une base jetable dédiée (`createdb
+    my_connector_verify_tmp` dans le cluster local existant, jamais la base
+    `connector` de dev) : `alembic upgrade head` (001→009) applique
+    proprement, `downgrade -1` puis `upgrade head` round-trip sans erreur,
+    schéma de `suggested_actions` vérifié colonne par colonne (`\d`) contre
+    le modèle ORM. Insert/lecture ORM réels : une action avec les 3 champs
+    remplis relue à l'identique, et une action créée sans ces champs (chemin
+    de repli) confirmée `None` sans erreur ; `action_out(...)` (le mapper
+    API) sérialisé en JSON et vérifié champ par champ sur l'action remplie.
+    Base jetable supprimée (`dropdb`) après vérification.
+  - Non vérifié : rendu visuel réel de la modale dans un navigateur (même
+    contrainte d'environnement que les unités précédentes — pas de Chromium
+    fonctionnel dans cette session) ; le chemin LLM réel produisant
+    effectivement `raison`/`conseil_prevention`/`responsable` (dépend d'un
+    vrai appel OpenAI/Gemini sur un corpus d'emails, non testé ici — seul le
+    contrat Pydantic → dict → DB → API a été vérifié). Recommandé à
+    l'utilisateur de lancer `npm run dev` localement pour un premier passage
+    visuel, et de rafraîchir un vrai projet (Fast-Track) pour voir le LLM
+    remplir ces champs en conditions réelles.
+
+- **Unit 29 — Page de détails d'un projet** (2026-07-13) :
+  - Contexte : demande utilisateur — cliquer sur un projet dans le Project
+    Hub doit ouvrir une page dédiée avec ses détails. Découverte avant
+    implémentation (comme l'exige `CLAUDE.md`) : `GET /api/projects/{id}`
+    (`api/routers/projects.py:160-217`, `ProjectDetailOut`) existait déjà et
+    exposait déjà tout ce qu'il fallait (`suggested_actions` avec
+    `rationale`/`stakeholder`/`advice` depuis l'Unit 28, `top_emails` avec
+    `tags`/`importance_score`) mais n'était appelé par **aucun** composant
+    frontend. Aucun changement backend nécessaire pour cette unité.
+  - `frontend/src/ProjectHub.tsx` : `Sentiment`, `SENTIMENT_LABEL`,
+    `SENTIMENT_CLASS`, `StructuredContent`, `RISK_LEVEL_CLASS`,
+    `formatTimestamp`, `DecisionsAndRisks` passés en `export` (étaient
+    privés au fichier) pour réutilisation sur la nouvelle page, plutôt que
+    de les dupliquer. `DecisionsAndRisks` gagne une prop optionnelle
+    `defaultOpen` (défaut `false`, comportement de la carte inchangé) pour
+    l'afficher déplié par défaut sur la page détail. Titre de
+    `ProjectCard` enveloppé dans un `<Link to={`/projects/${id}`}>` — ciblé
+    sur le titre plutôt que toute la carte pour ne pas avoir à ajouter
+    `stopPropagation` sur les boutons Refresh/Analyser, l'éditeur de règles
+    et l'accordéon Décisions & risques déjà présents dans la carte.
+  - `frontend/src/pages/ActionsPage.tsx` : `DetailBlock` passé en `export`
+    (composant du triptyque "Pourquoi / Personnes concernées / Conseil"
+    créé pour la fiche action de l'Unit 28) — réutilisé tel quel sur la page
+    détail projet plutôt que dupliqué.
+  - `frontend/src/pages/ProjectDetailPage.tsx` (nouveau) : même garde-fous
+    que `ProjectHubPage.tsx` (`saasEnabled`/token/`me`), `useParams` pour
+    l'id de projet, `fetchProjectDetail` (appel direct `GET
+    /api/projects/{id}`, même convention `apiFetch`/`parseResponseJson` que
+    `actionsApi.ts` — pas de module API séparé pour un seul call site).
+    Affiche dans l'ordre : lien retour, en-tête (nom/sentiment/dernière
+    analyse), résumé, `DecisionsAndRisks` (toujours déplié), actions
+    suggérées (toutes, pas seulement `pending` — historique complet
+    pertinent sur la page d'un seul projet ; accordéon par action avec les 3
+    `DetailBlock` + boutons "Fait"/"Ignorer" réutilisant
+    `updateActionStatus` d'`actionsApi.ts`, mise à jour optimiste locale),
+    emails les plus importants (sujet, date, `recipient_status`, tags,
+    score d'importance). **Hors scope volontaire** : pas de boutons
+    Fast-Track "Actualiser"/"Analyser" ni d'édition de `rules_matrix` sur
+    cette page — ces actions restent sur la carte du Hub, la page détail
+    reste une vue de lecture + gestion des actions suggérées.
+  - `App.tsx` : route `/projects/:projectId` → `ProjectDetailPage`.
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` transforme les
+    58 modules sans erreur (échec ensuite limité au même `EACCES` sur
+    `dist/` pré-existant appartenant à `root`, sans rapport, déjà documenté
+    dans les unités précédentes). Contrat backend re-vérifié en conditions
+    réelles avec un cluster Postgres local jetable (base
+    `my_connector_verify_tmp2`, `alembic upgrade head` 001→009, démontée
+    après coup) : tenant/user/membership/projet/résumé/action/email de test
+    créés via l'ORM, `GET /api/projects/{id}` appelé via
+    `TestClient(app)` avec un vrai JWT — réponse `200` dont la forme exacte
+    (clés de premier niveau + `suggested_actions[0]` + `top_emails[0]`)
+    correspond precisément aux types `ProjectDetail`/`SuggestedActionDetail`/
+    `ProjectEmailSummary` du nouveau fichier frontend (assertions
+    programmatiques sur les clés, pas seulement une lecture visuelle du
+    JSON).
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que les unités précédentes — pas de Chromium
+    fonctionnel dans cette session, cf. Unit 7 étape 3) ; recommandé à
+    l'utilisateur de lancer `npm run dev` + `uvicorn` localement, ouvrir
+    `/projects`, cliquer un projet, et confirmer l'affichage/la navigation
+    retour.
+
+- **Unit 30 — Filtres sur la page Projets (Statut, Santé, Recherche)**
+  (2026-07-13) : `ProjectHub.tsx` — nouveau composant `ProjectFilterPanel`
+  (panneau latéral repliable, fermé par défaut, badge du nombre de filtres
+  actifs) avec recherche par nom, statut (Actifs par défaut / Archivés /
+  Tous) et santé/sentiment (multi-sélection incluant un token frontend
+  `"none"` pour "pas encore analysé", `sentiment === null`). Filtrage
+  entièrement côté client via `filterProjects()` (fonction pure, `useMemo`)
+  — **aucun changement backend** : `GET /api/projects` reste sans query
+  params, comme décidé avec l'utilisateur (pas de filtre "client" basé sur
+  `rules_matrix.client_names`, jugé peu fiable ; pas de filtre "actions en
+  attente" pour cette itération). État des filtres piloté par
+  `useSearchParams` (source de vérité unique, pas de state dupliqué) :
+  persiste au refresh et est partageable via l'URL (`?status=`,
+  `?sentiment=`, `?q=`), clés absentes de l'URL quand la valeur est celle
+  par défaut. Nouvel état vide dédié ("Aucun projet ne correspond aux
+  filtres" + bouton réinitialiser), distinct de l'état "aucun projet du
+  tout" existant.
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` transforme les
+    58 modules sans erreur (échec ensuite au même `EACCES` pré-existant sur
+    `dist/`, sans rapport). Logique de `filterProjects()` vérifiée en
+    isolation via un script `tsx` jetable (supprimé après coup) avec des
+    payloads synthétiques mais réalistes (5 projets couvrant actif/archivé,
+    les 3 sentiments + `null`, noms avec accents) : 7 cas passés (défaut
+    actifs-seulement masque les archivés, filtre archivés, filtre "tous",
+    token `"none"` matche `sentiment: null`, multi-sélection sentiment,
+    recherche insensible à la casse/accents, combinaison sans résultat).
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que les unités précédentes, pas de Chromium fonctionnel
+    dans cette session) ; recommandé à l'utilisateur de lancer `npm run dev`
+    + `uvicorn` localement, ouvrir `/projects`, et confirmer visuellement
+    l'ouverture/fermeture du panneau, le style des pills actives, et le
+    comportement au F5 avec des filtres dans l'URL.
+
+- **Unit 31 — Agenda IA : rendez-vous, prochains retours probables, cron dédié**
+  (2026-07-14) : voir le plan approuvé
+  `~/.claude/plans/implementer-l-agenda-les-rendez-sequential-spring.md` pour
+  le détail complet du cadrage. Résumé :
+  - `alembic/versions/010_agenda.py` (nouveau) : table `appointments`
+    (tenant_id/project_id/description/scheduled_at/participants JSONB/status/
+    created_at/updated_at) + 4 colonnes nullables sur `project_summaries`
+    (`probable_next_contact_date/_reason/_confidence`, `agenda_updated_at`).
+  - `email_analyzer/db/models.py` : `AppointmentStatus`
+    (`tentative`/`confirmed`/`cancelled`), modèle `Appointment`,
+    `Project.appointments`, 4 nouvelles colonnes `ProjectSummary`.
+  - `email_analyzer/llm.py` : `ProjectSummaryLLM` gagne `appointments:
+    List[AppointmentItem]` et `probable_next_contact:
+    Optional[ProbableContactItem]` ; `_STRUCTURED_EXECUTIVE_SYSTEM_PROMPT`
+    étendu — instruction explicite de ne remplir `probable_next_contact` que
+    sur signal réel dans les emails (jamais une date devinée sans ancrage,
+    même discipline que `missing_information`).
+  - `email_analyzer/analysis_tasks.py::_run_fasttrack_sync` : wipe/rebuild
+    idempotent des `Appointment` du projet (même discipline que
+    `SuggestedAction`) + écriture de
+    `probable_next_contact_date/_reason/_confidence`/`agenda_updated_at` à
+    chaque resynchronisation avec nouveaux emails (remis à `None` si le LLM
+    ne renvoie plus de signal, jamais de valeur périmée conservée).
+  - Nouveau cron `run_agenda_refresh` (`arq.cron`, portée réduite aux projets
+    actifs `awaiting_feedback`/`under_tension`/`llm_risk_level CRITIQUE` via
+    `_agenda_relevant_project_rows`, appelle `_run_fasttrack_sync` — aucune
+    pipeline LLM dupliquée), cadence `config.agenda_refresh_cron_hours()`
+    (nouvel accessor, env `AGENDA_REFRESH_CRON_HOURS`, défaut heures ouvrées
+    toutes les 2h : `{7,9,11,13,15,17,19,21}`), enregistré dans
+    `WorkerSettings.cron_jobs` à côté de `run_scheduled_sync`. Rafraîchissement
+    à la demande : `run_agenda_refresh_for_tenant` (tâche arq, même sélection
+    de projets scopée à un tenant), déclenché par `POST /api/agenda/refresh`.
+  - `api/routers/agenda.py` (nouveau, enregistré dans `api/main.py`) :
+    `GET /api/agenda` (appointments à venir + `awaiting_projects`/
+    `at_risk_projects` avec prédicat identique à
+    `brief.py::at_risk_projects`, + `agenda_updated_at` = plus ancienne
+    préparation IA parmi les projets retournés), `PATCH
+    /api/agenda/appointments/{id}` (confirmer/annuler, validation contre
+    `AppointmentStatus`), `POST /api/agenda/refresh` (enqueue +
+    `{job_id}`, même contrat générique `GET /api/analyze/{job_id}` que le
+    reste du Fast-Track).
+  - `frontend/src/agendaApi.ts` (nouveau) : types miroirs +
+    `fetchAgenda`/`updateAppointmentStatus`/`requestAgendaRefresh`/
+    `pollAgendaRefreshJob` (même convention `apiFetch`/`parseResponseJson` que
+    `actionsApi.ts`, même forme de polling que `ProjectHub.tsx::
+    pollRefreshJob`).
+  - `frontend/src/pages/AgendaPage.tsx` : réécrite (l'ancienne version,
+    untracked, n'affichait qu'une liste plate des `SuggestedAction` en attente
+    avec deadline — conservée telle quelle comme 4ᵉ section "Échéances
+    (actions)"). Nouvelles sections "Rendez-vous à venir" (confirmer/annuler
+    par ligne), "Projets en attente — prochain retour probable", "Projets en
+    rouge — prochain retour attendu". En-tête : "Dernière préparation IA : il
+    y a Xh" (calculé depuis `agenda_updated_at`) + bouton "Rafraîchir" (pulse
+    visuel `.animate-fasttrack-pulse`/tokens `fasttrack-*` pendant le job,
+    même pattern que `ProjectCard.handleRefresh`). Aucun changement requis
+    dans `AppShell.tsx`/`App.tsx` (route `/agenda` et lien sidebar déjà en
+    place, untracked également).
+  - Décisions de cadrage (mode autonome) : rendez-vous exclusivement extraits
+    par l'IA (pas de formulaire de création manuelle — hors scope, ajout
+    spéculatif sinon) ; utilisateur peut seulement confirmer/annuler.
+  - Vérifié en conditions réelles : `python -m py_compile` sur tous les
+    fichiers backend touchés ; cluster Postgres existant (`my_connector_verify_agenda`,
+    base jetable dédiée, jamais `connector`) — `alembic upgrade head` (001→010)
+    propre, `downgrade -1`/`upgrade head` round-trip sans erreur, schéma
+    vérifié colonne par colonne (`\d appointments`, `\d project_summaries`)
+    contre l'ORM. Appel direct de `_run_fasttrack_sync` avec un résultat LLM
+    mocké (`unittest.mock.patch` sur `processor_from_tenant`) : rendez-vous
+    avec date persisté, rendez-vous sans date exploitable correctement rejeté,
+    `probable_next_contact_*`/`agenda_updated_at` correctement écrits ;
+    deuxième appel sans nouvel email confirmé idempotent (aucun doublon
+    `Appointment`). `GET /api/agenda` via `TestClient` avec tenant/projets/
+    utilisateur/JWT réels (3 projets couvrant `awaiting_feedback`/
+    `under_tension`/`on_track`, 2 rendez-vous) : partitionnement et tri
+    corrects, `PATCH /api/agenda/appointments/{id}` confirmé (200 + statut
+    changé) et rejet d'un statut invalide (422). Cron vérifié par lecture
+    directe de `WorkerSettings.cron_jobs`/`.functions` :
+    `run_agenda_refresh` bien enregistré avec la cadence attendue,
+    `run_agenda_refresh_for_tenant` bien exposé comme fonction arq. Base
+    jetable et scripts de vérification supprimés après coup. `npx tsc
+    --noEmit` sans erreur ; `vite build` transforme les 59 modules sans
+    erreur (échec ensuite limité au même `EACCES` pré-existant sur `dist/`
+    appartenant à `root`, sans rapport, déjà documenté dans les unités
+    précédentes).
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que toutes les unités précédentes — pas de Chromium
+    fonctionnel dans cette session) ; le chemin LLM réel produisant
+    effectivement `appointments`/`probable_next_contact` (dépend d'un vrai
+    appel OpenAI/Gemini sur un corpus d'emails avec de vrais signaux de
+    rendez-vous/relance, non testé ici — seul le contrat Pydantic → DB → API
+    a été vérifié) ; le cron en conditions réelles sur la durée (l'enregistrement
+    dans `WorkerSettings` est vérifié, pas une exécution effective par un
+    worker arq tournant plusieurs heures). Recommandé à l'utilisateur de
+    lancer `npm run dev` + `uvicorn`/`arq` localement, ouvrir `/agenda`, et
+    rafraîchir un vrai projet en attente/en rouge pour voir le LLM remplir ces
+    champs en conditions réelles.
+
+- **Unit 32 — Dédoublonnage des projets (découverte intelligente + fusion des
+  doublons)** (2026-07-14) :
+  - Contexte : demande utilisateur explicite — éviter les doublons dans la
+    liste des projets ; le flux "Analyser" du Brief doit mettre à jour les
+    projets déjà existants plutôt que les redupliquer, et ne créer que pour
+    les domaines réellement nouveaux ; pouvoir fusionner les doublons déjà
+    présents. Investigation préalable (agent Explore + lecture directe,
+    comme l'exige `CLAUDE.md`) : **aucune déduplication n'existait nulle
+    part** — `POST /api/projects` (`api/routers/projects.py`) insère sans
+    jamais vérifier l'existant, et le flux de découverte
+    (`discover_sender_domains` → `DiscoverProjectsModal.tsx` →
+    `createProjectFromDomain`) proposait tous les domaines trouvés, y compris
+    ceux déjà couverts par un projet (`rules_matrix.sender_domains`).
+  - **Volet A — découverte** : `email_analyzer/analysis_tasks.py` —
+    `_existing_domain_project_map(db, tenant_id)` (nouveau) construit
+    domaine minuscule → `{id, name}` à partir des `rules_matrix.sender_domains`
+    des projets actifs du tenant ; `_run_domain_discovery_sync` annote
+    chaque domaine du résultat avec `existing_project_id`/
+    `existing_project_name` après l'appel à `discover_sender_domains`
+    (`analyzer.py` reste une fonction pure, sans accès DB — l'annotation se
+    fait côté tâche arq qui a déjà la session ouverte).
+    `frontend/src/discoverApi.ts` : `DiscoveredDomain` gagne ces 2 champs ;
+    nouvelle fonction `updateProjectFromDomain(projectId)` (POST
+    `/api/projects/{id}/refresh`, fire-and-forget — même endpoint Fast-Track
+    que le bouton "Rafraîchir" du Project Hub). `DiscoverProjectsModal.tsx` :
+    badge "Déjà suivi : {nom}" sur les domaines déjà couverts ;
+    `handleConfirm` scinde la sélection (création vs. mise à jour) ; bouton
+    de confirmation affiche les deux compteurs séparément
+    (`confirmLabel`) ; prop `onProjectsCreated` renommée
+    `onProjectsProcessed(created, updated)`. `BriefPage.tsx` : callback et
+    message toast alignés sur les deux compteurs.
+  - **Volet B — fusion des doublons existants** : `api/routers/projects.py` —
+    `GET /api/projects/duplicates` (nouveau, déclaré avant `/{project_id}`
+    pour ne pas être intercepté) regroupe les projets actifs du tenant dont
+    `rules_matrix.sender_domains` se chevauche (seul signal retenu — `name`/
+    `client_names`/`company_names` écartés, même précédent que l'Unit 30
+    "jugé peu fiable") ; union-find pour qu'un projet à cheval sur plusieurs
+    domaines n'apparaisse que dans un seul groupe. `POST
+    /api/projects/{target_id}/merge` (nouveau, body `{source_ids}`) :
+    fusionne `rules_matrix` (union dédupliquée insensible à la casse via
+    `_merge_rules_matrix`), réassigne `Email`/`SuggestedAction`/`Appointment`
+    des sources vers la cible (bulk `UPDATE`), supprime les `ProjectSummary`
+    des sources (contrainte unique sur `project_id`, ne peut être
+    réassignée) puis les `Project` sources, retourne le détail de la cible
+    (réutilise `get_project`). Ne déclenche **aucun** rafraîchissement
+    automatique (pas d'appel LLM caché) — documenté que l'utilisateur doit
+    relancer un Fast-Track (idéalement avec `force_days`) après une fusion
+    pour que le résumé reflète les emails plus anciens réassignés (le
+    curseur `last_processed_email_timestamp` de la cible peut leur être
+    postérieur, un refresh delta simple ne les verrait pas).
+    `frontend/src/ProjectHub.tsx` : nouveau `DuplicatesPanel` (bandeau
+    au-dessus de la grille, un groupe par domaine partagé, sélection radio de
+    la cible préremplie sur le projet avec le plus d'emails, bouton
+    "Fusionner" → retire les sources de la liste locale et patche la cible
+    avec la réponse, sans refetch complet).
+  - Vérifié en conditions réelles (cluster Postgres local existant, base
+    jetable dédiée `my_connector_verify_dedup`, démontée après coup ;
+    `alembic upgrade head` 001→010 propre) : (1) 2 projets de test partageant
+    `clienta.com`/`ClientA.com` (casse différente) + 1 projet non lié → `GET
+    /api/projects/duplicates` renvoie exactement 1 groupe avec les 2 bons
+    projets et `shared_domains: ["clienta.com"]` ; (2) `Email`/
+    `SuggestedAction`/`Appointment` seedés sur le projet source, appel réel
+    `POST /api/projects/{target}/merge` via `TestClient(app)` avec un JWT
+    réel → tous réassignés à la cible en base, `ProjectSummary`/`Project` du
+    source disparus, `rules_matrix.sender_domains` de la cible = union
+    dédupliquée (`clienta.com`, `extra.clienta.com`) ; `GET
+    /api/projects/duplicates` revient vide après fusion ; auto-fusion et
+    `source_id` inconnu rejetés (400/404) ; (3) `_run_domain_discovery_sync`
+    appelé directement avec un `discover_sender_domains` mocké (2 domaines,
+    dont un couvert par un projet existant en base) → le domaine couvert
+    ressort bien annoté `existing_project_id`/`existing_project_name`
+    corrects, l'autre `null`/`null`. `python -m py_compile` OK sur les 2
+    fichiers backend touchés ; `npx tsc --noEmit` sans erreur ; `vite build`
+    transforme les 59 modules sans erreur (échec ensuite limité au même
+    `EACCES` pré-existant sur `dist/` appartenant à `root`, sans rapport,
+    déjà documenté dans les unités précédentes).
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que toutes les unités précédentes — pas de Chromium
+    fonctionnel dans cette session) — recommandé à l'utilisateur de lancer
+    `npm run dev` + `uvicorn`/`arq` localement, ouvrir `/projects` pour voir
+    le bandeau de doublons et tester une fusion réelle, et le modal
+    "Analyser" du Brief pour voir les badges "Déjà suivi" et le bouton de
+    confirmation à deux compteurs.
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -1338,11 +2217,25 @@ Update this file after every meaningful implementation change.
 
 ## Next Up
 
+- **Vérification visuelle de l'Agenda IA (Unit 31) par l'utilisateur** :
+  `npm run dev` + `uvicorn`/`arq` locaux, ouvrir `/agenda`, cliquer
+  "Rafraîchir" sur un tenant ayant des projets en attente/en rouge, confirmer
+  l'affichage des 4 sections (rendez-vous, prochain retour probable en
+  attente/en rouge, échéances) et que le LLM remplit bien `appointments`/
+  `probable_next_contact` sur un vrai corpus d'emails — voir l'entrée Unit 31
+  ci-dessus pour ce qui a et n'a pas pu être vérifié dans cette session (pas
+  de navigateur disponible, pas d'appel LLM réel testé).
 - **Vérification visuelle du Project Hub par l'utilisateur** : `npm run dev`
   + `uvicorn`/`arq` locaux, ouvrir `/projects`, créer un projet, déclencher
   un rafraîchissement Fast-Track et confirmer que seule la carte concernée
   pulse — voir l'entrée Unit 12 ci-dessus pour ce qui a et n'a pas pu être
   vérifié dans cette session (pas de navigateur disponible).
+- **Vérification visuelle de la page détail projet (Unit 29) par
+  l'utilisateur** : cliquer le nom d'un projet depuis `/projects`, confirmer
+  l'affichage de `/projects/:id` (résumé, décisions & risques, actions
+  suggérées dépliables, emails importants) et le lien retour — même
+  contrainte d'environnement (pas de navigateur disponible dans cette
+  session), voir l'entrée Unit 29 ci-dessus.
 - ~~Outlook (Microsoft Graph) OAuth2 Integration~~ — **Fermée par Unit 17**
   (2026-07-09).
 - ~~Sync planifiée 2x/jour via `arq` cron~~ — **Fermée par Unit 18** (2026-07-09).

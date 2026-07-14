@@ -216,6 +216,12 @@ class SuggestedActionStatus(str, enum.Enum):
     dismissed = "dismissed"
 
 
+class AppointmentStatus(str, enum.Enum):
+    tentative = "tentative"
+    confirmed = "confirmed"
+    cancelled = "cancelled"
+
+
 class Project(Base):
     """Un projet/sujet regroupant des emails, au sens de project-overview.md.
 
@@ -245,6 +251,7 @@ class Project(Base):
         back_populates="project", uselist=False
     )
     suggested_actions: Mapped[list["SuggestedAction"]] = relationship(back_populates="project")
+    appointments: Mapped[list["Appointment"]] = relationship(back_populates="project")
 
 
 class Email(Base):
@@ -323,6 +330,22 @@ class ProjectSummary(Base):
     last_processed_email_timestamp: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Date de retour probable estimée par le LLM (llm.ProbableContactItem) pour
+    # un projet "en attente"/"en rouge" — jamais renseignée sans signal réel
+    # dans le fil d'emails (voir prompt), NULL sinon (pas d'invention côté UI).
+    probable_next_contact_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    probable_next_contact_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    probable_next_contact_confidence: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
+    # Horodatage de la dernière préparation IA de l'Agenda (rendez-vous +
+    # date probable) pour ce projet — distinct de `updated_at` (mis à jour par
+    # toute synchro Fast-Track, agenda ou non).
+    agenda_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )
@@ -344,5 +367,59 @@ class SuggestedAction(Base):
     deadline: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=SuggestedActionStatus.pending.value)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    # Détail pour la vue "ouvrir une action" (frontend ActionsPage) : pourquoi
+    # elle est recommandée, qui est concerné, comment éviter la récidive.
+    # Alimentés depuis llm.NextStepItem/DeadlineItem (raison/responsable/
+    # conseil_prevention) quand l'extraction structurée les fournit — NULL
+    # sinon (repli sur `recommandation`, ou actions créées avant cette
+    # colonne) plutôt qu'une valeur inventée côté frontend.
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    stakeholder: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    advice: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     project: Mapped["Project"] = relationship(back_populates="suggested_actions")
+
+
+class Appointment(Base):
+    """Rendez-vous/réunion extrait par l'IA du contenu des emails d'un projet
+    (voir llm.AppointmentItem) — jamais créé manuellement dans cette unité,
+    seul le statut peut être ajusté par l'utilisateur (confirmé/annulé)."""
+
+    __tablename__ = "appointments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), index=True)
+    description: Mapped[str] = mapped_column(Text)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    participants: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=AppointmentStatus.tentative.value)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="appointments")
+
+
+class AssistantMessage(Base):
+    """Tour de conversation avec l'assistant portefeuille (voir
+    llm.build_portfolio_chat_system_prompt, api/routers/assistant.py).
+
+    Persisté par tenant+utilisateur — contrairement au chat par projet
+    (`/api/chat`, éphémère côté frontend), l'assistant permanent garde sa
+    mémoire entre les sessions (une session = tout l'historique du couple
+    tenant/utilisateur, pas de notion de "conversation" séparée pour l'instant)."""
+
+    __tablename__ = "assistant_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

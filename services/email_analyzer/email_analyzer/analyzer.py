@@ -3,7 +3,8 @@
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Union
+from email.utils import parseaddr
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 
@@ -16,7 +17,7 @@ from .config import (
     DEFAULT_OPENAI_MAX_TOKENS,
     VALID_ASSISTANT_PROVIDERS,
 )
-from .period import parse_email_datetime
+from .period import normalize_datetime_naive_local, parse_email_datetime
 from .project_mail import EmailProjectAnalyzer, imap_days_for_period_arg
 from .templates import generate_response_draft as build_response_draft
 
@@ -123,14 +124,6 @@ class EmailProcessor:
         deux sont connectés) — voir Open Question #1 de progress-tracker.md /
         ``saas_logic.processor_from_tenant``.
         """
-        has_imap = bool(self.email_address and self.password)
-        use_gmail = not has_imap and self.gmail_connection is not None
-        use_outlook = not has_imap and not use_gmail and self.outlook_connection is not None
-        if not has_imap and not use_gmail and not use_outlook:
-            return {
-                "_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD).",
-            }
-
         if assistant_provider not in VALID_ASSISTANT_PROVIDERS:
             return {"_error": f"assistant_provider invalide: {assistant_provider}"}
 
@@ -144,47 +137,13 @@ class EmailProcessor:
         if not projects:
             catch_all_key = self.NO_FILTER_RESULT_KEY
 
-        analyzer = EmailProjectAnalyzer(
-            self.email_address or "",
-            self.password or "",
-            self.imap_server,
-            self.port,
-            max_deep_emails=self.max_deep_emails,
-            cache_file=self.cache_file,
-            imap_folder=self.imap_folder,
-            prefer_ssl=self.imap_use_ssl,
-        )
-
         imap_days = imap_days_for_period_arg(period, days)
-        source_label = "IMAP"
 
-        if use_gmail:
-            source_label = "Gmail"
-            try:
-                project_data = self._fetch_gmail_project_data(
-                    analyzer, projects, imap_days, catch_all_key=catch_all_key
-                )
-            except Exception as exc:
-                logging.exception("Échec de la récupération Gmail")
-                return {"_error": f"Échec de la récupération Gmail : {exc}"}
-        elif use_outlook:
-            source_label = "Outlook"
-            try:
-                project_data = self._fetch_outlook_project_data(
-                    analyzer, projects, imap_days, catch_all_key=catch_all_key
-                )
-            except Exception as exc:
-                logging.exception("Échec de la récupération Outlook")
-                return {"_error": f"Échec de la récupération Outlook : {exc}"}
-        else:
-            if not analyzer.connect():
-                return {"_error": "Échec de la connexion IMAP."}
-            try:
-                project_data = analyzer.search_project_emails(
-                    projects, imap_days, on_batch=on_batch, catch_all_key=catch_all_key
-                )
-            finally:
-                analyzer.disconnect()
+        error, project_data, source_label, is_oauth, analyzer = self._fetch_project_data(
+            projects, imap_days, catch_all_key, on_batch=on_batch
+        )
+        if error is not None:
+            return error
 
         if not project_data:
             filter_label = (
@@ -204,7 +163,7 @@ class EmailProcessor:
                 "_empty": True,
                 "_message": message,
                 "_filter": filter_label,
-                "_imap_folder": self.imap_folder if not (use_gmail or use_outlook) else None,
+                "_imap_folder": self.imap_folder if not is_oauth else None,
                 "_days_back": imap_days,
             }
 
@@ -223,6 +182,197 @@ class EmailProcessor:
             openai_max_input_chars=openai_max_input_chars,
             openai_body_chars=openai_body_chars,
         )
+
+    def _fetch_project_data(
+        self,
+        projects: List[str],
+        imap_days: int,
+        catch_all_key: Optional[str],
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+        headers_only: bool = False,
+    ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], str, bool, EmailProjectAnalyzer]:
+        """Sélectionne IMAP/Gmail/Outlook selon les identifiants disponibles et
+        récupère les emails candidats — logique de sélection de provider partagée
+        par ``process_latest_emails`` et ``discover_sender_domains``.
+
+        Renvoie ``(error, project_data, source_label, is_oauth, analyzer)`` :
+        ``error`` est un dict ``{"_error": ...}`` à renvoyer tel quel si non
+        ``None`` (dans ce cas ``project_data`` est vide et ``analyzer``
+        inutilisable) ; sinon ``project_data`` est exploitable (peut être vide,
+        géré par l'appelant) et ``analyzer`` reste utile pour les opérations qui
+        en dépendent (``apply_period_filter``/``generate_intelligent_summary``).
+
+        ``headers_only`` : uniquement pertinent pour le chemin IMAP (voir
+        ``EmailProjectAnalyzer.search_project_emails``) — Gmail/Outlook
+        récupèrent déjà des messages complets en un seul appel API, pas de
+        distinction headers/corps possible côté fetch.
+        """
+        has_imap = bool(self.email_address and self.password)
+        use_gmail = not has_imap and self.gmail_connection is not None
+        use_outlook = not has_imap and not use_gmail and self.outlook_connection is not None
+
+        analyzer = EmailProjectAnalyzer(
+            self.email_address or "",
+            self.password or "",
+            self.imap_server,
+            self.port,
+            max_deep_emails=self.max_deep_emails,
+            cache_file=self.cache_file,
+            imap_folder=self.imap_folder,
+            prefer_ssl=self.imap_use_ssl,
+        )
+
+        if not has_imap and not use_gmail and not use_outlook:
+            return (
+                {"_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD)."},
+                {},
+                "IMAP",
+                False,
+                analyzer,
+            )
+
+        if use_gmail:
+            try:
+                project_data = self._fetch_gmail_project_data(
+                    analyzer, projects, imap_days, catch_all_key=catch_all_key
+                )
+            except Exception as exc:
+                logging.exception("Échec de la récupération Gmail")
+                return ({"_error": f"Échec de la récupération Gmail : {exc}"}, {}, "Gmail", True, analyzer)
+            return (None, project_data, "Gmail", True, analyzer)
+
+        if use_outlook:
+            try:
+                project_data = self._fetch_outlook_project_data(
+                    analyzer, projects, imap_days, catch_all_key=catch_all_key
+                )
+            except Exception as exc:
+                logging.exception("Échec de la récupération Outlook")
+                return ({"_error": f"Échec de la récupération Outlook : {exc}"}, {}, "Outlook", True, analyzer)
+            return (None, project_data, "Outlook", True, analyzer)
+
+        if not analyzer.connect():
+            return ({"_error": "Échec de la connexion IMAP."}, {}, "IMAP", False, analyzer)
+        try:
+            project_data = analyzer.search_project_emails(
+                projects, imap_days, on_batch=on_batch, catch_all_key=catch_all_key, headers_only=headers_only
+            )
+        finally:
+            analyzer.disconnect()
+        return (None, project_data, "IMAP", False, analyzer)
+
+    def discover_sender_domains(
+        self,
+        days_back: int = 90,
+        exclude_domains: Optional[Iterable[str]] = None,
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Scanne tous les emails de la fenêtre (aucun filtre projet) et
+        regroupe les expéditeurs par domaine — mode "proposer des projets"
+        du Brief (bouton "Analyser"). Ne fait aucun appel ML/LLM (contrairement
+        à ``process_latest_emails``) : uniquement du fetch + parsing, rien
+        n'est persisté ici (proposition éphémère, la persistance n'arrive que
+        si l'utilisateur crée un ``Project`` à partir d'un domaine proposé).
+
+        :param on_batch: callback de progression optionnel, identique à celui
+            de ``process_latest_emails`` — indispensable en pratique : un scan
+            sans filtre sur 90 jours peut porter sur plusieurs milliers d'emails
+            (mesuré en conditions réelles : ~5900 candidats sur 90 jours pour
+            une boîte active), sans quoi l'appelant (le job/modal du Brief)
+            resterait plusieurs minutes sans aucun signal. Ignoré côté Gmail/
+            Outlook (pas de notion de lot, un seul appel API — même limitation
+            que ``process_latest_emails``).
+
+        N'a besoin que de from/subject/date (voir le regroupement par domaine
+        plus bas) : passe ``headers_only=True`` à ``_fetch_project_data`` côté
+        IMAP pour ne récupérer que les en-têtes plutôt que le message complet
+        (RFC822) — c'est ce qui permet à un scan de plusieurs milliers d'emails
+        de rester dans le budget du job (voir ``analysis_tasks.WorkerSettings``).
+        """
+        exclude = {d.strip().lower() for d in (exclude_domains or []) if d and d.strip()}
+
+        error, project_data, source_label, _is_oauth, _analyzer = self._fetch_project_data(
+            [], days_back, self.NO_FILTER_RESULT_KEY, on_batch=on_batch, headers_only=True
+        )
+        if error is not None:
+            return error
+
+        emails = project_data.get(self.NO_FILTER_RESULT_KEY, {}).get("emails", [])
+        if not emails:
+            return {
+                "_empty": True,
+                "_message": f"Aucun email dans {source_label} sur la période analysée.",
+                "_days_back": days_back,
+            }
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        for em in emails:
+            _name, addr = parseaddr(em.get("from", "") or "")
+            if "@" not in addr:
+                continue
+            domain = addr.rsplit("@", 1)[-1].strip().lower()
+            # Exclut aussi les sous-domaines d'un domaine exclu (ex.
+            # pmg.mediasoftci.net, sous-domaine technique de retour de mail
+            # observé en conditions réelles) — un simple "in exclude" ne
+            # matche que l'égalité exacte et laissait passer ce cas.
+            if not domain or domain in exclude or any(domain.endswith(f".{ex}") for ex in exclude):
+                continue
+
+            group = groups.setdefault(
+                domain,
+                {
+                    "domain": domain,
+                    "email_count": 0,
+                    "_senders": set(),
+                    "sample_subjects": [],
+                    "latest_received_at": None,
+                },
+            )
+            group["email_count"] += 1
+            group["_senders"].add(addr.lower())
+            subject = (em.get("subject") or "").strip()
+            if subject and len(group["sample_subjects"]) < 3 and subject not in group["sample_subjects"]:
+                group["sample_subjects"].append(subject)
+
+            received_at = parse_email_datetime(em.get("date"))
+            if received_at is not None:
+                # Certains en-têtes Date sont malformés et reviennent naïfs
+                # (sans fuseau) alors que la majorité sont aware — un rendez-vous
+                # réel (found in production) fait échouer la comparaison
+                # `>` avec un TypeError si on mélange les deux. Même
+                # normalisation que period.py pour rendre toutes les dates
+                # comparables entre elles (precision suffisante ici : seul
+                # l'ordre relatif compte, pas l'heure exacte affichée).
+                received_at = normalize_datetime_naive_local(received_at)
+                if group["latest_received_at"] is None or received_at > group["latest_received_at"]:
+                    group["latest_received_at"] = received_at
+
+        domains: List[Dict[str, Any]] = []
+        for group in groups.values():
+            senders = sorted(group.pop("_senders"))
+            latest = group["latest_received_at"]
+            domains.append(
+                {
+                    **group,
+                    "sender_count": len(senders),
+                    "sample_senders": senders[:5],
+                    "latest_received_at": latest.isoformat() if latest else None,
+                }
+            )
+        domains.sort(key=lambda d: d["email_count"], reverse=True)
+
+        if not domains:
+            return {
+                "_empty": True,
+                "_message": "Aucun expéditeur externe trouvé sur la période analysée.",
+                "_days_back": days_back,
+            }
+
+        return {
+            "domains": domains,
+            "total_emails_scanned": len(emails),
+            "days_back": days_back,
+        }
 
     def _fetch_gmail_project_data(
         self,

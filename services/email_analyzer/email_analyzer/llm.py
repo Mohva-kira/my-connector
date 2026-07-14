@@ -337,7 +337,25 @@ _STRUCTURED_EXECUTIVE_SYSTEM_PROMPT = (
     "d'après les emails (pas des recommandations). `risques` = risques ou blocages "
     "identifiés. `next_steps` = prochaines actions concrètes à mener, chacune "
     "courte et actionnable. `deadlines` = échéances explicitement mentionnées. "
-    "`llm_risk_level` doit valoir 'FAIBLE', 'MODÉRÉ' ou 'CRITIQUE'."
+    "Pour chaque `next_steps`/`deadlines` : `responsable` = la ou les "
+    "personnes/organisations concernées si les emails l'indiquent ; `raison` "
+    "= pourquoi cette action ou échéance existe, en une phrase, d'après le "
+    "contexte des emails (jamais une pure reformulation de `description`) ; "
+    "`conseil_prevention` = un conseil concret et actionnable pour éviter que "
+    "ce type de situation (retard, oubli, malentendu) ne se reproduise sur ce "
+    "projet — laisse `null` si les emails ne donnent pas assez de contexte "
+    "pour en proposer un d'utile plutôt que d'inventer un conseil générique. "
+    "`llm_risk_level` doit valoir 'FAIBLE', 'MODÉRÉ' ou 'CRITIQUE'. "
+    "`appointments` = rendez-vous/réunions explicitement proposés ou confirmés "
+    "dans les emails (call, point d'avancement, réunion client) — une entrée "
+    "par rendez-vous distinct, liste vide si aucun n'est mentionné. "
+    "`probable_next_contact` = UNIQUEMENT si les emails donnent un signal réel "
+    "d'une prochaine prise de contact (ex. « je reviens vers vous la semaine "
+    "prochaine », un délai de réponse habituel observable dans l'historique du "
+    "fil) : une estimation raisonnée de la prochaine date de retour, avec "
+    "`reason` qui cite ce signal. Laisse `null` si rien dans les emails ne "
+    "permet une estimation ancrée — ne jamais deviner une date sans base "
+    "réelle dans le contenu fourni."
 )
 
 
@@ -364,12 +382,34 @@ class NextStepItem(BaseModel):
     description: str
     responsable: Optional[str]
     priorite: Optional[str]
+    # Détail exploité par le frontend (fiche détail d'une action, ActionsPage) :
+    # pourquoi cette étape est nécessaire, et comment éviter de se retrouver
+    # dans la même situation à l'avenir. Optionnels comme le reste du schéma —
+    # laissés `null` plutôt qu'inventés si les emails ne donnent pas matière.
+    raison: Optional[str]
+    conseil_prevention: Optional[str]
 
 
 class DeadlineItem(BaseModel):
     description: str
     date_iso: Optional[str]
     confiance: Optional[str]
+    responsable: Optional[str]
+    raison: Optional[str]
+    conseil_prevention: Optional[str]
+
+
+class AppointmentItem(BaseModel):
+    description: str
+    date_iso: Optional[str]
+    participants: List[str]
+    confidence: Optional[str]
+
+
+class ProbableContactItem(BaseModel):
+    date_iso: Optional[str]
+    confidence: Optional[str]
+    reason: str
 
 
 class ProjectSummaryLLM(BaseModel):
@@ -396,6 +436,8 @@ class ProjectSummaryLLM(BaseModel):
     llm_risk_level: Optional[str]
     missing_information: List[str]
     project_updates: List[str]
+    appointments: List[AppointmentItem]
+    probable_next_contact: Optional[ProbableContactItem]
 
 
 def _structured_user_prompt(threads: List[Dict], project_name: str, tags_reference: Optional[List[Dict]]) -> Optional[str]:
@@ -556,6 +598,54 @@ def build_project_chat_system_prompt(project_name: str, emails_corpus: str) -> s
         "- Quand tu as assez d'éléments, fournis un résumé actionnable : faits clés, risques, "
         "prochaines étapes courtes et ordonnées.\n"
         "- Reste clair et structuré, sans redites ; utilise des listes à puces si utile."
+    )
+
+
+def build_portfolio_context(projects: List[Dict[str, Any]]) -> str:
+    """Formate la liste des projets d'un tenant (nom/sentiment/actions en
+    attente/résumé) en texte de contexte pour l'assistant portefeuille — voir
+    ``build_portfolio_chat_system_prompt``. Chaque entrée de ``projects`` est
+    un dict simple (pas un modèle ORM) construit par l'appelant
+    (``api/routers/assistant.py``), pour garder ce module sans dépendance DB."""
+    if not projects:
+        return "Aucun projet actif pour le moment."
+    blocks = []
+    for p in projects:
+        lines = [f"- {p.get('name')}"]
+        if p.get("sentiment"):
+            lines.append(f"  Statut : {p['sentiment']}")
+        pending_descriptions = p.get("pending_action_descriptions") or []
+        if pending_descriptions:
+            lines.append("  Actions en attente :")
+            lines.extend(f"    - {d}" for d in pending_descriptions)
+        if p.get("summary_content"):
+            lines.append(f"  Résumé : {p['summary_content']}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def build_portfolio_chat_system_prompt(projects_context: str) -> str:
+    """Prompt système de l'assistant permanent (portefeuille) : contrairement à
+    ``build_project_chat_system_prompt``, le contexte n'est pas le corpus brut
+    d'UN projet mais l'état agrégé de TOUS les projets du tenant
+    (``build_portfolio_context``) — l'assistant répond sur l'ensemble du
+    portefeuille, pas sur un seul filtre projet."""
+    return (
+        "Tu es l'assistante personnelle d'un chef de projet : tu l'aides à piloter "
+        "l'ensemble de son portefeuille de projets suivis par email, pas un seul "
+        "projet à la fois. Réponds toujours en français, ton direct et professionnel, "
+        "comme une secrétaire de direction qui connaît le dossier.\n\n"
+        "Contexte : état actuel de chaque projet du portefeuille (nom, statut, "
+        "actions en attente, résumé). Ne confonds pas avec une analyse email brute ; "
+        "base-toi uniquement sur ce texte, et dis-le si une information manque plutôt "
+        "que de l'inventer.\n\n"
+        f"{projects_context}\n\n"
+        "Règles :\n"
+        "- Réponds aux questions sur l'état des projets, les risques, les échéances et "
+        "les actions en attente à partir de ce contexte.\n"
+        "- Si la question porte sur un projet ou un détail absent du contexte fourni, "
+        "dis-le clairement plutôt que de deviner.\n"
+        "- Reste concis et actionnable ; utilise des listes à puces si utile."
     )
 
 
@@ -764,6 +854,160 @@ def project_assistant_chat_gemini(
             )
     except Exception as ex:
         logging.warning("Échec chat Gemini: %s", ex)
+        raw = str(ex)
+        type_name = type(ex).__name__
+        if (
+            "ResourceExhausted" in type_name
+            or "quota" in raw.lower()
+            or "429" in raw
+            or ("rate" in raw.lower() and "limit" in raw.lower())
+        ):
+            result["erreur"] = (
+                "Quota ou limite API Gemini atteinte — vérifiez les plafonds sur "
+                "https://ai.google.dev/gemini-api/docs/pricing. "
+                f"Détail : {raw}"
+            )
+        else:
+            result["erreur"] = raw
+
+    return result
+
+
+def portfolio_assistant_chat_openai(
+    system_prompt: str,
+    messages: List[Dict[str, str]],
+    model: str,
+    api_key: Optional[str],
+    max_tokens: int = CHAT_MAX_OUTPUT_TOKENS,
+) -> Dict[str, Any]:
+    """Un tour de conversation avec l'assistant portefeuille (OpenAI) — même
+    mécanique que ``project_assistant_chat_openai``, mais ``system_prompt``
+    est déjà construit par l'appelant (``build_portfolio_chat_system_prompt``)
+    au lieu d'être dérivé d'un corpus d'emails brut d'un seul projet."""
+    result: Dict[str, Any] = {"message": None, "erreur": None, "modèle": model}
+    norm = _normalize_chat_messages(messages)
+    if not norm:
+        result["erreur"] = (
+            "Historique invalide : au moins un message utilisateur non vide, "
+            "le dernier message doit être du rôle utilisateur."
+        )
+        return result
+    if not api_key:
+        result["erreur"] = "OPENAI_API_KEY non définie dans l'environnement"
+        return result
+
+    api_messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    api_messages.extend(norm)
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, timeout=llm_timeout_seconds())
+        completion = client.chat.completions.create(
+            model=model,
+            messages=api_messages,
+            temperature=0.45,
+            max_tokens=max_tokens,
+        )
+        choice = completion.choices[0]
+        text = choice.message.content
+        msg = text.strip() if text else None
+        if msg and getattr(choice, "finish_reason", None) == "length":
+            msg = msg + _CHAT_TRUNCATION_NOTICE
+        result["message"] = msg
+        if not result["message"]:
+            result["erreur"] = "Réponse OpenAI vide"
+    except Exception as ex:
+        logging.warning("Échec chat portefeuille OpenAI: %s", ex)
+        raw = str(ex)
+        if "insufficient_quota" in raw:
+            result["erreur"] = (
+                "Quota ou crédits API OpenAI insuffisants — vérifiez la facturation sur "
+                "https://platform.openai.com. "
+                f"Détail : {raw}"
+            )
+        else:
+            result["erreur"] = raw
+
+    return result
+
+
+def portfolio_assistant_chat_gemini(
+    system_prompt: str,
+    messages: List[Dict[str, str]],
+    model: str,
+    api_key: Optional[str],
+    max_tokens: int = CHAT_MAX_OUTPUT_TOKENS,
+) -> Dict[str, Any]:
+    """Équivalent Gemini de ``portfolio_assistant_chat_openai``."""
+    result: Dict[str, Any] = {"message": None, "erreur": None, "modèle": model}
+    norm = _normalize_chat_messages(messages)
+    if not norm:
+        result["erreur"] = (
+            "Historique invalide : au moins un message utilisateur non vide, "
+            "le dernier message doit être du rôle utilisateur."
+        )
+        return result
+    if not api_key:
+        result["erreur"] = (
+            "GEMINI_API_KEY ou GOOGLE_API_KEY non définie dans l'environnement "
+            "(clé depuis https://aistudio.google.com)"
+        )
+        return result
+
+    prior = norm[:-1]
+    last_user = norm[-1]["content"]
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        try:
+            gen_model = genai.GenerativeModel(
+                model_name=model,
+                system_instruction=system_prompt,
+            )
+            history = _gemini_history_from_messages(prior)
+        except TypeError:
+            gen_model = genai.GenerativeModel(model_name=model)
+            history, last_user = _gemini_history_with_embedded_system(
+                system_prompt, prior, last_user
+            )
+
+        generation_config = genai.GenerationConfig(
+            max_output_tokens=max_tokens,
+            temperature=0.45,
+        )
+        chat = gen_model.start_chat(history=history)
+        response = chat.send_message(last_user, generation_config=generation_config)
+
+        text_out = None
+        truncated_max_tokens = False
+        if response.candidates:
+            truncated_max_tokens = _gemini_candidate_hits_max_tokens(response.candidates[0])
+            try:
+                text_out = response.text
+            except (ValueError, AttributeError):
+                parts: List[str] = []
+                for cand in response.candidates:
+                    if cand.content and cand.content.parts:
+                        for p in cand.content.parts:
+                            if hasattr(p, "text") and p.text:
+                                parts.append(p.text)
+                text_out = "\n".join(parts) if parts else None
+        if text_out:
+            msg = text_out.strip()
+            if truncated_max_tokens and msg:
+                msg = msg + _CHAT_TRUNCATION_NOTICE
+            result["message"] = msg
+        else:
+            block_reason = getattr(response.prompt_feedback, "block_reason", None)
+            result["erreur"] = (
+                "Réponse Gemini vide ou bloquée"
+                + (f" (raison: {block_reason})" if block_reason else "")
+            )
+    except Exception as ex:
+        logging.warning("Échec chat portefeuille Gemini: %s", ex)
         raw = str(ex)
         type_name = type(ex).__name__
         if (

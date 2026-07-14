@@ -61,7 +61,8 @@
       "Bash(python3 -m py_compile api/routers/auth.py email_analyzer/db/models.py)",
       "Bash(PGPASSWORD=123456789 psql -h localhost -U postgres -d connector -c \"\\\\d users\")",
       "Bash(PGPASSWORD=123456789 psql -h localhost -U postgres -d connector -c \"select email from users limit 5;\")",
-      "Bash(python3 -m py_compile api/main.py api/routers/actions.py)"
+      "Bash(python3 -m py_compile api/main.py api/routers/actions.py)",
+      "Bash(PGPASSWORD=123456789 psql -h localhost -U postgres -d connector -c ' *)"
     ]
   }
 }

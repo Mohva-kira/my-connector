@@ -27,6 +27,8 @@ from .config import (
     batch_chunk_size,
     batch_threshold,
     imap_timeout_seconds,
+    large_scan_chunk_size,
+    large_scan_threshold,
 )
 from .llm import (
     build_résumé_assistant_unifié,
@@ -513,6 +515,8 @@ class EmailProjectAnalyzer:
         content["normalized_text"] = self.normalize_email_text(content)
         return content
 
+    _HEADERS_ONLY_FETCH_SPEC = "(BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)])"
+
     def _process_one_email_id(
         self,
         email_id,
@@ -521,6 +525,7 @@ class EmailProjectAnalyzer:
         project_data: Dict,
         rules_map: Optional[Dict[str, ProjectRules]] = None,
         catch_all_key: Optional[str] = None,
+        headers_only: bool = False,
     ) -> None:
         """Fetch (cache-aware) + parse un email et l'ajoute à `project_data` s'il
         correspond à un des `project_filters`. Bloc de travail partagé par le
@@ -529,10 +534,19 @@ class EmailProjectAnalyzer:
 
         `catch_all_key` : si fourni, un email qui ne correspond à aucun filtre
         est tout de même conservé sous cette clé unique au lieu d'être ignoré —
-        utilisé par le mode "analyse sans filtre" (`project_filters` vide)."""
+        utilisé par le mode "analyse sans filtre" (`project_filters` vide).
+
+        `headers_only` : ne récupère que From/To/Cc/Subject/Date/Message-ID
+        (`BODY.PEEK[HEADER.FIELDS (...)]` au lieu de `RFC822`) — bien plus
+        rapide sur de gros mailboxes quand le corps n'est jamais utilisé (ex.
+        `discover_sender_domains`, qui ne lit que from/subject/date). Le cache
+        (lecture et écriture) est bypassé dans ce mode : `_cached_content_usable`
+        considère un `subject` non vide comme suffisant, donc écrire un contenu
+        sans corps dans le cache partagé pourrait faire croire à tort à une
+        analyse filtrée ultérieure qu'elle a déjà le corps complet."""
         try:
             cache_key = email_id.decode(errors="ignore") if isinstance(email_id, bytes) else str(email_id)
-            cache_entry = self.email_cache.get(cache_key) if self.use_email_cache else None
+            cache_entry = self.email_cache.get(cache_key) if self.use_email_cache and not headers_only else None
             email_content = None
             if cache_entry and isinstance(cache_entry.get("content"), dict):
                 cand = cache_entry["content"]
@@ -540,12 +554,14 @@ class EmailProjectAnalyzer:
                     email_content = cand
 
             if email_content is None:
+                fetch_spec = self._HEADERS_ONLY_FETCH_SPEC if headers_only else "(RFC822)"
                 fetch_start = perf_counter()
                 if use_uid_fetch:
-                    status, msg_data = self.mail.uid("fetch", email_id, "(RFC822)")
+                    status, msg_data = self.mail.uid("fetch", email_id, fetch_spec)
                 else:
-                    status, msg_data = self.mail.fetch(email_id, "(RFC822)")
-                self.record_timing("imap_fetch_full_message", perf_counter() - fetch_start)
+                    status, msg_data = self.mail.fetch(email_id, fetch_spec)
+                timing_key = "imap_fetch_headers" if headers_only else "imap_fetch_full_message"
+                self.record_timing(timing_key, perf_counter() - fetch_start)
                 if status != "OK" or not msg_data or not msg_data[0]:
                     return
 
@@ -556,7 +572,7 @@ class EmailProjectAnalyzer:
                 msg = email.message_from_bytes(raw_payload)
                 email_content = self.extract_email_content(msg)
                 self.record_timing("email_extract_content", perf_counter() - parse_start)
-                if self.use_email_cache:
+                if self.use_email_cache and not headers_only:
                     self.email_cache[cache_key] = {"content": email_content}
 
             # Construit via .items() (jamais un accès par crochet) pour ne
@@ -589,14 +605,22 @@ class EmailProjectAnalyzer:
         max_matches: Optional[int] = None,
         rules_map: Optional[Dict[str, ProjectRules]] = None,
         catch_all_key: Optional[str] = None,
+        headers_only: bool = False,
     ) -> Dict:
         """Recherche les emails concernant les projets spécifiés.
 
         Si le nombre d'emails candidats dépasse `batch_threshold()`, le fetch/parse
-        est découpé en lots de `batch_chunk_size()` et `on_batch(processed, total,
-        partial)` est appelé après chaque lot (progression + aperçu rapide basé sur
-        `identify_critical_emails`, rule-based donc sans coût ML). En dessous du
-        seuil, `on_batch` n'est jamais invoqué — comportement inchangé.
+        est découpé en lots de `batch_chunk_size()` (ou `large_scan_chunk_size()`
+        au-delà de `large_scan_threshold()` candidats — des lots de 10 sur un scan
+        de plusieurs milliers d'emails ne feraient qu'ajouter des allers-retours
+        Redis inutiles) et `on_batch(processed, total, partial)` est appelé après
+        chaque lot (progression + aperçu rapide basé sur `identify_critical_emails`,
+        rule-based donc sans coût ML). En dessous du seuil, `on_batch` n'est jamais
+        invoqué — comportement inchangé.
+
+        `headers_only` : voir `_process_one_email_id` — ne s'applique qu'au
+        balayage avant (ignoré par le balayage arrière borné `max_matches`, qui a
+        besoin du corps pour évaluer la pertinence projet).
 
         Si `max_matches` est fourni, le balayage se fait depuis les emails les plus
         récents (ordre IMAP inverse) et s'arrête dès que chaque filtre a atteint
@@ -679,7 +703,7 @@ class EmailProjectAnalyzer:
                     self.save_cache()
                 return dict(project_data)
 
-            chunk_size = batch_chunk_size()
+            chunk_size = large_scan_chunk_size() if total > large_scan_threshold() else batch_chunk_size()
             chunked = on_batch is not None and total > batch_threshold()
 
             for i, email_id in enumerate(email_ids):
@@ -692,6 +716,7 @@ class EmailProjectAnalyzer:
                     project_data,
                     rules_map=rules_map,
                     catch_all_key=catch_all_key,
+                    headers_only=headers_only,
                 )
                 if chunked and (i + 1) % chunk_size == 0:
                     self._emit_batch_progress(on_batch, i + 1, total, project_data)
