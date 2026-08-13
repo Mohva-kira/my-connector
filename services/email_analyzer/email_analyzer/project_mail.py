@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from html import unescape
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -15,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .ai_intelligent import get_shared_analyzer
 from .classification import ProjectRules, derive_tags, score_project_relevance
+from .document_extraction import is_supported_attachment
 from .config import (
     ASSISTANT_PROVIDER_GEMINI,
     ASSISTANT_PROVIDER_NONE,
@@ -46,6 +49,22 @@ from .period import (
 )
 
 _SUBJECT_PREFIX_RE = re.compile(r"^(re|fwd?|tr)\s*:\s*", re.IGNORECASE)
+
+
+def _build_recent_activity_corpus(recent_emails: List[Dict[str, Any]]) -> str:
+    """Corpus compact (date + expéditeur + objet, un email par ligne) des
+    emails déjà filtrés aux 7 derniers jours calendaires (voir
+    ``period.filter_emails_by_period``) — injecté comme section additionnelle
+    du prompt d'extraction structurée (llm.py::_structured_user_prompt) pour
+    alimenter ``ProjectSummaryLLM.activite_recente`` sans faire reposer le
+    bornage temporel sur l'arithmétique de dates du LLM."""
+    lines = []
+    for em in recent_emails:
+        date = (em.get("date") or "").strip() or "date inconnue"
+        sender = (em.get("from") or "").strip() or "expéditeur inconnu"
+        subject = (em.get("subject") or "").strip() or "(sans objet)"
+        lines.append(f"- {date} — {sender} — {subject}")
+    return "\n".join(lines)
 
 
 def normalize_subject(subject: Optional[str]) -> str:
@@ -147,13 +166,20 @@ class EmailProjectAnalyzer:
         self.email_cache = self.load_cache() if use_email_cache else {}
         self.step_timings = defaultdict(float)
         self.step_counts = defaultdict(int)
+        self._timing_lock = threading.Lock()
 
         self.ai_analyzer = get_shared_analyzer()
 
     def record_timing(self, step_name: str, duration_seconds: float):
-        """Enregistre le temps passé sur une étape."""
-        self.step_timings[step_name] += duration_seconds
-        self.step_counts[step_name] += 1
+        """Enregistre le temps passé sur une étape.
+
+        Verrouillé : appelé depuis plusieurs threads en parallèle par
+        generate_intelligent_summary (ThreadPoolExecutor par projet), sinon
+        les incréments defaultdict non-atomiques perdent des mises à jour.
+        """
+        with self._timing_lock:
+            self.step_timings[step_name] += duration_seconds
+            self.step_counts[step_name] += 1
 
     def get_top_timing_steps(self, top_n: int = 3) -> List[Dict]:
         """Retourne les étapes les plus coûteuses."""
@@ -252,17 +278,35 @@ class EmailProjectAnalyzer:
             return ""
         return f'(OR SUBJECT "{q}" TEXT "{q}")'
 
-    def _uid_search_narrow_ids(self, project_filters: List[str], start_date: str) -> Optional[List[bytes]]:
+    def _uid_search_narrow_ids(
+        self,
+        project_filters: List[str],
+        start_date: str,
+        rules_map: Optional[Dict[str, ProjectRules]] = None,
+    ) -> Optional[List[bytes]]:
         """
         Réduit les UID via SEARCH OR SUBJECT/TEXT + SINCE (côté serveur).
         Retourne [] si aucun candidat, None si la recherche n'est pas utilisable (fallback SINCE large).
         Désactiver : EMAIL_ANALYZER_IMAP_FAST_SEARCH=0
+
+        `rules_map` : inclut aussi les `subject_keys` connus (clés de ticket
+        [Banque_Plateforme_Numéro] déjà rattachées à un projet, voir
+        classification.ProjectRules) dans les clauses de recherche — sans ça,
+        un email dont seule la clé de sujet matche (nom de projet absent du
+        sujet/corps) serait exclu par ce pré-filtre serveur avant même que
+        `score_project_relevance`/`check_project_relevance` ne s'exécutent.
         """
         flag = os.environ.get("EMAIL_ANALYZER_IMAP_FAST_SEARCH", "1").strip().lower()
         if flag in ("0", "false", "no", "off"):
             return None
+        extra_terms = [
+            key
+            for rules in (rules_map or {}).values()
+            for key in rules.subject_keys
+        ]
+        all_filters = [*project_filters, *extra_terms]
         clauses = [
-            self._or_subj_text_clause(f) for f in project_filters if f and str(f).strip()
+            self._or_subj_text_clause(f) for f in all_filters if f and str(f).strip()
         ]
         clauses = [c for c in clauses if c]
         if not clauses:
@@ -272,7 +316,7 @@ class EmailProjectAnalyzer:
             nested = f"(OR {nested} {c})"
         criteria = f'{nested} SINCE "{start_date}"'
         charset: Optional[str] = None
-        for f in project_filters:
+        for f in all_filters:
             if not f:
                 continue
             try:
@@ -486,12 +530,35 @@ class EmailProjectAnalyzer:
             if msg.is_multipart():
                 plain_part = None
                 html_part = None
+                attachments: List[Dict[str, Any]] = []
                 for part in msg.walk():
                     ctype = part.get_content_type()
                     if ctype == "text/plain" and plain_part is None:
                         plain_part = part
                     elif ctype == "text/html" and html_part is None:
                         html_part = part
+                    filename = part.get_filename()
+                    if filename and is_supported_attachment(ctype, filename):
+                        # Contexte Documents, domaine #7 (2026-08-01) : seules les
+                        # pièces jointes qu'on sait effectivement extraire (PDF,
+                        # texte brut — voir document_extraction.is_supported_attachment)
+                        # sont capturées ici, pour ne pas alourdir chaque email du
+                        # poids d'images/logos de signature qui ne serviront jamais
+                        # à l'analyse. Retiré du contenu mis en cache juste en
+                        # dessous (_process_one_email_id) : ce ne sont pas des
+                        # métadonnées stables, mais des octets bruts à ingérer une
+                        # seule fois par _run_fasttrack_sync (analysis_tasks.py).
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            attachments.append(
+                                {
+                                    "filename": self.decode_header_value(filename) or filename,
+                                    "content_type": ctype,
+                                    "data": payload,
+                                }
+                            )
+                if attachments:
+                    content["_attachments"] = attachments
                 if plain_part:
                     body = plain_part.get_payload(decode=True)
                     if body:
@@ -573,7 +640,15 @@ class EmailProjectAnalyzer:
                 email_content = self.extract_email_content(msg)
                 self.record_timing("email_extract_content", perf_counter() - parse_start)
                 if self.use_email_cache and not headers_only:
-                    self.email_cache[cache_key] = {"content": email_content}
+                    # `_attachments` (octets bruts des pièces jointes, voir
+                    # extract_email_content) n'est jamais mis en cache : ni
+                    # sérialisable en JSON tel quel (bytes), ni souhaitable à
+                    # dupliquer sur disque à chaque scan — seul `email_content`
+                    # en mémoire (retourné ci-dessous) le porte pour l'exécution
+                    # courante.
+                    self.email_cache[cache_key] = {
+                        "content": {k: v for k, v in email_content.items() if k != "_attachments"}
+                    }
 
             # Construit via .items() (jamais un accès par crochet) pour ne
             # jamais déclencher la factory du defaultdict pour un projet pas
@@ -647,7 +722,7 @@ class EmailProjectAnalyzer:
             start_date = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
             search_criteria = f'(SINCE "{start_date}")'
 
-            narrow_ids = self._uid_search_narrow_ids(project_filters, start_date)
+            narrow_ids = self._uid_search_narrow_ids(project_filters, start_date, rules_map=rules_map)
             use_uid_fetch: bool
             if narrow_ids is not None:
                 email_ids = narrow_ids
@@ -783,6 +858,96 @@ class EmailProjectAnalyzer:
         except Exception:
             logging.exception("Callback de progression en échec (ignoré, n'affecte pas l'analyse)")
 
+    def scan_attachments_by_message_id(
+        self,
+        days_back: int,
+        on_email: Callable[[str, List[Dict[str, Any]]], None],
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    ) -> int:
+        """Scan streaming, sans filtre projet, sur toute une fenêtre `SINCE` —
+        utilisé par le rattrapage rétroactif des pièces jointes (Contexte
+        Documents, domaine #7 : ``analysis_tasks.py::
+        _run_email_attachment_backfill_sync``). Contrairement à
+        ``search_project_emails``, n'accumule JAMAIS les emails en mémoire :
+        ``on_email(message_id, attachments)`` est appelé immédiatement pour
+        chaque message puis la référence est abandonnée — indispensable ici
+        car la fenêtre peut couvrir plusieurs années d'historique (garder le
+        corps + les octets bruts des pièces jointes de milliers d'emails
+        simultanément en mémoire serait un risque d'OOM réel, contrairement
+        aux scans habituels bornés à quelques dizaines de jours).
+
+        Ne lit ni n'écrit jamais le cache JSON partagé (``self.email_cache``),
+        quel que soit ``self.use_email_cache`` : ce cache ne porte jamais
+        ``_attachments`` (retiré avant écriture, voir ``_process_one_email_id``)
+        donc un HIT ici ne renverrait jamais de pièce jointe pour un email
+        déjà connu — exactement la population que ce rattrapage cible.
+        Écrire des milliers d'entrées d'historique complet ferait aussi
+        churner inutilement le cache partagé (cap 2000 entrées, voir
+        ``save_cache``).
+
+        Toujours un fetch ``RFC822`` complet (jamais ``headers_only``) : il
+        faut le corps du message pour atteindre les parties MIME des pièces
+        jointes.
+
+        Retourne le nombre d'emails effectivement traités (pas le nombre de
+        pièces jointes ni de documents ingérés — calculé par l'appelant)."""
+        if not self.mail:
+            return 0
+
+        processed = 0
+        try:
+            status, _count = self.mail.select(self.imap_folder)
+            if status != "OK":
+                return processed
+
+            start_date = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+            status, messages = self.mail.search(None, f'(SINCE "{start_date}")')
+            if status != "OK":
+                return processed
+            email_ids = messages[0].split()
+            total = len(email_ids)
+            logging.info("Rattrapage pièces jointes : %s emails à scanner", total)
+
+            chunk_size = large_scan_chunk_size() if total > large_scan_threshold() else batch_chunk_size()
+            chunked = on_batch is not None and total > batch_threshold()
+
+            for i, email_id in enumerate(email_ids):
+                try:
+                    fetch_start = perf_counter()
+                    status, msg_data = self.mail.fetch(email_id, "(RFC822)")
+                    self.record_timing("imap_fetch_full_message", perf_counter() - fetch_start)
+                    if status != "OK" or not msg_data or not msg_data[0]:
+                        continue
+                    raw_payload = msg_data[0][1]
+                    if not isinstance(raw_payload, (bytes, bytearray)):
+                        continue
+                    parse_start = perf_counter()
+                    msg = email.message_from_bytes(raw_payload)
+                    content = self.extract_email_content(msg)
+                    self.record_timing("email_extract_content", perf_counter() - parse_start)
+                    message_id = (content.get("message_id") or "").strip()
+                    on_email(message_id, content.get("_attachments") or [])
+                    processed += 1
+                except Exception:
+                    logging.exception("Rattrapage pièces jointes : échec sur un email (ignoré)")
+                finally:
+                    if chunked and (i + 1) % chunk_size == 0:
+                        try:
+                            on_batch(i + 1, total, None)
+                        except Exception:
+                            logging.exception("Callback de progression en échec (ignoré)")
+
+            if chunked and total % chunk_size != 0:
+                try:
+                    on_batch(total, total, None)
+                except Exception:
+                    logging.exception("Callback de progression en échec (ignoré)")
+
+            return processed
+        except Exception:
+            logging.exception("Rattrapage pièces jointes : erreur de scan IMAP")
+            return processed
+
     def check_project_relevance(
         self,
         email_content: Dict,
@@ -836,7 +1001,7 @@ class EmailProjectAnalyzer:
     def generate_intelligent_summary(
         self,
         project_data: Dict,
-        assistant_provider: str = ASSISTANT_PROVIDER_OPENAI,
+        assistant_provider: str = ASSISTANT_PROVIDER_GEMINI,
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = DEFAULT_GEMINI_MODEL,
         openai_max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
@@ -844,170 +1009,219 @@ class EmailProjectAnalyzer:
         openai_body_chars: int = DEFAULT_OPENAI_BODY_CHARS,
         include_structured: bool = False,
     ) -> Dict:
-        """Génère un résumé intelligent avec IA."""
-        intelligent_summary = {}
+        """Génère un résumé intelligent avec IA.
 
-        for project_name, data in project_data.items():
-            logging.info("Analyse IA pour le projet: %s", project_name)
-            emails_all = data["emails"]
-            deep_emails = emails_all[-self.max_deep_emails :]
+        Un projet par thread (jusqu'à 5 en parallèle) : chaque itération fait
+        1-2 appels LLM bloquants (jusqu'à ~120s au pire cas), et les traiter
+        en série faisait dépasser le job_timeout arq de 1800s sur les tenants
+        à plusieurs projets. Sûr à paralléliser : chaque thread écrit une clé
+        distincte de intelligent_summary, self.ai_analyzer ne mute aucun état
+        partagé, et record_timing est verrouillé (voir plus haut).
+        """
+        if not project_data:
+            return {}
 
-            sentiment_start = perf_counter()
-            sentiment_analysis = self.ai_analyzer.analyze_sentiment(deep_emails)
-            self.record_timing("ia_sentiment", perf_counter() - sentiment_start)
-
-            entities_start = perf_counter()
-            entities = self.ai_analyzer.extract_entities(deep_emails)
-            self.record_timing("ia_entities", perf_counter() - entities_start)
-
-            summary_start = perf_counter()
-            auto_summary = self.ai_analyzer.generate_auto_summary(deep_emails)
-            self.record_timing("ia_summary", perf_counter() - summary_start)
-
-            risk_start = perf_counter()
-            risk_assessment = self.ai_analyzer.calculate_risk_score(
-                emails_all, sentiment_analysis, entities
-            )
-            self.record_timing("ia_risk", perf_counter() - risk_start)
-
-            critical_start = perf_counter()
-            critical_emails = self.ai_analyzer.identify_critical_emails(emails_all)
-            self.record_timing("ia_critical", perf_counter() - critical_start)
-
-            participants_list = list(data["participants"])
-            email_count = len(emails_all)
-
-            # Tags de référence agrégés (derive_tags est par email, classification.py) :
-            # utile pour un aperçu rapide des thèmes dominants d'une analyse, et
-            # injecté comme contexte dans le prompt LLM ci-dessous.
-            tag_counts: Counter = Counter()
-            for em in emails_all:
-                tag_counts.update(derive_tags(em))
-            tags_reference = [
-                {"tag": tag, "count": count} for tag, count in tag_counts.most_common(10)
-            ]
-
-            # Regroupement par sujet normalisé (fils de discussion) : réduit le
-            # bruit des relances/réponses répétées avant l'appel LLM et donne un
-            # aperçu des sujets les plus actifs (voir group_emails_by_subject).
-            threads_full = group_emails_by_subject(emails_all)
-            threads_public = [
-                {k: v for k, v in t.items() if k != "latest_email"} for t in threads_full[:10]
-            ]
-
-            intelligent_summary[project_name] = {
-                "nb_emails": email_count,
-                "nb_participants": len(participants_list),
-                "participants": participants_list[:10],
-                "emails_analyzes_en_profondeur": len(deep_emails),
-                "analyse_sentiment": sentiment_analysis,
-                "entités_extraites": entities,
-                "résumé_automatique": auto_summary,
-                "évaluation_risque": risk_assessment,
-                "emails_critiques": critical_emails,
-                "score_activité": email_count + len(entities.get("technologies", [])),
-                "priorité_attention": (
-                    "HAUTE" if risk_assessment.get("niveau_risque") == "CRITIQUE" else "NORMALE"
+        max_workers = min(5, len(project_data))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(
+                lambda item: self._generate_project_summary(
+                    item[0],
+                    item[1],
+                    assistant_provider=assistant_provider,
+                    openai_model=openai_model,
+                    gemini_model=gemini_model,
+                    openai_max_tokens=openai_max_tokens,
+                    openai_max_input_chars=openai_max_input_chars,
+                    openai_body_chars=openai_body_chars,
+                    include_structured=include_structured,
                 ),
-                "tags_reference": tags_reference,
-                "threads": threads_public,
-            }
+                project_data.items(),
+            )
+            return dict(results)
 
-            if assistant_provider == ASSISTANT_PROVIDER_NONE:
-                raw_disabled = {
-                    "texte": None,
-                    "modèle": None,
-                    "erreur": "désactivé (--assistant-provider none ou --no-openai)",
-                    "max_tokens": None,
-                    "max_input_chars": None,
-                    "max_body_chars": None,
-                }
-                intelligent_summary[project_name]["résumé_assistant"] = build_résumé_assistant_unifié(
-                    ASSISTANT_PROVIDER_NONE, raw_disabled
-                )
-                intelligent_summary[project_name]["résumé_assistant_openai"] = {
-                    "texte": None,
-                    "modèle": openai_model,
-                    "erreur": raw_disabled["erreur"],
-                }
-            elif assistant_provider == ASSISTANT_PROVIDER_OPENAI:
-                openai_start = perf_counter()
-                raw_oa = generate_openai_assistant_summary(
+    def _generate_project_summary(
+        self,
+        project_name: str,
+        data: Dict,
+        assistant_provider: str = ASSISTANT_PROVIDER_GEMINI,
+        openai_model: str = "gpt-4o-mini",
+        gemini_model: str = DEFAULT_GEMINI_MODEL,
+        openai_max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
+        openai_max_input_chars: int = DEFAULT_OPENAI_MAX_INPUT_CHARS,
+        openai_body_chars: int = DEFAULT_OPENAI_BODY_CHARS,
+        include_structured: bool = False,
+    ) -> "tuple[str, Dict]":
+        """Génère le résumé intelligent d'un seul projet (corps de boucle
+        extrait de generate_intelligent_summary pour être exécuté en
+        parallèle par un ThreadPoolExecutor)."""
+        logging.info("Analyse IA pour le projet: %s", project_name)
+        emails_all = data["emails"]
+        deep_emails = emails_all[-self.max_deep_emails :]
+
+        sentiment_start = perf_counter()
+        sentiment_analysis = self.ai_analyzer.analyze_sentiment(deep_emails)
+        self.record_timing("ia_sentiment", perf_counter() - sentiment_start)
+
+        entities_start = perf_counter()
+        entities = self.ai_analyzer.extract_entities(deep_emails)
+        self.record_timing("ia_entities", perf_counter() - entities_start)
+
+        summary_start = perf_counter()
+        auto_summary = self.ai_analyzer.generate_auto_summary(deep_emails)
+        self.record_timing("ia_summary", perf_counter() - summary_start)
+
+        risk_start = perf_counter()
+        risk_assessment = self.ai_analyzer.calculate_risk_score(
+            emails_all, sentiment_analysis, entities
+        )
+        self.record_timing("ia_risk", perf_counter() - risk_start)
+
+        critical_start = perf_counter()
+        critical_emails = self.ai_analyzer.identify_critical_emails(emails_all)
+        self.record_timing("ia_critical", perf_counter() - critical_start)
+
+        participants_list = list(data["participants"])
+        email_count = len(emails_all)
+
+        # Tags de référence agrégés (derive_tags est par email, classification.py) :
+        # utile pour un aperçu rapide des thèmes dominants d'une analyse, et
+        # injecté comme contexte dans le prompt LLM ci-dessous.
+        tag_counts: Counter = Counter()
+        for em in emails_all:
+            tag_counts.update(derive_tags(em))
+        tags_reference = [
+            {"tag": tag, "count": count} for tag, count in tag_counts.most_common(10)
+        ]
+
+        # Regroupement par sujet normalisé (fils de discussion) : réduit le
+        # bruit des relances/réponses répétées avant l'appel LLM et donne un
+        # aperçu des sujets les plus actifs (voir group_emails_by_subject).
+        threads_full = group_emails_by_subject(emails_all)
+        threads_public = [
+            {k: v for k, v in t.items() if k != "latest_email"} for t in threads_full[:10]
+        ]
+
+        summary: Dict = {
+            "nb_emails": email_count,
+            "nb_participants": len(participants_list),
+            "participants": participants_list[:10],
+            "emails_analyzes_en_profondeur": len(deep_emails),
+            "analyse_sentiment": sentiment_analysis,
+            "entités_extraites": entities,
+            "résumé_automatique": auto_summary,
+            "évaluation_risque": risk_assessment,
+            "emails_critiques": critical_emails,
+            "score_activité": email_count + len(entities.get("technologies", [])),
+            "priorité_attention": (
+                "HAUTE" if risk_assessment.get("niveau_risque") == "CRITIQUE" else "NORMALE"
+            ),
+            "tags_reference": tags_reference,
+            "threads": threads_public,
+        }
+
+        if assistant_provider == ASSISTANT_PROVIDER_NONE:
+            raw_disabled = {
+                "texte": None,
+                "modèle": None,
+                "erreur": "désactivé (--assistant-provider none ou --no-openai)",
+                "max_tokens": None,
+                "max_input_chars": None,
+                "max_body_chars": None,
+            }
+            summary["résumé_assistant"] = build_résumé_assistant_unifié(
+                ASSISTANT_PROVIDER_NONE, raw_disabled
+            )
+            summary["résumé_assistant_openai"] = {
+                "texte": None,
+                "modèle": openai_model,
+                "erreur": raw_disabled["erreur"],
+            }
+        elif assistant_provider == ASSISTANT_PROVIDER_OPENAI:
+            openai_start = perf_counter()
+            raw_oa = generate_openai_assistant_summary(
+                threads_full,
+                project_name,
+                openai_model,
+                os.environ.get("OPENAI_API_KEY"),
+                max_tokens=openai_max_tokens,
+                max_input_chars=openai_max_input_chars,
+                max_body_chars=openai_body_chars,
+                tags_reference=tags_reference,
+            )
+            self.record_timing("openai_assistant", perf_counter() - openai_start)
+            summary["résumé_assistant"] = build_résumé_assistant_unifié(
+                ASSISTANT_PROVIDER_OPENAI, raw_oa
+            )
+            summary["résumé_assistant_openai"] = raw_oa
+        elif assistant_provider == ASSISTANT_PROVIDER_GEMINI:
+            gemini_start = perf_counter()
+            raw_g = generate_gemini_assistant_summary(
+                threads_full,
+                project_name,
+                gemini_model,
+                get_gemini_api_key(),
+                max_tokens=openai_max_tokens,
+                max_input_chars=openai_max_input_chars,
+                max_body_chars=openai_body_chars,
+                tags_reference=tags_reference,
+            )
+            self.record_timing("gemini_assistant", perf_counter() - gemini_start)
+            summary["résumé_assistant"] = build_résumé_assistant_unifié(
+                ASSISTANT_PROVIDER_GEMINI, raw_g
+            )
+        else:
+            logging.warning("assistant_provider inconnu: %s", assistant_provider)
+            raw_unk = {
+                "texte": None,
+                "modèle": None,
+                "erreur": f"Fournisseur inconnu: {assistant_provider}",
+            }
+            summary["résumé_assistant"] = build_résumé_assistant_unifié(
+                assistant_provider, raw_unk
+            )
+
+        # Extraction structurée (décisions/risques/échéances/prochaines
+        # étapes, voir llm.ProjectSummaryLLM) : appel LLM additionnel,
+        # activé uniquement quand l'appelant va persister le résultat
+        # (Fast-Track, analysis_tasks.py::_run_fasttrack_sync) — pas pour
+        # /api/analyze (résultat éphémère, non lié à un ProjectSummary),
+        # afin de ne pas doubler le coût/latence LLM sans bénéfice.
+        if include_structured and assistant_provider != ASSISTANT_PROVIDER_NONE:
+            structured_start = perf_counter()
+            # Fenêtre fixe de 7 jours calendaires, indépendante de la période
+            # d'analyse demandée (force_days/period) : même un rafraîchissement
+            # sur "1 an" doit produire un rappel des 7 derniers jours (voir
+            # ProjectSummaryLLM.activite_recente).
+            recent_emails = filter_emails_by_period(emails_all, "7")
+            recent_activity_corpus = _build_recent_activity_corpus(recent_emails)
+            if assistant_provider == ASSISTANT_PROVIDER_OPENAI:
+                structured = extract_structured_project_summary_openai(
                     threads_full,
                     project_name,
                     openai_model,
                     os.environ.get("OPENAI_API_KEY"),
-                    max_tokens=openai_max_tokens,
-                    max_input_chars=openai_max_input_chars,
-                    max_body_chars=openai_body_chars,
                     tags_reference=tags_reference,
+                    recent_activity_corpus=recent_activity_corpus,
                 )
-                self.record_timing("openai_assistant", perf_counter() - openai_start)
-                intelligent_summary[project_name]["résumé_assistant"] = build_résumé_assistant_unifié(
-                    ASSISTANT_PROVIDER_OPENAI, raw_oa
-                )
-                intelligent_summary[project_name]["résumé_assistant_openai"] = raw_oa
             elif assistant_provider == ASSISTANT_PROVIDER_GEMINI:
-                gemini_start = perf_counter()
-                raw_g = generate_gemini_assistant_summary(
+                structured = extract_structured_project_summary_gemini(
                     threads_full,
                     project_name,
                     gemini_model,
                     get_gemini_api_key(),
-                    max_tokens=openai_max_tokens,
-                    max_input_chars=openai_max_input_chars,
-                    max_body_chars=openai_body_chars,
                     tags_reference=tags_reference,
-                )
-                self.record_timing("gemini_assistant", perf_counter() - gemini_start)
-                intelligent_summary[project_name]["résumé_assistant"] = build_résumé_assistant_unifié(
-                    ASSISTANT_PROVIDER_GEMINI, raw_g
+                    recent_activity_corpus=recent_activity_corpus,
                 )
             else:
-                logging.warning("assistant_provider inconnu: %s", assistant_provider)
-                raw_unk = {
-                    "texte": None,
-                    "modèle": None,
-                    "erreur": f"Fournisseur inconnu: {assistant_provider}",
-                }
-                intelligent_summary[project_name]["résumé_assistant"] = build_résumé_assistant_unifié(
-                    assistant_provider, raw_unk
-                )
+                structured = {"data": None, "erreur": f"Fournisseur inconnu: {assistant_provider}"}
+            self.record_timing("structured_extraction", perf_counter() - structured_start)
+            structured_data = structured.get("data")
+            summary["structured_content"] = (
+                structured_data.model_dump() if structured_data is not None else None
+            )
+            summary["_structured_erreur"] = structured.get("erreur")
 
-            # Extraction structurée (décisions/risques/échéances/prochaines
-            # étapes, voir llm.ProjectSummaryLLM) : appel LLM additionnel,
-            # activé uniquement quand l'appelant va persister le résultat
-            # (Fast-Track, analysis_tasks.py::_run_fasttrack_sync) — pas pour
-            # /api/analyze (résultat éphémère, non lié à un ProjectSummary),
-            # afin de ne pas doubler le coût/latence LLM sans bénéfice.
-            if include_structured and assistant_provider != ASSISTANT_PROVIDER_NONE:
-                structured_start = perf_counter()
-                if assistant_provider == ASSISTANT_PROVIDER_OPENAI:
-                    structured = extract_structured_project_summary_openai(
-                        threads_full,
-                        project_name,
-                        openai_model,
-                        os.environ.get("OPENAI_API_KEY"),
-                        tags_reference=tags_reference,
-                    )
-                elif assistant_provider == ASSISTANT_PROVIDER_GEMINI:
-                    structured = extract_structured_project_summary_gemini(
-                        threads_full,
-                        project_name,
-                        gemini_model,
-                        get_gemini_api_key(),
-                        tags_reference=tags_reference,
-                    )
-                else:
-                    structured = {"data": None, "erreur": f"Fournisseur inconnu: {assistant_provider}"}
-                self.record_timing("structured_extraction", perf_counter() - structured_start)
-                data = structured.get("data")
-                intelligent_summary[project_name]["structured_content"] = (
-                    data.model_dump() if data is not None else None
-                )
-                intelligent_summary[project_name]["_structured_erreur"] = structured.get("erreur")
-
-        return intelligent_summary
+        return project_name, summary
 
 
 def imap_days_for_period_arg(period: Optional[str], days: int) -> int:

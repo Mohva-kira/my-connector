@@ -6,6 +6,7 @@ import { updateActionStatus } from "../actionsApi";
 import AppShell from "../components/AppShell";
 import {
   DecisionsAndRisks,
+  RecentActivity,
   SENTIMENT_CLASS,
   SENTIMENT_LABEL,
   formatTimestamp,
@@ -235,6 +236,9 @@ export default function ProjectDetailPage({
     ((project.structured_content.decisions?.length ?? 0) > 0 ||
       (project.structured_content.risques?.length ?? 0) > 0);
 
+  const hasRecentActivity =
+    (project?.structured_content?.activite_recente?.evenements.length ?? 0) > 0;
+
   return (
     <AppShell me={me}>
       <Link to="/projects" className="mb-4 inline-block text-sm text-text-muted hover:text-text-secondary">
@@ -290,6 +294,17 @@ export default function ProjectDetailPage({
               <DecisionsAndRisks structured={project.structured_content} defaultOpen />
             ) : (
               <p className="text-sm text-text-muted">Aucune décision ni risque identifié pour l'instant.</p>
+            )}
+          </section>
+
+          <section>
+            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">
+              Activité récente
+            </h2>
+            {hasRecentActivity ? (
+              <RecentActivity structured={project.structured_content} defaultOpen />
+            ) : (
+              <p className="text-sm text-text-muted">Aucune activité notable sur les 7 derniers jours.</p>
             )}
           </section>
 

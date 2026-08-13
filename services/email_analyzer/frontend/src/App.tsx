@@ -1,15 +1,27 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { apiFetch } from "./apiClient";
 import { parseResponseJson, type Health } from "./apiUtils";
 import ActionsPage from "./pages/ActionsPage";
 import AgendaPage from "./pages/AgendaPage";
-import AssistantPage from "./pages/AssistantPage";
+import DocumentsPage from "./pages/DocumentsPage";
 import HomePage from "./pages/HomePage";
 import LoginPage from "./pages/LoginPage";
+import MemoryPage from "./pages/MemoryPage";
+import ObjectivesPage from "./pages/ObjectivesPage";
 import ProjectDetailPage from "./pages/ProjectDetailPage";
 import ProjectHubPage from "./pages/ProjectHubPage";
 import SettingsPage from "./pages/SettingsPage";
+
+// L'ancien assistant portefeuille plein écran (AssistantPage/PortfolioAssistant)
+// a été absorbé par l'accueil chat-first (ChatHome, mode SaaS) — /assistant
+// redirige vers / en conservant `?q=` pour les anciens liens/favoris (la
+// recherche en langage naturel de la sidebar, voir AppShell.tsx, pointe
+// désormais directement vers /?q=).
+function AssistantRedirect() {
+  const location = useLocation();
+  return <Navigate to={`/${location.search}`} replace />;
+}
 
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -97,13 +109,22 @@ export default function App() {
         element={<AgendaPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
       />
       <Route
+        path="/memory"
+        element={<MemoryPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
+      />
+      <Route
+        path="/objectives"
+        element={<ObjectivesPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
+      />
+      <Route
+        path="/documents"
+        element={<DocumentsPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
+      />
+      <Route
         path="/actions"
         element={<ActionsPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
       />
-      <Route
-        path="/assistant"
-        element={<AssistantPage saasEnabled={saasEnabled} sessionTick={sessionTick} />}
-      />
+      <Route path="/assistant" element={<AssistantRedirect />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

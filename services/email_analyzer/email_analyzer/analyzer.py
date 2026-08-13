@@ -9,8 +9,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 from dotenv import load_dotenv
 
 from .classification import ProjectRules
+from .subject_tickets import parse_subject_ticket_key
 from .config import (
-    ASSISTANT_PROVIDER_OPENAI,
+    ASSISTANT_PROVIDER_GEMINI,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OPENAI_BODY_CHARS,
     DEFAULT_OPENAI_MAX_INPUT_CHARS,
@@ -96,7 +97,7 @@ class EmailProcessor:
         project_filter: Optional[Union[str, List[str]]],
         period: Optional[str] = None,
         days: int = 30,
-        assistant_provider: str = ASSISTANT_PROVIDER_OPENAI,
+        assistant_provider: str = ASSISTANT_PROVIDER_GEMINI,
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = DEFAULT_GEMINI_MODEL,
         openai_max_tokens: int = DEFAULT_OPENAI_MAX_TOKENS,
@@ -311,10 +312,10 @@ class EmailProcessor:
             if "@" not in addr:
                 continue
             domain = addr.rsplit("@", 1)[-1].strip().lower()
-            # Exclut aussi les sous-domaines d'un domaine exclu (ex.
-            # pmg.mediasoftci.net, sous-domaine technique de retour de mail
-            # observé en conditions réelles) — un simple "in exclude" ne
-            # matche que l'égalité exacte et laissait passer ce cas.
+            # Exclut aussi les sous-domaines d'un domaine exclu (ex. un
+            # sous-domaine technique de retour de mail du tenant lui-même) —
+            # un simple "in exclude" ne matche que l'égalité exacte et
+            # laissait passer ce cas.
             if not domain or domain in exclude or any(domain.endswith(f".{ex}") for ex in exclude):
                 continue
 
@@ -374,6 +375,180 @@ class EmailProcessor:
             "days_back": days_back,
         }
 
+    def discover_subject_ticket_keys(
+        self,
+        days_back: int = 90,
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Scanne tous les emails de la fenêtre (aucun filtre projet) et
+        regroupe ceux dont le sujet porte un motif de ticket
+        ``[Banque_Plateforme_Numéro]`` (voir subject_tickets.py) par libellé
+        normalisé — équivalent de ``discover_sender_domains`` pour ce second
+        signal de découverte. Aucun appel ML/LLM, rien n'est persisté ici
+        (proposition éphémère tant que l'utilisateur ne crée/rattache pas un
+        ``Project``, voir analysis_tasks._run_subject_key_discovery_sync)."""
+        error, project_data, source_label, _is_oauth, _analyzer = self._fetch_project_data(
+            [], days_back, self.NO_FILTER_RESULT_KEY, on_batch=on_batch, headers_only=True
+        )
+        if error is not None:
+            return error
+
+        emails = project_data.get(self.NO_FILTER_RESULT_KEY, {}).get("emails", [])
+        if not emails:
+            return {
+                "_empty": True,
+                "_message": f"Aucun email dans {source_label} sur la période analysée.",
+                "_days_back": days_back,
+            }
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        for em in emails:
+            ticket = parse_subject_ticket_key(em.get("subject"))
+            if ticket is None:
+                continue
+
+            group = groups.setdefault(
+                ticket.normalized_label,
+                {
+                    "subject_key": ticket.normalized_label,
+                    "email_count": 0,
+                    "_ticket_numbers": set(),
+                    "sample_subjects": [],
+                    "latest_received_at": None,
+                },
+            )
+            group["email_count"] += 1
+            group["_ticket_numbers"].add(ticket.ticket_number)
+            subject = (em.get("subject") or "").strip()
+            if subject and len(group["sample_subjects"]) < 3 and subject not in group["sample_subjects"]:
+                group["sample_subjects"].append(subject)
+
+            received_at = parse_email_datetime(em.get("date"))
+            if received_at is not None:
+                received_at = normalize_datetime_naive_local(received_at)
+                if group["latest_received_at"] is None or received_at > group["latest_received_at"]:
+                    group["latest_received_at"] = received_at
+
+        subject_keys: List[Dict[str, Any]] = []
+        for group in groups.values():
+            ticket_numbers = group.pop("_ticket_numbers")
+            latest = group["latest_received_at"]
+            subject_keys.append(
+                {
+                    **group,
+                    "distinct_ticket_count": len(ticket_numbers),
+                    "latest_received_at": latest.isoformat() if latest else None,
+                }
+            )
+        subject_keys.sort(key=lambda d: d["email_count"], reverse=True)
+
+        if not subject_keys:
+            return {
+                "_empty": True,
+                "_message": "Aucun sujet avec motif de ticket trouvé sur la période analysée.",
+                "_days_back": days_back,
+            }
+
+        return {
+            "subject_keys": subject_keys,
+            "total_emails_scanned": len(emails),
+            "days_back": days_back,
+        }
+
+    def backfill_email_attachments(
+        self,
+        days_back: int,
+        on_email: Callable[[str, List[Dict[str, Any]]], None],
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Rattrapage rétroactif des pièces jointes (Contexte Documents,
+        domaine #7) : rebalaye tout l'historique déjà connu en base (fenêtre
+        fournie par l'appelant, voir ``analysis_tasks.py::
+        _run_email_attachment_backfill_sync``) et appelle ``on_email(message_id,
+        attachments)`` pour chaque email — l'appelant matche lui-même contre
+        les ``Email`` déjà persistés (par ``message_id``) et décide de
+        l'ingestion, cette méthode ne fait que le fetch/parse IMAP.
+
+        IMAP uniquement, sans repli Gmail/Outlook (contrairement à
+        ``_fetch_project_data``) : ``gmail_oauth.fetch_emails``/
+        ``outlook_oauth.fetch_emails`` renvoient des dicts déjà normalisés
+        sans parties MIME — ils ne porteront jamais ``_attachments``, quelle
+        que soit la fenêtre. Même limitation préexistante que le Fast-Track
+        (``process_delta`` est déjà IMAP-only, voir Open Question #1 /
+        Units 15-17, context/progress-tracker.md) — ce rattrapage ne l'étend
+        pas, il s'appuie sur le même chemin."""
+        if not self.email_address or not self.password:
+            return {"_error": "Identifiants IMAP manquants (IMAP_USER / EMAIL et IMAP_PASSWORD)."}
+
+        analyzer = EmailProjectAnalyzer(
+            self.email_address,
+            self.password,
+            self.imap_server,
+            self.port,
+            max_deep_emails=self.max_deep_emails,
+            cache_file=self.cache_file,
+            imap_folder=self.imap_folder,
+            prefer_ssl=self.imap_use_ssl,
+            # Le cache ne porte jamais `_attachments` (voir
+            # scan_attachments_by_message_id) : l'utiliser ici ne ferait que
+            # produire des faux négatifs et churner inutilement le fichier
+            # partagé sur un scan potentiellement pluriannuel.
+            use_email_cache=False,
+        )
+
+        if not analyzer.connect():
+            return {"_error": "Échec de la connexion IMAP."}
+        try:
+            scanned = analyzer.scan_attachments_by_message_id(days_back, on_email, on_batch=on_batch)
+        finally:
+            analyzer.disconnect()
+        return {"emails_scanned": scanned, "_days_back": days_back}
+
+    def list_recent_emails(
+        self,
+        days_back: int = 14,
+        limit: int = 5,
+        on_batch: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Scanne tous les emails de la fenêtre (aucun filtre projet, aucun appel
+        ML/LLM) et renvoie les ``limit`` plus récents (sujet/expéditeur/date) —
+        alimente les bulles de suggestion du chat en mode legacy, où aucune
+        donnée n'est encore persistée avant qu'une analyse ne soit lancée
+        (contrairement au mode SaaS, servi par ``/api/timeline``). Même
+        primitive que ``discover_sender_domains`` (``headers_only=True`` :
+        pas besoin du corps du message pour ce seul usage)."""
+        error, project_data, source_label, _is_oauth, _analyzer = self._fetch_project_data(
+            [], days_back, self.NO_FILTER_RESULT_KEY, on_batch=on_batch, headers_only=True
+        )
+        if error is not None:
+            return error
+
+        emails = project_data.get(self.NO_FILTER_RESULT_KEY, {}).get("emails", [])
+        if not emails:
+            return {
+                "_empty": True,
+                "_message": f"Aucun email dans {source_label} sur la période analysée.",
+                "_days_back": days_back,
+            }
+
+        def _sort_key(em: Dict[str, Any]) -> datetime:
+            parsed = parse_email_datetime(em.get("date"))
+            if parsed is None:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            return normalize_datetime_naive_local(parsed)
+
+        ordered = sorted(emails, key=_sort_key, reverse=True)[:limit]
+        return {
+            "emails": [
+                {
+                    "subject": (em.get("subject") or "").strip() or "(sans objet)",
+                    "from": em.get("from") or "",
+                    "date": em.get("date") or "",
+                }
+                for em in ordered
+            ]
+        }
+
     def _fetch_gmail_project_data(
         self,
         analyzer: EmailProjectAnalyzer,
@@ -430,7 +605,7 @@ class EmailProcessor:
         self,
         project_name: str,
         since: Optional[datetime],
-        assistant_provider: str = ASSISTANT_PROVIDER_OPENAI,
+        assistant_provider: str = ASSISTANT_PROVIDER_GEMINI,
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = DEFAULT_GEMINI_MODEL,
         rules_matrix: Optional[dict] = None,
@@ -554,8 +729,14 @@ class EmailProcessor:
         n: int = 10,
     ) -> List[Dict[str, Any]]:
         """
-        Récupère les n derniers emails correspondant au filtre (IMAP), sans lecture/écriture du cache JSON.
-        Utilisé pour l’assistant conversationnel : contexte basé sur le contenu des messages, pas sur le JSON d’analyse.
+        Retourne les n derniers emails correspondant au filtre. Sert d'abord
+        le cache JSON local (déjà peuplé par une analyse précédente —
+        /api/analyze, /api/projects/{id}/refresh) sans ouvrir de connexion
+        IMAP : le chat ne doit pas relancer une opération lourde de type
+        analyse à chaque message, seulement répondre à partir des données
+        déjà disponibles. Ne se rabat sur une connexion IMAP live que si le
+        cache ne contient encore aucune correspondance pour ce filtre
+        (aucune analyse n'a jamais tourné pour ce projet/tenant).
         """
         if not self.email_address or not self.password:
             return []
@@ -572,9 +753,13 @@ class EmailProcessor:
             max_deep_emails=self.max_deep_emails,
             cache_file=self.cache_file,
             imap_folder=self.imap_folder,
-            use_email_cache=False,
+            use_email_cache=True,
             prefer_ssl=self.imap_use_ssl,
         )
+
+        cached_emails = self._filter_cached_emails_for_project(analyzer, pf, period, n)
+        if cached_emails:
+            return cached_emails
 
         try:
             if not analyzer.connect():
@@ -599,6 +784,35 @@ class EmailProcessor:
             return emails_all[-n:]
         finally:
             analyzer.disconnect()
+
+    @staticmethod
+    def _filter_cached_emails_for_project(
+        analyzer: "EmailProjectAnalyzer",
+        project_filter: str,
+        period: Optional[str],
+        n: int,
+    ) -> List[Dict[str, Any]]:
+        """Filtre le cache JSON local (aucune connexion IMAP) — réutilise
+        `search_project_emails_from_list`, déjà utilisé ailleurs pour scorer
+        la pertinence projet sur une liste d'emails en mémoire."""
+        contents = [
+            entry.get("content")
+            for entry in analyzer.email_cache.values()
+            if analyzer._cached_content_usable(entry.get("content"))
+        ]
+        if not contents:
+            return []
+
+        project_data = analyzer.search_project_emails_from_list(contents, [project_filter])
+        if period:
+            project_data = analyzer.apply_period_filter(project_data, period)
+        if not project_data:
+            return []
+
+        keys = list(project_data.keys())
+        key = next((k for k in keys if k.lower() == project_filter.lower()), None) or keys[0]
+        emails_all = (project_data.get(key) or {}).get("emails") or []
+        return emails_all[-n:]
 
     def generate_response_draft(
         self,

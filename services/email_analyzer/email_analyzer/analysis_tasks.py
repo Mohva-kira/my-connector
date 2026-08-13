@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -53,6 +53,30 @@ _SENTIMENT_BY_RISK_LEVEL = {
     "FAIBLE": "on_track",
     "MODÉRÉ": "awaiting_feedback",
     "CRITIQUE": "under_tension",
+}
+
+# Rattrapage rétroactif des pièces jointes (voir
+# _run_email_attachment_backfill_sync) : marge ajoutée à MIN(Email.received_at)
+# pour fixer la fenêtre `SINCE` du scan. IMAP SINCE compare l'INTERNALDATE
+# serveur à la granularité du jour, alors que Email.received_at vient de
+# l'en-tête Date (fuseau de l'expéditeur) — sans marge, l'email le plus ancien
+# pourrait tomber juste hors fenêtre.
+_ATTACHMENT_BACKFILL_MARGIN_DAYS = 2
+# Repli si aucun Email daté n'est rattaché à un projet (rien à rattraper de
+# toute façon, mais évite un scan illimité) — même valeur que le
+# fallback_days par défaut du Fast-Track (process_delta).
+_ATTACHMENT_BACKFILL_FALLBACK_DAYS = 30
+# Garde-fou (pas un cap métier) : au-delà, le scan ne tiendrait de toute façon
+# pas dans le timeout du job (voir WorkerSettings, timeout=7200).
+_ATTACHMENT_BACKFILL_MAX_DAYS = 3650
+
+# Conseil de prévention par niveau de risque pour le repli SuggestedAction
+# (ai_intelligent.calculate_risk_score) : utilisé uniquement quand
+# l'extraction structurée (llm.NextStepItem) n'a pas fourni de
+# conseil_prevention pour cette action.
+_ADVICE_BY_RISK_LEVEL = {
+    "MODÉRÉ": "Planifier un point d'équipe régulier pour suivre l'évolution des facteurs de risque identifiés.",
+    "CRITIQUE": "Organiser une réunion de révision du projet avec les parties prenantes dès que possible.",
 }
 
 
@@ -97,6 +121,20 @@ def _run_legacy_sync(
         gemini_model=gemini_model,
         on_batch=on_batch,
     )
+    if isinstance(result, dict) and result.get("_error"):
+        raise RuntimeError(str(result["_error"]))
+    return result
+
+
+def _run_recent_emails_legacy_sync(job_id: str, days: int, limit: int) -> Dict[str, Any]:
+    """Alimente les bulles de suggestion du chat en mode legacy (pas de DB, pas
+    de ``/api/timeline`` — voir ``EmailProcessor.list_recent_emails``). Aucun
+    appel ML/LLM, juste un fetch d'en-têtes."""
+    from email_analyzer.analyzer import EmailProcessor
+
+    proc = EmailProcessor(load_env=False)
+    on_batch = lambda processed, total, partial: report_progress(job_id, processed, total, partial)
+    result = proc.list_recent_emails(days_back=days, limit=limit, on_batch=on_batch)
     if isinstance(result, dict) and result.get("_error"):
         raise RuntimeError(str(result["_error"]))
     return result
@@ -180,11 +218,115 @@ def _existing_domain_project_map(db: Any, tenant_id: str) -> Dict[str, Dict[str,
     return mapping
 
 
+def _existing_subject_key_project_map(db: Any, tenant_id: str) -> Dict[str, Dict[str, str]]:
+    """Mirroring de ``_existing_domain_project_map`` pour les clés de sujet
+    ([Banque_Plateforme_Numéro], voir subject_tickets.py) déjà rattachées à
+    un projet actif (``rules_matrix.subject_keys``, minuscules — même
+    convention que ``ProjectRules.from_dict``)."""
+    from email_analyzer.db.models import Project, ProjectStatus
+
+    mapping: Dict[str, Dict[str, str]] = {}
+    projects = (
+        db.query(Project)
+        .filter(Project.tenant_id == tenant_id, Project.status == ProjectStatus.active.value)
+        .all()
+    )
+    for project in projects:
+        keys = (project.rules_matrix or {}).get("subject_keys") or []
+        for key in keys:
+            normalized = str(key).strip().lower()
+            if normalized:
+                mapping[normalized] = {"id": str(project.id), "name": project.name}
+    return mapping
+
+
+# Bornes de similarité floue (classification.fuzzy_similarity) utilisées par
+# _run_subject_key_discovery_sync pour annoter une clé de sujet découverte
+# qui ne matche exactement aucun subject_keys connu : au-delà du seuil haut,
+# la clé est traitée comme "déjà suivie" (auto-attache, même UX que
+# existing_project_id de la découverte de domaines) ; entre les deux seuils,
+# une suggestion est pré-remplie mais nécessite une confirmation explicite de
+# l'utilisateur (pas d'auto-attache silencieuse sur un signal incertain) ;
+# en dessous, aucune proposition, l'utilisateur choisit librement.
+_SUBJECT_KEY_AUTO_ATTACH_THRESHOLD = 0.8
+_SUBJECT_KEY_SUGGEST_THRESHOLD = 0.45
+
+
+def _run_subject_key_discovery_sync(job_id: str, tenant_id: str, days: int) -> Dict[str, Any]:
+    """Découverte de clés de ticket dans les sujets (bouton "Détecter les
+    tickets" du Brief) : mirroring exact de ``_run_domain_discovery_sync``,
+    mais groupée par motif ``[Banque_Plateforme_Numéro]`` (voir
+    ``analyzer.py::discover_subject_ticket_keys``) plutôt que par domaine
+    expéditeur. Chaque clé découverte est annotée :
+    - ``existing_project_id``/``existing_project_name`` : match exact dans
+      ``rules_matrix.subject_keys`` d'un projet actif, ou meilleur projet dont
+      le nom est très proche (``fuzzy_similarity`` ≥ seuil haut) — les deux
+      cas se comportent comme "déjà suivi" côté frontend.
+    - ``suggested_project_id``/``suggested_project_name`` : meilleur projet
+      plausible (seuil bas ≤ similarité < seuil haut) quand aucun match
+      exact/quasi-exact n'existe — nécessite une confirmation explicite de
+      l'utilisateur, contrairement à ``existing_project_id``.
+    """
+    from email_analyzer.db.models import Project, ProjectStatus, Tenant
+    from email_analyzer.db.session import SessionLocal
+    from email_analyzer.classification import fuzzy_similarity
+    from email_analyzer.saas_logic import processor_from_tenant
+
+    if SessionLocal is None:
+        raise RuntimeError("DATABASE_URL non configuré")
+    db = SessionLocal()
+    try:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if tenant is None:
+            raise RuntimeError("Organisation introuvable")
+        proc = processor_from_tenant(tenant)
+        on_batch = lambda processed, total, partial: report_progress(job_id, processed, total, partial)
+        result = proc.discover_subject_ticket_keys(days_back=days, on_batch=on_batch)
+        if proc.last_gmail_token_refresh:
+            _persist_oauth_token_refresh(proc.gmail_connection, proc.last_gmail_token_refresh)
+            db.commit()
+        if proc.last_outlook_token_refresh:
+            _persist_oauth_token_refresh(proc.outlook_connection, proc.last_outlook_token_refresh)
+            db.commit()
+        if isinstance(result, dict) and result.get("_error"):
+            raise RuntimeError(str(result["_error"]))
+        if isinstance(result, dict) and result.get("subject_keys"):
+            exact_map = _existing_subject_key_project_map(db, tenant_id)
+            active_projects = (
+                db.query(Project)
+                .filter(Project.tenant_id == tenant_id, Project.status == ProjectStatus.active.value)
+                .all()
+            )
+            for entry in result["subject_keys"]:
+                key = str(entry.get("subject_key", "")).strip()
+                exact = exact_map.get(key.lower())
+                entry["existing_project_id"] = exact["id"] if exact else None
+                entry["existing_project_name"] = exact["name"] if exact else None
+                entry["suggested_project_id"] = None
+                entry["suggested_project_name"] = None
+                if exact or not active_projects:
+                    continue
+                best_project, best_score = None, 0.0
+                for project in active_projects:
+                    score = fuzzy_similarity(key, project.name)
+                    if score > best_score:
+                        best_project, best_score = project, score
+                if best_project and best_score >= _SUBJECT_KEY_AUTO_ATTACH_THRESHOLD:
+                    entry["existing_project_id"] = str(best_project.id)
+                    entry["existing_project_name"] = best_project.name
+                elif best_project and best_score >= _SUBJECT_KEY_SUGGEST_THRESHOLD:
+                    entry["suggested_project_id"] = str(best_project.id)
+                    entry["suggested_project_name"] = best_project.name
+        return result
+    finally:
+        db.close()
+
+
 def _run_domain_discovery_sync(job_id: str, tenant_id: str, days: int) -> Dict[str, Any]:
     """Découverte de domaines expéditeurs (bouton "Analyser" du Brief) : scanne
     toute la boîte mail sans filtre projet et regroupe par domaine, hors le
-    domaine interne de l'entreprise (mediasoftci.net) et celui du tenant lui-même
-    — aucune persistance, aucun appel LLM (voir email_analyzer/analyzer.py::
+    domaine du tenant lui-même (bruit d'auto-envoi) — aucune autre exclusion,
+    aucune persistance, aucun appel LLM (voir email_analyzer/analyzer.py::
     discover_sender_domains). ``job_id`` alimente ``report_progress`` via
     ``on_batch`` : un scan sans filtre sur 90 jours peut porter sur plusieurs
     milliers d'emails (mesuré en conditions réelles, voir progress-tracker.md),
@@ -210,7 +352,7 @@ def _run_domain_discovery_sync(job_id: str, tenant_id: str, days: int) -> Dict[s
         if tenant is None:
             raise RuntimeError("Organisation introuvable")
         proc = processor_from_tenant(tenant)
-        exclude_domains = {"mediasoftci.net"}
+        exclude_domains: set = set()
         tenant_email = (tenant.imap_user or "").strip().lower()
         if "@" in tenant_email:
             exclude_domains.add(tenant_email.rsplit("@", 1)[-1])
@@ -277,11 +419,14 @@ def _run_fasttrack_sync(
     """
     from email_analyzer.ai_intelligent import get_shared_analyzer
     from email_analyzer.classification import ProjectRules, derive_tags, score_project_relevance
+    from email_analyzer.subject_tickets import parse_subject_ticket_key
     from email_analyzer.db.models import (
         Appointment,
+        AppointmentStatus,
         Email,
         Project,
         ProjectSummary,
+        ProjectSummaryHistory,
         RecipientStatus,
         SuggestedAction,
         SuggestedActionStatus,
@@ -380,6 +525,7 @@ def _run_fasttrack_sync(
             )
             relevance = score_project_relevance(email_content, project.name, project_rules)
             tags = derive_tags(email_content, importance_score=importance_score)
+            ticket = parse_subject_ticket_key(email_content.get("subject"))
             email_rows.append(
                 dict(
                     tenant_id=tenant.id,
@@ -392,6 +538,8 @@ def _run_fasttrack_sync(
                     importance_score=importance_score,
                     tags=tags,
                     classification_score=relevance.score,
+                    ticket_label=ticket.normalized_label if ticket else None,
+                    ticket_number=ticket.ticket_number if ticket else None,
                 )
             )
 
@@ -414,6 +562,22 @@ def _run_fasttrack_sync(
         content = summary_row.content
         sentiment = summary_row.sentiment
         tags_reference: list = []
+        if new_emails and (summary_row.content or summary_row.structured_content):
+            # Archive l'ancien résumé avant qu'il ne soit écrasé en place
+            # ci-dessous (ProjectSummary reste une ligne unique régénérée en
+            # place, voir son docstring) — condition sur new_emails/contenu
+            # existant : rien à archiver si le résumé vient d'être créé ou si
+            # ce sync ne change rien. Même transaction que le reste (commit
+            # unique plus bas), pas de commit supplémentaire.
+            db.add(
+                ProjectSummaryHistory(
+                    project_id=project.id,
+                    content=summary_row.content,
+                    structured_content=summary_row.structured_content,
+                    sentiment=summary_row.sentiment,
+                    llm_risk_level=summary_row.llm_risk_level,
+                )
+            )
         if new_emails:
             summary_block = delta.get("summary") or {}
             # "résumé_automatique" est lui-même un dict ({"résumé_automatique": <texte>,
@@ -491,19 +655,32 @@ def _run_fasttrack_sync(
                 # aucune action.
                 recommendation = risk.get("recommandation")
                 if recommendation and risk_level not in (None, "FAIBLE"):
+                    risk_factors = risk.get("facteurs_risque") or []
+                    rationale = (
+                        "Facteurs de risque détectés : " + ", ".join(risk_factors)
+                        if risk_factors
+                        else None
+                    )
                     db.add(
                         SuggestedAction(
                             project_id=project.id,
                             description=recommendation,
                             status=SuggestedActionStatus.pending.value,
+                            rationale=rationale,
+                            advice=_ADVICE_BY_RISK_LEVEL.get(risk_level),
                         )
                     )
 
-            # Rendez-vous extraits par l'IA (llm.AppointmentItem) : même
-            # discipline idempotente que SuggestedAction ci-dessus (wipe +
-            # rebuild à chaque resynchronisation, pas d'historique de rendez-
-            # vous annulés/modifiés à préserver).
-            db.query(Appointment).filter(Appointment.project_id == project.id).delete()
+            # Rendez-vous extraits par l'IA (llm.AppointmentItem) : wipe +
+            # rebuild à chaque resynchronisation, mais uniquement pour les
+            # rendez-vous encore "tentative" — un rendez-vous que l'utilisateur
+            # a confirmé/annulé via PATCH /api/agenda/appointments/{id} ne doit
+            # jamais être écrasé par une resync automatique (seul le statut est
+            # censé être ajustable manuellement, voir Appointment.status).
+            db.query(Appointment).filter(
+                Appointment.project_id == project.id,
+                Appointment.status == AppointmentStatus.tentative.value,
+            ).delete()
             for appt in (structured_content or {}).get("appointments") or []:
                 description = (appt.get("description") or "").strip()
                 scheduled_at = _parse_iso_date(appt.get("date_iso"))
@@ -542,6 +719,40 @@ def _run_fasttrack_sync(
         summary_row.last_processed_email_timestamp = refreshed_at
         db.commit()
 
+        if new_emails:
+            # Le Knowledge Layer (contacts/organisations) ne dépend que de
+            # structured_content, réécrit juste au-dessus uniquement quand il y a
+            # de nouveaux emails — resynchroniser sinon serait un no-op coûteux.
+            # Best-effort : un échec ici ne doit jamais invalider l'analyse déjà
+            # commitée (voir knowledge_service.sync_from_project_summary, upsert
+            # idempotent).
+            try:
+                from email_analyzer.services.knowledge_service import KnowledgeService
+
+                KnowledgeService(db).sync_from_project_summary(tenant.id, project.id)
+            except Exception:
+                logger.exception(
+                    "knowledge.sync (post-analyse) : échec project_id=%s tenant_id=%s",
+                    project.id,
+                    tenant.id,
+                )
+
+            # Contexte Documents, domaine #7 (2026-08-01) : pièces jointes des
+            # emails nouvellement traités (PDF/texte, voir project_mail.py::
+            # extract_email_content) ingérées comme Document, pour être
+            # trouvables via l'outil agent search_documents dans le chat/les
+            # brouillons de réponse. Best-effort, même discipline que le
+            # Knowledge sync ci-dessus : un échec ici n'invalide jamais
+            # l'analyse déjà commitée.
+            try:
+                _ingest_new_email_attachments(db, tenant, project, new_emails, seen_external_ids)
+            except Exception:
+                logger.exception(
+                    "document.ingest_attachments (post-analyse) : échec project_id=%s tenant_id=%s",
+                    project.id,
+                    tenant.id,
+                )
+
         return {
             "project_id": str(project.id),
             "new_emails": len(new_emails),
@@ -557,6 +768,259 @@ def _run_fasttrack_sync(
         raise
     finally:
         db.close()
+
+
+def _ingest_new_email_attachments(
+    db,
+    tenant,
+    project,
+    new_emails: list,
+    newly_persisted_external_ids: set,
+) -> None:
+    """Persiste en `Document` les pièces jointes (PDF/texte, voir
+    project_mail.py::extract_email_content) des emails réellement nouveaux
+    dans CETTE exécution de `_run_fasttrack_sync` — `newly_persisted_external_ids`
+    est le même ensemble utilisé là-bas pour dédupliquer l'insertion des
+    `Email`, pas un recalcul indépendant. Restreint aux emails nouveaux :
+    aucun rattrapage rétroactif des emails déjà en base avant l'introduction
+    de cette fonctionnalité (2026-08-01) — un email déjà persisté ne sera
+    jamais re-scanné pour ses pièces jointes (voir aussi le commentaire sur
+    le cache dans project_mail.py, qui ne garde `_attachments` que pour un
+    fetch IMAP frais, jamais pour une entrée déjà en cache).
+
+    Best-effort par pièce jointe (try/except individuel) : une pièce jointe
+    illisible/trop volumineuse ne doit jamais faire échouer les suivantes ni
+    l'analyse déjà commitée par l'appelant."""
+    if not any(e.get("_attachments") for e in new_emails):
+        return
+
+    from email_analyzer.db.models import Membership, MembershipRole
+    from email_analyzer.services.document_service import DocumentService
+
+    membership = (
+        db.query(Membership)
+        .filter(Membership.tenant_id == tenant.id, Membership.role == MembershipRole.owner.value)
+        .first()
+        or db.query(Membership).filter(Membership.tenant_id == tenant.id).first()
+    )
+    if membership is None:
+        # Ne devrait pas arriver (un tenant a toujours au moins un membre
+        # owner créé à l'inscription) — repli silencieux plutôt qu'une
+        # exception qui remonterait jusqu'au try/except best-effort de
+        # l'appelant (mêmes logs, moins de bruit).
+        return
+
+    doc_service = DocumentService(db)
+    for email_content in new_emails:
+        message_id = (email_content.get("message_id") or "").strip()
+        if message_id not in newly_persisted_external_ids:
+            continue
+        for attachment in email_content.get("_attachments") or []:
+            try:
+                doc_service.ingest_email_attachment(
+                    tenant.id,
+                    membership.user_id,
+                    project.id,
+                    filename=attachment["filename"],
+                    content_type=attachment.get("content_type"),
+                    data=attachment["data"],
+                )
+            except Exception:
+                logger.exception(
+                    "document.ingest_attachment échec filename=%s project_id=%s",
+                    attachment.get("filename"),
+                    project.id,
+                )
+
+
+def _attachment_backfill_days_back(db, tenant_id) -> "tuple[int, Optional[datetime]]":
+    """Calcule la fenêtre `days_back` du rattrapage rétroactif (voir
+    `_run_email_attachment_backfill_sync`) : depuis le plus ancien `Email`
+    déjà rattaché à un projet pour ce tenant jusqu'à maintenant — un
+    `Document` doit être rattaché à un projet (`ingest_email_attachment`
+    exige un `project_id`), donc un email sans projet ne peut de toute façon
+    produire aucun document et ne doit pas élargir la fenêtre. Retourne
+    aussi la date la plus ancienne trouvée (`None` si aucune), pour le
+    résumé renvoyé au frontend."""
+    from sqlalchemy import func
+
+    from email_analyzer.db.models import Email
+
+    oldest = (
+        db.query(func.min(Email.received_at))
+        .filter(Email.tenant_id == tenant_id, Email.project_id.isnot(None))
+        .scalar()
+    )
+    if oldest is None:
+        return _ATTACHMENT_BACKFILL_FALLBACK_DAYS, None
+    if oldest.tzinfo is None:
+        # period.py::parse_email_datetime délègue à parsedate_to_datetime,
+        # qui peut renvoyer un datetime naïf pour certains formats de fuseau
+        # (ex. "-0000") — Email.received_at (DateTime(timezone=True)) peut
+        # donc contenir une valeur naïve écrite par une exécution passée.
+        oldest = oldest.replace(tzinfo=timezone.utc)
+    days = (datetime.now(timezone.utc) - oldest).days + _ATTACHMENT_BACKFILL_MARGIN_DAYS
+    days = max(1, min(days, _ATTACHMENT_BACKFILL_MAX_DAYS))
+    return days, oldest
+
+
+def _run_email_attachment_backfill_sync(job_id: str, tenant_id: str) -> Dict[str, Any]:
+    """Rattrapage rétroactif des pièces jointes (Contexte Documents, domaine
+    #7, 2026-08-01) : contrairement à `_ingest_new_email_attachments` (emails
+    nouveaux d'un seul Fast-Track), rebalaye TOUT l'historique déjà persisté
+    en base pour ce tenant. Un seul passage IMAP complet
+    (`EmailProcessor.backfill_email_attachments`, sans filtre projet, corps
+    complet) plutôt qu'un fetch par email : il n'existe aucun moyen de
+    relire un email par Message-ID en IMAP dans ce code (voir
+    project_mail.py) — la seule façon de retrouver les pièces jointes des
+    emails déjà connus est de rebalayer la fenêtre puis de matcher côté
+    Python contre les `Email.external_id` déjà en base.
+
+    Pas de `try/except: db.rollback(); raise` global comme
+    `_run_fasttrack_sync` : chaque `Document` est commité individuellement
+    par `DocumentRepository.create`, donc un job interrompu (timeout, worker
+    redémarré) a déjà persisté durablement tout ce qu'il a ingéré jusque-là —
+    relancer le job reprend sans recréer de doublon
+    (`DocumentService.ingest_email_attachment` dédoublonne déjà sur
+    tenant+projet+nom+taille)."""
+    from email_analyzer.db.models import Document, Email, Membership, MembershipRole, Tenant
+    from email_analyzer.db.session import SessionLocal
+    from email_analyzer.saas_logic import processor_from_tenant
+    from email_analyzer.services.document_service import DocumentService
+
+    if SessionLocal is None:
+        raise RuntimeError("DATABASE_URL non configuré")
+
+    db = SessionLocal()
+    try:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if tenant is None:
+            raise RuntimeError("Organisation introuvable")
+
+        proc = processor_from_tenant(tenant)
+        if not proc.email_address or not proc.password:
+            # Job "réussi" avec un message lisible plutôt qu'une erreur : même
+            # discipline que les jobs discover_* (_empty/_message) — un tenant
+            # Gmail/Outlook-only n'est pas une panne, c'est une limitation déjà
+            # connue et documentée (process_delta est déjà IMAP-only, voir
+            # Open Question #1 / Units 15-17).
+            return {
+                "_error": (
+                    "Rattrapage indisponible : aucune boîte IMAP configurée. "
+                    "Les comptes Gmail/Outlook connectés en OAuth ne permettent "
+                    "pas de relire les pièces jointes des emails déjà traités."
+                )
+            }
+
+        membership = (
+            db.query(Membership)
+            .filter(Membership.tenant_id == tenant.id, Membership.role == MembershipRole.owner.value)
+            .first()
+            or db.query(Membership).filter(Membership.tenant_id == tenant.id).first()
+        )
+        if membership is None:
+            return {"_error": "Aucun membre trouvé pour cette organisation."}
+
+        # Déréférencés en UUID simples avant toute opération qui committe :
+        # chaque DocumentRepository.create commite individuellement, ce qui
+        # expire les objets ORM chargés dans cette session.
+        tenant_uuid = tenant.id
+        user_uuid = membership.user_id
+
+        project_by_message_id: Dict[str, Any] = {
+            ext: pid
+            for ext, pid in db.query(Email.external_id, Email.project_id)
+            .filter(Email.tenant_id == tenant_uuid, Email.project_id.isnot(None))
+            .all()
+        }
+        if not project_by_message_id:
+            return {
+                "_empty": True,
+                "_message": "Aucun email rattaché à un projet en base : lancez d'abord une analyse.",
+            }
+
+        days_back, oldest = _attachment_backfill_days_back(db, tenant_uuid)
+
+        created_before = (
+            db.query(Document)
+            .filter(Document.tenant_id == tenant_uuid, Document.source == "email")
+            .count()
+        )
+
+        doc_service = DocumentService(db)
+        matched = 0
+        seen = 0
+        failed = 0
+
+        def _on_email(message_id: str, attachments: list) -> None:
+            nonlocal matched, seen, failed
+            project_id = project_by_message_id.get(message_id) if message_id else None
+            if project_id is None:
+                return
+            matched += 1
+            for attachment in attachments:
+                seen += 1
+                try:
+                    doc_service.ingest_email_attachment(
+                        tenant_uuid,
+                        user_uuid,
+                        project_id,
+                        filename=attachment["filename"],
+                        content_type=attachment.get("content_type"),
+                        data=attachment["data"],
+                    )
+                except Exception:
+                    failed += 1
+                    # Un insert en échec laisse la session dans un état
+                    # invalide pour les appels suivants (contrairement à
+                    # _ingest_new_email_attachments, où l'appelant possède la
+                    # transaction) : chaque DocumentRepository.create commite
+                    # individuellement, donc il faut rollback ici pour
+                    # continuer à ingérer les pièces jointes suivantes.
+                    db.rollback()
+                    logger.exception(
+                        "document.backfill_attachment échec filename=%s tenant_id=%s",
+                        attachment.get("filename"),
+                        tenant_uuid,
+                    )
+
+        on_batch = lambda processed, total, partial: report_progress(job_id, processed, total, None)
+
+        result = proc.backfill_email_attachments(days_back, _on_email, on_batch=on_batch)
+        if result.get("_error"):
+            raise RuntimeError(str(result["_error"]))
+
+        created_after = (
+            db.query(Document)
+            .filter(Document.tenant_id == tenant_uuid, Document.source == "email")
+            .count()
+        )
+
+        return {
+            "days_back": days_back,
+            "oldest_email_at": oldest.isoformat() if oldest else None,
+            "emails_scanned": result.get("emails_scanned", 0),
+            "emails_matched": matched,
+            "attachments_seen": seen,
+            "attachments_created": created_after - created_before,
+            "attachments_failed": failed,
+        }
+    finally:
+        db.close()
+
+
+async def run_email_attachment_backfill(ctx: Dict[str, Any], job_id: str, tenant_id: str) -> None:
+    set_status(job_id, STATUS_RUNNING)
+    try:
+        result = await asyncio.to_thread(_run_email_attachment_backfill_sync, job_id, tenant_id)
+        set_status(job_id, STATUS_DONE, result=result)
+    except (Exception, asyncio.CancelledError) as exc:
+        # Voir run_fasttrack_refresh : CancelledError doit être capturée
+        # explicitement, sinon le job reste "running" pour toujours.
+        set_status(
+            job_id, STATUS_ERROR, error=str(exc) or "Rattrapage interrompu (délai dépassé ou worker redémarré)."
+        )
+        raise
 
 
 async def run_fasttrack_refresh(
@@ -652,6 +1116,36 @@ async def run_domain_discovery(
         # Voir run_fasttrack_refresh ci-dessus : CancelledError doit être
         # capturée explicitement, sinon le job reste "running" pour toujours.
         set_status(job_id, STATUS_ERROR, error=str(exc) or "Analyse interrompue (délai dépassé ou worker redémarré).")
+        raise
+
+
+async def run_subject_key_discovery(
+    ctx: Dict[str, Any],
+    job_id: str,
+    tenant_id: str,
+    days: int,
+) -> None:
+    set_status(job_id, STATUS_RUNNING)
+    try:
+        result = await asyncio.to_thread(_run_subject_key_discovery_sync, job_id, tenant_id, days)
+        set_status(job_id, STATUS_DONE, result=result)
+    except (Exception, asyncio.CancelledError) as exc:
+        set_status(job_id, STATUS_ERROR, error=str(exc) or "Analyse interrompue (délai dépassé ou worker redémarré).")
+        raise
+
+
+async def run_recent_emails_legacy(
+    ctx: Dict[str, Any],
+    job_id: str,
+    days: int,
+    limit: int,
+) -> None:
+    set_status(job_id, STATUS_RUNNING)
+    try:
+        result = await asyncio.to_thread(_run_recent_emails_legacy_sync, job_id, days, limit)
+        set_status(job_id, STATUS_DONE, result=result)
+    except (Exception, asyncio.CancelledError) as exc:
+        set_status(job_id, STATUS_ERROR, error=str(exc) or "Récupération interrompue (délai dépassé ou worker redémarré).")
         raise
 
 
@@ -838,6 +1332,56 @@ async def run_agenda_refresh_for_tenant(ctx: Dict[str, Any], job_id: str, tenant
         raise
 
 
+async def run_knowledge_sync_scan(ctx: Dict[str, Any]) -> None:
+    """Tâche cron arq (toutes les heures, voir `WorkerSettings.cron_jobs`) :
+    filet de rattrapage pour le Knowledge Layer — resynchronise tout projet
+    dont `ProjectSummary` a été mis à jour dans la dernière heure, au cas où
+    le hook immédiat de `_run_fasttrack_sync` (juste après son `db.commit()`)
+    aurait échoué. N'appelle jamais `_run_fasttrack_sync` : uniquement
+    `KnowledgeService.sync_from_project_summary`, purement déterministe et
+    idempotent (upsert sur contraintes uniques), donc un projet déjà à jour
+    est un no-op bon marché.
+
+    Fenêtre = cadence du job (1h), pas de table "dernier scan" dédiée : un
+    résumé mis à jour juste après la borne d'une exécution légèrement en
+    retard peut être manqué de quelques minutes, rattrapé au passage suivant
+    — acceptable, ce job est un filet de sécurité, pas le chemin principal."""
+    from email_analyzer.db.models import Project, ProjectStatus, ProjectSummary
+    from email_analyzer.db.session import SessionLocal
+    from email_analyzer.services.knowledge_service import KnowledgeService
+
+    if SessionLocal is None:
+        logger.error("Scan Knowledge annulé : DATABASE_URL non configuré")
+        return
+
+    db = SessionLocal()
+    try:
+        since = datetime.now(timezone.utc) - timedelta(hours=1)
+        rows = (
+            db.query(Project.id, Project.tenant_id)
+            .join(ProjectSummary, ProjectSummary.project_id == Project.id)
+            .filter(
+                Project.status == ProjectStatus.active.value,
+                ProjectSummary.updated_at >= since,
+            )
+            .all()
+        )
+    finally:
+        db.close()
+
+    logger.info("Scan Knowledge : %s projet(s) récemment mis à jour", len(rows))
+    for project_id, tenant_id in rows:
+        db2 = SessionLocal()
+        try:
+            KnowledgeService(db2).sync_from_project_summary(tenant_id, project_id)
+        except Exception:
+            logger.exception(
+                "Scan Knowledge : échec pour project_id=%s tenant_id=%s", project_id, tenant_id
+            )
+        finally:
+            db2.close()
+
+
 class WorkerSettings:
     # run_analysis_legacy/run_analysis_saas ne sont pas idempotents : un retry
     # après timeout refait entièrement le fetch IMAP + les résumés LLM au lieu
@@ -854,7 +1398,24 @@ class WorkerSettings:
         # sans filtre sur une grosse boîte peut porter sur plusieurs milliers
         # d'emails. 7200s est un filet de sécurité, pas le temps attendu.
         func(run_domain_discovery, max_tries=1, timeout=7200),
+        # Même rationale de timeout que run_domain_discovery : scan headers-only
+        # sans filtre sur toute la fenêtre.
+        func(run_subject_key_discovery, max_tries=1, timeout=7200),
+        # Rattrapage rétroactif des pièces jointes (Contexte Documents,
+        # domaine #7) : scan RFC822 COMPLET (pas headers-only, il faut le
+        # corps pour les pièces jointes) sur TOUT l'historique déjà en base —
+        # nettement plus lourd par email que run_domain_discovery. max_tries=1 :
+        # un retry rejouerait tout le scan. Limite connue et assumée : sur une
+        # très grosse boîte le job peut ne pas finir dans les 7200s, sans
+        # risque de corruption (chaque Document est commité au fil de l'eau et
+        # dédoublonné, un nouveau lancement reprend sans créer de doublon) —
+        # le découpage multi-jobs est hors périmètre de cette itération.
+        func(run_email_attachment_backfill, max_tries=1, timeout=7200),
         func(run_agenda_refresh_for_tenant, max_tries=1),
+        # Fenêtre bornée côté endpoint (voir api/main.py::recent_emails) : un
+        # scan headers-only reste rapide, pas besoin du timeout étendu de
+        # run_domain_discovery.
+        func(run_recent_emails_legacy, max_tries=1),
     ]
     # Sync planifiée 2x/jour (7h/19h, heure du process worker — cf.
     # project-overview.md "briefing matin/soir") ; max_tries=1 car
@@ -867,6 +1428,10 @@ class WorkerSettings:
     cron_jobs = [
         cron(run_scheduled_sync, hour={7, 19}, minute=0, max_tries=1),
         cron(run_agenda_refresh, hour=agenda_refresh_cron_hours(), minute=0, max_tries=1),
+        # Filet de rattrapage horaire pour le Knowledge Layer (voir
+        # run_knowledge_sync_scan) — le chemin principal est le hook immédiat
+        # dans _run_fasttrack_sync, ceci ne fait que rattraper un échec transitoire.
+        cron(run_knowledge_sync_scan, minute=0, max_tries=1),
     ]
     on_startup = on_startup
     redis_settings = RedisSettings.from_dsn(redis_url())

@@ -1,6 +1,7 @@
 """Configuration et constantes partagées."""
 
 import os
+from pathlib import Path
 
 # Évite les conflits TensorFlow / Keras si transformers charge TF
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
@@ -12,13 +13,16 @@ PERIOD_YESTERDAY = "yesterday"
 PERIOD_3_DAYS = "3"
 PERIOD_7_DAYS = "7"
 PERIOD_11_DAYS = "11"
+PERIOD_30_DAYS = "30"
 # Préréglages longue portée (recherches sur plusieurs mois) — mêmes règles
 # d'arithmétique que les valeurs numériques ci-dessus (period.py::
 # imap_days_back_for_period / get_period_bounds gèrent déjà int(period) - 1
 # de façon générique, aucun changement de logique nécessaire).
 PERIOD_90_DAYS = "90"
 PERIOD_120_DAYS = "120"
+PERIOD_180_DAYS = "180"
 PERIOD_240_DAYS = "240"
+PERIOD_365_DAYS = "365"
 VALID_PERIODS = frozenset(
     {
         PERIOD_TODAY,
@@ -26,9 +30,12 @@ VALID_PERIODS = frozenset(
         PERIOD_3_DAYS,
         PERIOD_7_DAYS,
         PERIOD_11_DAYS,
+        PERIOD_30_DAYS,
         PERIOD_90_DAYS,
         PERIOD_120_DAYS,
+        PERIOD_180_DAYS,
         PERIOD_240_DAYS,
+        PERIOD_365_DAYS,
     }
 )
 
@@ -58,6 +65,39 @@ def llm_timeout_seconds() -> float:
         return val if val > 0 else DEFAULT_LLM_TIMEOUT_SECONDS
     except ValueError:
         return DEFAULT_LLM_TIMEOUT_SECONDS
+
+
+# Timeout dédié au chat interactif (portfolio assistant / agent) — plus
+# généreux que l'ancien budget de 8s : avec un plafond de tokens assez haut
+# pour couvrir le raisonnement interne de Gemini 2.5 (voir
+# CHAT_INTERACTIVE_MAX_OUTPUT_TOKENS ci-dessous), la génération peut
+# légitimement dépasser quelques secondes. Au-delà, l'appelant retombe sur
+# une réponse construite à partir des données déjà disponibles plutôt que de
+# laisser l'utilisateur attendre indéfiniment. Surchargeable via env.
+DEFAULT_CHAT_LLM_TIMEOUT_SECONDS = 25.0
+
+# Plafond de sortie pour le chat interactif. Gemini 2.5 facture son
+# raisonnement interne ("thinking") sur ce même budget de tokens, et le SDK
+# `google.generativeai` installé ici (déprécié) n'expose pas de
+# thinking_config pour le plafonner séparément — un budget trop bas (ex.
+# 500) est donc entièrement consommé par le raisonnement caché, sans qu'il
+# ne reste de tokens pour le texte visible (réponse tronquée dès la première
+# phrase). On aligne sur CHAT_MAX_OUTPUT_TOKENS pour laisser assez de place
+# aux deux.
+CHAT_INTERACTIVE_MAX_OUTPUT_TOKENS = 4096
+
+
+def chat_llm_timeout_seconds() -> float:
+    """Timeout du client LLM pour le chat interactif en secondes (env
+    CHAT_LLM_TIMEOUT_SECONDS, défaut 8)."""
+    raw = (os.environ.get("CHAT_LLM_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_CHAT_LLM_TIMEOUT_SECONDS
+    try:
+        val = float(raw)
+        return val if val > 0 else DEFAULT_CHAT_LLM_TIMEOUT_SECONDS
+    except ValueError:
+        return DEFAULT_CHAT_LLM_TIMEOUT_SECONDS
 
 
 # Timeout socket IMAP (secondes). Sans timeout explicite, un serveur mail lent
@@ -180,18 +220,51 @@ def redis_url() -> str:
 # porte que sur les projets "en attente"/"en rouge" (sous-ensemble bon marché) —
 # heures ouvrées, toutes les 2h. Surchargeable via env (liste d'heures 0-23
 # séparées par des virgules).
-DEFAULT_AGENDA_REFRESH_CRON_HOURS = frozenset({7, 9, 11, 13, 15, 17, 19, 21})
+DEFAULT_AGENDA_REFRESH_CRON_HOURS = {7, 9, 11, 13, 15, 17, 19, 21}
 
 
-def agenda_refresh_cron_hours() -> frozenset:
+def agenda_refresh_cron_hours() -> set:
     """Heures (0-23) auxquelles `run_agenda_refresh` s'exécute (env
-    AGENDA_REFRESH_CRON_HOURS, ex. "7,9,11,13,15,17,19,21", défaut ci-dessus)."""
+    AGENDA_REFRESH_CRON_HOURS, ex. "7,9,11,13,15,17,19,21", défaut ci-dessus).
+
+    Doit rester un `set` (pas un `frozenset`) : arq (`arq/cron.py`) teste
+    `isinstance(v, (set, list, tuple))`, et `frozenset` n'est pas une
+    sous-classe de `set`, ce qui fait planter le worker avec
+    `RuntimeError(v)`.
+    """
     raw = (os.environ.get("AGENDA_REFRESH_CRON_HOURS") or "").strip()
     if not raw:
         return DEFAULT_AGENDA_REFRESH_CRON_HOURS
     try:
-        hours = frozenset(int(part.strip()) for part in raw.split(",") if part.strip())
-        valid = frozenset(h for h in hours if 0 <= h <= 23)
+        hours = {int(part.strip()) for part in raw.split(",") if part.strip()}
+        valid = {h for h in hours if 0 <= h <= 23}
         return valid or DEFAULT_AGENDA_REFRESH_CRON_HOURS
     except ValueError:
         return DEFAULT_AGENDA_REFRESH_CRON_HOURS
+
+
+# Contexte Documents (domaine #7, fichiers locaux uniquement en v1) — voir
+# email_analyzer/document_service.py.
+_SERVICE_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DOCUMENTS_STORAGE_DIR = _SERVICE_ROOT / "data" / "documents"
+DEFAULT_DOCUMENT_MAX_SIZE_BYTES = 20 * 1024 * 1024  # 20 Mo — évite qu'un upload sature disque/mémoire
+
+
+def documents_storage_dir() -> Path:
+    """Répertoire racine de stockage des documents téléversés (env
+    DOCUMENTS_STORAGE_DIR, défaut <service>/data/documents)."""
+    raw = (os.environ.get("DOCUMENTS_STORAGE_DIR") or "").strip()
+    return Path(raw) if raw else DEFAULT_DOCUMENTS_STORAGE_DIR
+
+
+def document_max_size_bytes() -> int:
+    """Taille maximale acceptée pour un document téléversé (env
+    DOCUMENT_MAX_SIZE_BYTES, défaut 20 Mo)."""
+    raw = (os.environ.get("DOCUMENT_MAX_SIZE_BYTES") or "").strip()
+    if not raw:
+        return DEFAULT_DOCUMENT_MAX_SIZE_BYTES
+    try:
+        value = int(raw)
+        return value if value > 0 else DEFAULT_DOCUMENT_MAX_SIZE_BYTES
+    except ValueError:
+        return DEFAULT_DOCUMENT_MAX_SIZE_BYTES

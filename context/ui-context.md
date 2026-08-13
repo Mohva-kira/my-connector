@@ -1,19 +1,29 @@
 # UI Design Tokens & Context
 
 Ce fichier centralise les jetons de design de l'application Web (ReactJS,
-`services/email_analyzer/frontend/`). L'identité visuelle est un thème clair
-et sobre — "bureau", pas "dashboard technique" : fond blanc cassé/gris très
-clair, bleu profond pour les actions/l'IA, et les couleurs vives (vert/
-orange/rouge) réservées aux statuts sémantiques (santé projet, attention,
-urgence critique). Ce choix remplace un thème sombre "Tech/Security" (violet
-électrique + vert cyber) qui a existé plus tôt dans le projet.
+`services/email_analyzer/frontend/`). L'identité visuelle est un thème
+clair et sobre par défaut — "bureau", pas "dashboard technique" : fond
+blanc cassé/gris très clair, bleu profond pour les actions/l'IA, et les
+couleurs vives (vert/orange/rouge) réservées aux statuts sémantiques
+(santé projet, attention, urgence critique). Depuis la refonte
+"chat-first" (Unit 33+, voir `context/progress-tracker.md`), un vrai
+thème sombre existe aussi (bascule utilisateur, voir §1 et §4) — sa
+palette reste dans le même esprit sobre, pas un retour au thème
+"Tech/Security" (violet électrique + vert cyber) qui a existé plus tôt
+dans le projet et qui a été abandonné.
 
 Les noms de jetons ci-dessous sont ceux réellement définis dans
 `services/email_analyzer/frontend/tailwind.config.js` (source de vérité —
 pas de jetons `bg-base`/`ai-surface`/`status-*` distincts de ceux du code :
 ce document décrivait auparavant une palette qui n'a jamais correspondu au
 code réel, voir `context/rfc-email-pipeline-v2.md` §0 pour le même constat
-côté backend).
+côté backend). Depuis Unit 33, chaque jeton Tailwind ne pointe plus vers un
+hex/rgba statique mais vers une variable CSS `--color-<slug>-rgb` (triplet
+"R, G, B", parfois enveloppée d'une opacité fixe pour les halos comme
+`ai-glow`) définie dans `services/email_analyzer/frontend/src/index.css` —
+`:root` pour le clair, `[data-theme="dark"]` pour le sombre. Les noms de
+jetons et leur usage restent identiques dans les deux thèmes ; seule la
+valeur RGB change.
 
 ---
 
@@ -44,8 +54,17 @@ côté backend).
 | **Fast-Track**         | `fasttrack-active`  | `#2563EB`                      | Pulsation d'une carte projet en cours de rafraîchissement.                        |
 |                        | `fasttrack-bg`      | `rgba(37, 99, 235, 0.08)`      | Fond associé à `fasttrack-active`.                                                 |
 
-Le thème est unique (pas de variante sombre) : aucune classe Tailwind `dark:`
-n'est utilisée dans le code, tout passe par ces jetons nommés.
+Les valeurs HEX de la colonne ci-dessus sont celles du **thème clair**
+(`:root` dans `index.css`) ; le tableau ne duplique pas la palette sombre
+pour rester lisible — voir `[data-theme="dark"]` dans `index.css` pour les
+valeurs exactes (fond navy/indigo profond `#0B0F1A`/`#131A2C`, texte clair
+`#E8EAF0`, accent/IA éclaircis vers un bleu/indigo plus lumineux `#3B82F6`/
+`#60A5FA`). Aucune classe Tailwind `dark:` n'est utilisée dans le code : le
+basculement passe entièrement par l'attribut `data-theme` sur `<html>`
+(posé par `theme/ThemeProvider.tsx`) et les variables CSS ci-dessus — les
+composants n'ont donc rien à connaître du thème actif.
+`priority-*`/`danger` restent dans la même famille de teinte (rouge) dans
+les deux thèmes, réservés à l'urgence réelle (voir §4).
 
 ---
 
@@ -78,12 +97,24 @@ Définie dans `tailwind.config.js::theme.extend.borderRadius` :
 
 ## 4. Principes de mise en page
 
-Hérités de la vision produit "assistante proactive" (voir
-`context/project-overview.md`) :
+Hérités de la vision produit "assistante proactive", puis de la refonte
+"chat-first" (voir `context/project-overview.md`) :
 
 - Beaucoup d'espace blanc, cartes peu chargées, une information par bloc.
 - La sidebar (`components/AppShell.tsx`) est la seule navigation persistante :
-  Brief / Projets / Agenda / Actions / Assistant / Paramètres, plus une barre
-  de recherche en langage naturel en haut.
+  Accueil / Projets / Agenda / Actions / Paramètres en mode SaaS (item
+  "Assistant" retiré — l'accueil chat-first EST l'assistant portefeuille
+  persistant, plus besoin d'une page séparée), Accueil seul en mode legacy
+  (.env, sans DB — les autres routes redirigent vers `/` sans SaaS). Une
+  barre de recherche en langage naturel en haut (SaaS uniquement) envoie
+  vers `/?q=…`, lu par l'accueil au montage. Le pied de la sidebar porte le
+  bouton de bascule clair/sombre (`components/ThemeToggle.tsx`).
+- L'accueil (`pages/ChatHome.tsx`, routé sur `/` dans les deux modes) est
+  chat-first : salutation centrée + avatar "orbe" en dégradé `ai-primary`→
+  `ai-secondary`, champ de saisie unique, cartes d'action rapide, puis un
+  fil de conversation (`components/chat/ChatThread.tsx`) une fois le
+  premier message envoyé. En mode legacy, les résultats d'analyse
+  apparaissent comme des cartes inline dans le fil
+  (`components/chat/AnalysisCard.tsx`) plutôt qu'un panneau séparé.
 - Le rouge (`danger`) est réservé aux urgences réelles — ne jamais l'utiliser
-  pour un état neutre ou informatif.
+  pour un état neutre ou informatif, dans les deux thèmes.

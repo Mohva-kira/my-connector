@@ -46,6 +46,14 @@ _KEY_PREFIX = "myconnector:job:"
 _AUTO_SYNC_KEY_PREFIX = "myconnector:auto_sync:"
 _AUTO_SYNC_TTL_SECONDS = 24 * 60 * 60
 
+# Index par tenant des jobs actuellement en cours (pending/running), pour
+# l'indicateur "analyse en cours" du frontend (AppShell) — qu'un job soit
+# déclenché manuellement, par le cron ou par l'auto-sync au login, il vit
+# ici jusqu'à son passage en done/error. Un SET Redis n'a pas de TTL par
+# membre : on nettoie donc les entrées obsolètes à la lecture
+# (`list_active_jobs`) plutôt que de compter sur une expiration automatique.
+_ACTIVE_JOBS_KEY_PREFIX = "myconnector:active_jobs:"
+
 _redis: Optional["redis_lib.Redis"] = None
 
 
@@ -77,6 +85,10 @@ def _update(job_id: str, **fields: Any) -> None:
     _write(job_id, state)
 
 
+def _active_jobs_key(tenant_id: str) -> str:
+    return f"{_ACTIVE_JOBS_KEY_PREFIX}{tenant_id}"
+
+
 def create_job(tenant_id: Optional[str] = None) -> str:
     """Crée un job en attente dans Redis et retourne son identifiant."""
     job_id = uuid.uuid4().hex
@@ -92,6 +104,8 @@ def create_job(tenant_id: Optional[str] = None) -> str:
             "partial": None,
         },
     )
+    if tenant_id:
+        _client().sadd(_active_jobs_key(tenant_id), job_id)
     return job_id
 
 
@@ -130,6 +144,11 @@ def set_status(
     Appelé depuis le worker arq (``analysis_tasks.py``) au fil de l'exécution.
     """
     _update(job_id, status=status, result=result, error=error)
+    if status in (STATUS_DONE, STATUS_ERROR):
+        state = _read(job_id)
+        tenant_id = state.get("tenant_id") if state else None
+        if tenant_id:
+            _client().srem(_active_jobs_key(tenant_id), job_id)
 
 
 def report_progress(
@@ -147,6 +166,22 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Retourne l'état du job (status/result/error/tenant_id/processed/total/partial)
     ou ``None`` si absent/expiré."""
     return _read(job_id)
+
+
+def list_active_jobs(tenant_id: str) -> list:
+    """Renvoie les ``job_id`` encore pending/running pour ce tenant, pour
+    l'indicateur "analyse en cours" du frontend. Purge au passage les
+    entrées obsolètes (job terminé sans être retiré, ou expiré de Redis)."""
+    key = _active_jobs_key(tenant_id)
+    job_ids = list(_client().smembers(key))
+    active: list = []
+    for job_id in job_ids:
+        state = _read(job_id)
+        if state is None or state.get("status") in (STATUS_DONE, STATUS_ERROR):
+            _client().srem(key, job_id)
+            continue
+        active.append(job_id)
+    return active
 
 
 def claim_daily_auto_sync(tenant_id: str) -> bool:

@@ -4,9 +4,350 @@ Update this file after every meaningful implementation change.
 
 ## Current Phase
 
-- Assistant-first frontend/backend refonte (Brief, sidebar, portfolio
-  assistant) — see Unit 24. Legacy per-project analysis tool remains for
-  non-SaaS (`.env`-only) users.
+- **Classification par sujet (tickets bancaires) + enrichissement projet
+  (Unit 63, 2026-07-28)** — demande utilisateur : les mailboxes gérées sont
+  des boîtes de support pour des clients banques (BDM Togo, BMS Mali, Versus
+  Bank...) dont beaucoup de sujets portent un motif de ticket entre crochets
+  (`[Banque_Plateforme_Numéro]`, ex. `[BDM TOGO_BDM MOBILE_12002]`,
+  séparateurs `_`/`-` mélangés, aucun format fermé) signalant une réclamation
+  client, et d'autres sujets thématiques sans crochets nécessitant une
+  correspondance plus tolérante que la sous-chaîne exacte. Cinq décisions
+  actées avec l'utilisateur avant implémentation : (1) une clé-crochet
+  détectée doit d'abord tenter un match automatique sur un projet existant,
+  sinon proposer à l'utilisateur de créer un nouveau projet OU de rattacher
+  manuellement à un projet existant ; (2) nouveau tag "Réclamation" déclenché
+  uniquement par la détection du motif crochet (indépendant des mots-clés du
+  corps/tag "Client" existant) ; (3) format générique, pas de liste fermée de
+  banques/plateformes ; (4) détection "avancée" (floue) pour les sujets
+  thématiques sans crochets ; (5) enrichir le contenu projet pour que le chat
+  portefeuille raisonne sur les tickets (volumes, thèmes récurrents) comme un
+  assistant expérimenté. Contrainte de coût conservée : aucun nouvel appel
+  LLM par email, tout le déterministe est en regex/SQL.
+  - `email_analyzer/subject_tickets.py` (nouveau) — `parse_subject_ticket_key`,
+    regex générique `[libellé][_-][ticket]` (≥3 chiffres), tolère séparateurs
+    mixtes et préfixes Re:/Fwd:/Tr: répétés. Module pur, testé à la main sur
+    les 3 exemples fournis + cas limites (`[v2]`, `[1]` correctement ignorés).
+  - `email_analyzer/classification.py` — `ProjectRules.subject_keys` (7e clé
+    `rules_matrix`) ; nouveau signal `subject_ticket_key` (poids 45, palier
+    `project_name`) ; tag `"Réclamation"` ajouté dans `derive_tags`
+    indépendamment de `TAG_KEYWORDS` ; `fuzzy_similarity` (Jaccard de tokens +
+    containment + `difflib.SequenceMatcher`, stdlib pur) et signal additif
+    `fuzzy_theme` (poids 15, ne se déclenche que si aucun `keyword` exact n'a
+    matché) pour les sujets thématiques sans motif crochet.
+  - Migration `alembic/versions/015_subject_tickets.py` — `emails.ticket_label`/
+    `ticket_number` (colonnes dédiées, pas JSONB : l'énumération/comptage par
+    projet a besoin d'un `GROUP BY` SQL bon marché) + index
+    `(project_id, ticket_label)`. `db/models.py::Email` mis à jour.
+  - `analysis_tasks.py::_run_fasttrack_sync` persiste `ticket_label`/
+    `ticket_number` par email. `project_mail.py::_uid_search_narrow_ids`
+    accepte désormais `rules_map` et inclut les `subject_keys` connus dans le
+    pré-filtre IMAP côté serveur (sans ça, un email dont seule la clé de sujet
+    matche aurait été exclu avant même `score_project_relevance`).
+  - Découverte de tickets (mirroring exact de la découverte de domaines,
+    `_run_domain_discovery_sync`) : `analyzer.py::discover_subject_ticket_keys`
+    (scan headers-only sans filtre) → `analysis_tasks.py::
+    _existing_subject_key_project_map`/`_run_subject_key_discovery_sync`
+    (annotation `existing_project_id` si match exact/fuzzy ≥0.8,
+    `suggested_project_id` si fuzzy ≥0.45, sinon libre) →
+    `run_subject_key_discovery` (arq, timeout 7200s) →
+    `POST /api/brief/discover-tickets` (`api/routers/brief.py`) → même
+    polling générique `GET /api/analyze/{job_id}`.
+  - `api/routers/projects.py` — `subject_keys` ajouté à
+    `_RULES_MATRIX_LIST_KEYS` (le merge union existant le gère gratuitement,
+    y compris via `/merge`) ; nouvel endpoint
+    `POST /api/projects/{id}/attach-subject-key` (lecture-fusion-écriture,
+    rattachement manuel choisi par l'utilisateur) ; `EmailOut` expose
+    `ticket_label`/`ticket_number`.
+  - Frontend : `discoverTicketsApi.ts` + `DiscoverTicketsModal.tsx` (sibling
+    de `DiscoverProjectsModal.tsx`, pas un flag — ajoute un sélecteur
+    "Rattacher à un projet existant" que l'original n'a pas), bouton
+    "Détecter les tickets" dans `ChatHome.tsx` à côté d'"Analyser mes emails".
+  - Enrichissement chat : `llm.py::ProjectSummaryLLM.recurring_issues`
+    (nouveau, `TicketPatternItem` — thèmes récurrents qualitatifs, ≥2
+    occurrences, complémentaire à l'énumération déterministe) + instruction
+    ajoutée à `_STRUCTURED_EXECUTIVE_SYSTEM_PROMPT`. Nouvel outil à la demande
+    `tools/list_tickets_tool.py` (`GROUP BY project_id, ticket_label`, câblé
+    dans `tool_executor.py` : `TOOL_SPECS`, `_tool_classes`,
+    `_PROJECT_NAME_TOOLS`, `_run_tool`) ; surfacé aussi dans
+    `summarize_project_tool.py`. Signal toujours actif (sans appel outil) :
+    `context_service.py::_open_ticket_counts` (une requête groupée, pas de
+    N+1) → `open_ticket_count` par projet → rendu dans
+    `llm.py::build_portfolio_context` ("Tickets/réclamations détectés : N").
+  - Vérifié end-to-end contre Postgres réel (tenant/projet/emails jetables,
+    nettoyés après coup) : `list_tickets` regroupe correctement 3 emails en 2
+    tickets distincts, `score_project_relevance` atteint 100 sur le motif
+    crochet + `subject_keys` appris, tag `Réclamation` présent,
+    `open_ticket_count` correct. `tsc --noEmit` et la phase de transformation
+    Vite (480 modules) passent sans erreur (le `vite build` complet échoue
+    sur un `dist/` préexistant appartenant à `root`, sans rapport avec ce
+    changement — non corrigé, permissions hors périmètre).
+- **Unification Agent/Conversation : tool-calling natif LLM + streaming SSE
+  (Unit 62, 2026-07-27)** — demande utilisateur explicite : un seul chat,
+  aussi fluide qu'un ChatGPT/Gemini, basé "sur les données persistées
+  d'abord, puis sur la base de données". Renverse explicitement la
+  décision Unit 57 ("coexistence durable, pas de fusion tant qu'aucun
+  signal concret ne la justifie") — le signal, ici, est la demande produit
+  directe. Quatre décisions actées avec l'utilisateur avant implémentation :
+  (1) streaming réel token par token (SSE), pas l'ancien effet
+  machine-à-écrire simulé ; (2) fallback séquentiel piloté par le LLM
+  (contexte résumé `ContextService` d'abord, tools sur données brutes
+  seulement si insuffisant), pas une double passe systématique ; (3)
+  tool-calling natif OpenAI/Gemini remplace le `Planner` déterministe par
+  mots-clés — le modèle choisit lui-même ses outils ; (4) `/api/agent/query`
+  et tout `email_analyzer/agent/` retirés une fois absorbés, legacy
+  `/api/chat` (IMAP, sans DB) non touché.
+  - `email_analyzer/llm.py` : nouvelles `stream_portfolio_assistant_chat_
+    openai/_gemini` (générateurs, jamais d'exception — événements
+    `token`/`tool_calls`/`done`/`error`), `build_openai_tool_specs`,
+    `_gemini_tools_param`/`_gemini_history_with_tools`/
+    `_gemini_last_turn_payload`. Suppression des fonctions devenues mortes
+    (confirmé par grep, aucun autre appelant) : `portfolio_assistant_chat_
+    openai/_gemini` (non-streaming), `build_agent_context`,
+    `build_agent_chat_system_prompt`. `project_assistant_chat_*` (legacy
+    `/api/chat`) et `_normalize_chat_messages`/`_gemini_history_from_
+    messages`/`_gemini_history_with_embedded_system` (encore utilisés par
+    le legacy) non touchés. Paragraphe ajouté à
+    `build_portfolio_chat_system_prompt` explicitant au modèle la politique
+    de fallback séquentiel (décision 2).
+  - `email_analyzer/services/tool_executor.py` (nouveau) — successeur de
+    l'ancien `agent/executor.py` : même Session SQLAlchemy fraîche par
+    appel (thread-safety), même exécution parallèle
+    (`ThreadPoolExecutor`), même isolation d'erreur par outil. Nouveau :
+    `TOOL_SPECS` (schémas JSON exposés au LLM) et
+    `_resolve_project_id` (correspondance exacte → sous-chaîne → floue via
+    `difflib`, stdlib, pas de nouvelle dépendance) qui débloque enfin
+    `summarize_project`/`search_emails`/`draft_reply` (exigent un
+    `project_id` que l'ancien `Planner` ne pouvait jamais résoudre depuis du
+    texte libre) via un `project_name` fourni par le LLM. Corrige au passage
+    un bug constaté : `list_meetings` n'était jamais réellement scopé à un
+    projet dans l'ancien `Executor` (catch-all sans `project_id`) malgré un
+    paramètre optionnel déjà supporté par le tool.
+  - `email_analyzer/services/conversation_service.py` : `send_message`
+    remplacé par `stream_message` (générateur) — boucle agentique bornée
+    (`_MAX_TOOL_ROUNDS = 4`) : appelle le LLM avec `tools=TOOL_SPECS`,
+    réémet les tokens en flux, exécute les `tool_calls` demandés via
+    `ToolExecutor`, reboucle jusqu'à une réponse finale. Fallback timeout
+    inchangé (`ContextService.quick_fallback_summary`) ; ajout d'un cas non
+    prévu par l'ancien chat tout-ou-rien : si une erreur non-timeout
+    survient après que des tokens ont déjà été streamés (visibles par
+    l'utilisateur), ce texte partiel est conservé et persisté (avec mention
+    d'interruption) plutôt que perdu silencieusement. Persistance
+    (`ConversationRepository.append_turn`) inchangée : toujours un seul
+    tour utilisateur + un tour assistant final, aucune nouvelle table (pas
+    de `ToolExecution`/audit — la transparence des appels d'outils reste un
+    signal SSE éphémère).
+  - `api/routers/assistant.py` + `api/sse.py` (nouveau, `format_sse_event`)
+    — `POST /conversations/{id}/chat` retourne un `StreamingResponse`
+    (`text/event-stream`) au lieu d'un JSON unique. Point d'attention géré
+    explicitement : le générateur est amorcé (`next()`) dans le corps
+    synchrone de la route *avant* d'être passé à `StreamingResponse`, pour
+    que la validation immédiate (message vide, conversation introuvable,
+    fournisseur non configuré) lève encore une vraie `HTTPException` avec
+    le bon status code — sinon l'erreur surviendrait après l'envoi des
+    entêtes HTTP 200.
+  - Suppression : `api/routers/agent.py`, tout `email_analyzer/agent/`
+    (`agent.py`, `planner.py`, `executor.py`, `response_builder.py`) ;
+    `api/main.py` : retrait de l'import et de
+    `app.include_router(agent_router.router)`.
+  - Frontend : `assistantApi.ts::sendChatMessage` remplacé par
+    `streamChatMessage` (fetch + `ReadableStream` manuel, pas d'EventSource
+    — ne supporte ni POST ni Authorization). `useSaasHomeChat.ts::send` :
+    placeholder assistant créé au premier token (pas immédiatement),
+    rempli de façon incrémentale ; indicateur "Recherche en cours…"
+    réutilisant le variant `kind:"status"` déjà existant (compteur
+    d'appels d'outils en cours, pas un nouveau variant). `ChatThread.tsx` :
+    suppression de `TypingText` (effet machine-à-écrire simulé par
+    `setInterval` sur un texte déjà complet) — rendu direct du contenu
+    puisque le streaming est désormais réel.
+  - Docs mises à jour dans la même unité (`ai-workflow-rules.md` §5) :
+    `architecture.md` §2 (arbre de fichiers), §7 (Agent/Tools réécrit), §8
+    invariant 4 (nuance streaming) ; `project-overview.md` piliers 1/4/5,
+    roadmap Phase 3, sections Scope/Hors-scope ; `code-standards.md` §3
+    (nouvelle convention SSE).
+  - Vérifié : chaque fichier Python compile (`py_compile`) et s'importe
+    réellement (`import api.main` charge les 27 routes sans erreur, y
+    compris toute la chaîne `llm.py`→`conversation_service.py`→
+    `tool_executor.py`) ; grep de contrôle post-suppression sans résidu
+    (`email_analyzer.agent`, anciennes fonctions `llm.py`) ; `npx tsc
+    --noEmit` sans erreur ; `vite build` transforme 75 modules (échec
+    ensuite limité au nettoyage `dist/` préexistant appartenant à `root`,
+    problème d'environnement déjà documenté, sans rapport avec le code).
+  - Non vérifié (pas d'environnement Postgres/clé LLM/navigateur disponible
+    dans cette session) : appel réel au tool-calling OpenAI/Gemini de bout
+    en bout (schéma exact des deltas `tool_calls` en streaming, format
+    `function_call`/`function_response` Gemini), résolution `project_name`
+    contre de vraies données, rendu SSE réel dans le navigateur (tokens
+    progressifs, indicateur d'outil, historique après rechargement) —
+    recommandé à l'utilisateur avant mise en production, avec au moins un
+    provider (OpenAI ou Gemini) configuré et une vraie base Postgres.
+
+- **Multi-conversation assistant : bouton "nouvelle conversation" + panneau
+  d'historique (Unit 61, 2026-07-19)** — l'assistant portefeuille n'avait
+  jusqu'ici qu'un seul historique continu par tenant+utilisateur (aucune
+  notion de conversation séparée, gap documenté dans project-overview.md).
+  Ajout d'une table `conversations` (migration `014_conversations.py`,
+  backfill : chaque couple tenant/utilisateur existant récupère une
+  "Conversation 1" couvrant tout son historique — vérifié sur la base
+  réelle : 34 messages d'un seul couple correctement rattachés). API :
+  `GET/POST /api/assistant/conversations`,
+  `GET /api/assistant/conversations/{id}/messages`,
+  `POST /api/assistant/conversations/{id}/chat` remplacent (coupure nette,
+  pas de double API) `GET /api/assistant/messages`/`POST /api/assistant/chat`.
+  Titre auto (premier message utilisateur tronqué, pas de renommage manuel
+  ni de LLM d'auto-titrage — décision minimale assumée). Frontend :
+  `useSaasHomeChat.ts` gère `conversations`/`activeConversationId`/
+  `newConversation()`/`switchConversation()` ; nouveau panneau
+  `ConversationHistoryPanel.tsx` (slide-over, même convention que
+  `DiscoverProjectsModal.tsx`) + boutons dans `ChatHome.tsx` (mode SaaS
+  uniquement, mode legacy inchangé — pas d'historique DB en legacy).
+  `api/routers/memory.py::extract_memories` adapté (nouvelle méthode
+  `ConversationService.list_history_for_active_conversation`, sur la
+  conversation la plus récemment active, pour préserver le comportement
+  d'extraction existant). Vérifié bout-en-bout sur la base réelle : migration
+  + backfill, `list_conversations`/`create_conversation`/garde 404
+  cross-tenant via appels directs au service, puis les quatre endpoints
+  HTTP réels (create → chat avec vrai appel Gemini → titre auto-défini →
+  liste réordonnée par `updated_at` → 404 sur id étranger). `npx tsc
+  --noEmit` sans erreur. Non vérifié : passage réel dans le navigateur
+  (même contrainte d'environnement que les entrées précédentes).
+- **Chat rapide + analyse auto en arrière-plan avec indicateur (Unit 60,
+  2026-07-19)** — trois demandes produit : (1) le chat ne doit plus
+  déclencher d'opération lourde de type analyse, il répond selon les
+  données déjà disponibles ; (2) l'analyse en arrière-plan (déjà
+  automatique — cron + auto-sync login) doit avoir un indicateur visible ;
+  (3) le chat doit répondre en moins de 3s. Voir l'entrée Unit 60
+  ci-dessous, notamment la limite assumée sur le point (3) : le budget de
+  3s est garanti côté temps de réponse utilisateur (timeout serré +
+  repli sur les données disponibles), pas comme une promesse sur la
+  latence réelle des fournisseurs LLM tiers.
+- **Pivot exécution — DraftReplyTool (Unit 59, 2026-07-19)** — dernier
+  tool "core" listé par le plan de pivot, complété. Réutilise le moteur de
+  templates legacy déterministe (`templates.py::generate_response_draft`,
+  aucune réécriture) via un adaptateur `ProjectSummary`→dict legacy ;
+  exposé via `POST /api/projects/{id}/draft-reply` (le legacy
+  `POST /api/draft` reste inchangé, toujours utilisé en mode IMAP sans
+  tenant). Vérifié bout-en-bout (déterministe, pas de LLM) : sélection
+  correcte du template alerte/routine selon le niveau de risque persisté.
+  Voir l'entrée Unit 59 ci-dessous.
+- **Rattrapage documentaire : architecture.md + code-standards.md (Unit
+  58, 2026-07-19)** — `architecture.md` §2/§3/§7 étaient devenus factuellement
+  faux après Units 45-57 (affirmaient encore que `Memory`/`Contact`/
+  `Organization`/`Objective` n'existaient pas, alors qu'ils avaient été
+  créés) : corrigé. `code-standards.md` intégralement réécrit (décrivait
+  Celery/React Native/mypy 100%/couverture 80%/Bandit, aucun réel dans ce
+  dépôt) pour décrire les conventions réellement suivies depuis le pivot.
+  Voir l'entrée Unit 58 ci-dessous.
+- **Pivot exécution — Décision Agent/chat + ListMeetingsTool (Unit 57,
+  2026-07-19)** — question Agent vs. chat portefeuille (ouverte depuis Unit
+  51) tranchée durablement : coexistence, pas de fusion (voir raisonnement
+  détaillé ci-dessous). `ListMeetingsTool` (dernier tool "core" listé par
+  le plan) créé et branché dans le Planner (déclenchement conditionnel sur
+  motifs "réunion"/"rendez-vous"/"agenda", même mécanique que
+  `find_contact`). Vérifié avec un vrai appel Gemini. Voir l'entrée Unit 57
+  ci-dessous.
+- **Pivot exécution — UI Objectifs & Timeline (Unit 56, 2026-07-19)** —
+  première surface frontend pour Objectives (Phase 11) et Timeline (Phase
+  12), toutes deux fonctionnelles côté backend depuis Units 54-55 mais
+  jamais appelées depuis `frontend/src` avant cette unité (même situation
+  que Memory/Knowledge avant Unit 53). Page `/objectives` : création
+  d'objectif, jalons (ajout/complétion), bascule bloqué/débloqué, flux
+  timeline en lecture seule. Voir l'entrée Unit 56 ci-dessous.
+- **Pivot exécution — Phase 12 (Timeline unifiée) (Unit 55, 2026-07-17)**
+  — `GET /api/timeline` fusionnait déjà emails + résumés ; étendu pour
+  inclure aussi les actions suggérées et les rendez-vous d'agenda
+  (`Appointment`), organisé en `TimelineService`/`TimelineRepository`
+  (même geste qu'Unit 52 pour le Brief). Toutes les phases du plan de
+  pivot (1 à 12) ont maintenant au moins une fondation implémentée. Voir
+  l'entrée Unit 55 ci-dessous.
+- **Pivot exécution — Phase 11 (Objectives, fondation) (Unit 54,
+  2026-07-17)** — nouvelles tables `objectives`/`milestones`
+  (`ObjectiveService`/`ObjectiveRepository`), optionnellement rattachées à
+  un `Project` existant, progression calculée depuis les jalons (pas de
+  table "Progress" séparée), `blocking_reason` en simple colonne (pas de
+  table "Blocking Issue" séparée). CRUD complet
+  (`POST/GET/PATCH /api/objectives`, jalons). Vérifié bout-en-bout sur la
+  vraie base Postgres. Pas encore d'UI frontend. Voir l'entrée Unit 54
+  ci-dessous.
+- **Pivot exécution — Planner v2 (query-aware) + première UI Memory/Knowledge
+  (Unit 53, 2026-07-17)** — `Planner.plan(query)` (Phase 9) ne retourne plus
+  un plan fixe identique pour toute question : `search_projects`/
+  `search_memory` restent toujours inclus, `find_contact` devient
+  conditionnel (motifs "contact"/"qui est"/"coordonnées"/etc.) ;
+  `Executor.execute` accepte désormais `query` et en dérive un mot-clé
+  déterministe (premier mot capitalisé après le premier mot de la phrase —
+  pas de NLP) transmis à `search_projects`/`search_memory`/`find_contact`
+  pour filtrer réellement leurs résultats plutôt que de toujours lister
+  tout le tenant. Décision utilisateur explicite en amont (question posée
+  en mode plan) : continuer la suite du pivot exécutif plutôt que
+  `evolution-plan.md` (V2, pgvector/quotas) ou la numérotation de
+  `project-overview.md`. Décision explicite de ne **pas** brancher `POST
+  /api/agent/query` dans le frontend cette fois (le chat portefeuille
+  injecte déjà Projects+Memory+Knowledge via `ContextService` depuis Unit
+  48 — donner une UI séparée à l'Agent aurait dupliqué une capacité sans
+  l'améliorer tant que son plan était fixe). À la place : première UI pour
+  Memory (Phase 5) et Knowledge (Phase 6), toutes deux vérifiées
+  fonctionnelles côté backend depuis leur unité de fondation mais jamais
+  appelées depuis `frontend/src` avant cette unité (confirmé par
+  exploration : aucune occurrence de `/api/memory`/`/api/knowledge` dans le
+  frontend). Voir l'entrée Unit 53 ci-dessous.
+- **Pivot exécution — Phase 10 (Daily Brief, extraction) (Unit 52,
+  2026-07-17)** — `GET /api/brief` existait déjà (fonctionnel) mais avec
+  toute sa logique inline dans le routeur ; extraite vers
+  `BriefService`/`BriefRepository`, comportement inchangé (vérifié
+  bout-en-bout, compteurs identiques à ceux seedés). Voir l'entrée Unit 52
+  ci-dessous.
+- **Pivot exécution — Phase 9 (AI Agent, fondation) (Unit 51, 2026-07-17)**
+  — `email_analyzer/agent/` (Planner/Executor/ResponseBuilder, plan fixe et
+  déterministe, pas de sélection d'outils par le LLM), nouvel endpoint
+  `POST /api/agent/query`, séparé de `/api/assistant/chat` (ne le remplace
+  pas). Vérifié bout-en-bout avec un vrai appel Gemini. Voir l'entrée Unit
+  51 ci-dessous.
+- **Pivot exécution — Phase 8 (Tool Architecture, fondation) (Unit 50,
+  2026-07-17)** — package `email_analyzer/tools/` : 5 tools en lecture
+  seule (`SearchProjectsTool`, `SummarizeProjectTool`, `SearchEmailsTool`,
+  `SearchMemoryTool`, `FindContactTool`), chacun une enveloppe fine autour
+  d'un service/requête déjà existant. Pas encore appelés par un agent (Phase
+  9) ni exposés via l'API. Voir l'entrée Unit 50 ci-dessous.
+- **Vérification bout-en-bout réelle des Units 45-48 (Unit 49, 2026-07-17)**
+  — migrations 011/012 appliquées sur la vraie base Postgres locale
+  (`connector`), pipeline complet exercé avec de vrais appels Gemini
+  (extraction mémoire + chat portefeuille) via l'app FastAPI réelle
+  (`TestClient`). Tout fonctionne, y compris l'effet observable de la
+  mémoire sur une vraie réponse LLM. Voir l'entrée Unit 49 ci-dessous.
+- **Pivot exécution — Phase 7 (Context Engine, fondation) (Unit 48,
+  2026-07-17)** — nouveau `ContextService` qui assemble le prompt système du
+  chat portefeuille à partir de Projects + Memory (Unit 46) + Knowledge
+  (Unit 47) ; `ConversationService` ne construit plus son contexte lui-même.
+  Première fois que Memory/Knowledge influencent réellement une réponse de
+  l'assistant. Voir l'entrée Unit 48 ci-dessous.
+- **Pivot exécution — Phase 6 (Knowledge Layer, fondation) (Unit 47,
+  2026-07-17)** — nouvelles tables `organizations`/`contacts`/
+  `project_contact_links` + `KnowledgeService`/`KnowledgeRepository`,
+  alimentées sans nouvel appel LLM (relit `ProjectSummary.structured_content`
+  déjà produit par le Fast-Track), endpoints `GET /api/knowledge/contacts`,
+  `GET /api/knowledge/organizations`, `POST /api/knowledge/projects/{id}/sync`.
+  Voir l'entrée Unit 47 ci-dessous.
+- **Pivot exécution — Phase 5 (Memory Engine, fondation) (Unit 46,
+  2026-07-17)** — nouvelle table `memories` + `MemoryService`/
+  `MemoryRepository`/extraction LLM structurée, endpoints
+  `GET/DELETE /api/memory`, `POST /api/memory/extract`. Pas encore branché
+  automatiquement dans le flux de chat. Voir l'entrée Unit 46 ci-dessous.
+- **Pivot exécution — Phase 4 (Conversation layer, fondation) (Unit 45,
+  2026-07-17)** — première brique de code du pivot stratégique (Unit 44) :
+  extraction de la logique du chat portefeuille (`api/routers/assistant.py`)
+  vers `ConversationService`/`ConversationRepository`, sans nouvelle table
+  ni changement de comportement. Voir l'entrée Unit 45 ci-dessous.
+- **Pivot stratégique documentaire : Email Assistant → Personal Executive
+  AI Assistant (Unit 44, 2026-07-17)** — `context/project-overview.md` et
+  `context/architecture.md` réécrits pour refléter la nouvelle vision long
+  terme (Memory Engine, Knowledge Graph, Context Engine, Agent/Tools),
+  clairement distinguée de l'implémentation actuelle. Voir l'entrée Unit 44
+  ci-dessous.
+- Refonte "chat-first" de l'accueil, unifiée legacy + SaaS (Units 33-42,
+  2026-07-16) — voir Unit 24 pour la phase précédente ("assistante
+  proactive", Brief séparé) qu'elle remplace. `pages/ChatHome.tsx` est
+  désormais l'unique accueil (`/`) dans les deux modes ; thème clair/sombre
+  réel ajouté.
 
 ## Current Goal
 
@@ -2199,6 +2540,1734 @@ Update this file after every meaningful implementation change.
     "Analyser" du Brief pour voir les badges "Déjà suivi" et le bouton de
     confirmation à deux compteurs.
 
+- **Unit 33 — Jetons de couleur convertis en variables CSS (préalable au
+  thème sombre)** (2026-07-16) :
+  - Contexte : refonte de l'accueil en interface "chat-first" demandée par
+    l'utilisateur (voir plan `refait-le-design-de-lucky-comet`), avec un
+    vrai toggle clair/sombre global. `tailwind.config.js` définissait les
+    ~20 jetons de couleur en hex/rgba statiques — aucune variable CSS,
+    aucune variante `dark:`, confirmé par exploration (`context/ui-context.md`
+    affirmait explicitement "pas de mode sombre").
+  - `frontend/tailwind.config.js` : chaque jeton référence désormais une
+    variable CSS `--color-<slug>-rgb` (triplet "R, G, B") via un helper
+    `withOpacity(variableName, defaultOpacity)` qui reproduit le mécanisme
+    natif de Tailwind pour les modificateurs d'opacité (`bg-danger/10`,
+    etc.) — impossible avec un simple `var(--x)` puisque Tailwind ne peut
+    pas réécrire l'alpha d'une couleur déjà résolue par le navigateur.
+    Mêmes noms de jetons qu'avant → zéro changement dans les composants
+    pour ce refactor seul.
+  - Piège rencontré et corrigé : pour `ai-glow`/`accent-soft`/`fasttrack-bg`
+    (halos toujours semi-transparents par défaut, ex. `bg-ai-glow` seul
+    doit valoir 0.08 d'opacité), Tailwind injecte automatiquement sa
+    propre variable d'opacité (`--tw-bg-opacity`, repart de `1`) dès
+    qu'une couleur est une fonction — `opacityValue` n'est donc jamais
+    `undefined`, le `defaultOpacity` de `withOpacity` ne se déclenchait
+    jamais (vérifié en inspectant le CSS généré : `bg-ai-glow` sortait à
+    opacité 1 au lieu de 0.08). Corrigé en sortant ces 3 jetons du helper
+    et en les définissant comme chaînes statiques
+    `rgba(var(--color-x-rgb), 0.08)` — un seul usage avec modificateur
+    existait dans tout le repo (`bg-ai-glow/40` dans
+    `ConversationalAssistant.tsx`, bandeau "Réponse rapide"), changé en
+    valeur arbitraire `bg-[rgba(var(--color-ai-glow-rgb),0.4)]` pour
+    préserver l'opacité voulue.
+  - `frontend/src/index.css` : blocs `:root` (palette claire actuelle,
+    portage à l'identique) et `[data-theme="dark"]` (nouvelle palette
+    sombre navy/indigo inspirée de l'image de référence fournie par
+    l'utilisateur — fond `#0B0F1A`/`#131A2C`, texte clair, accent/ai
+    éclaircis vers un bleu/indigo plus lumineux) définissant les 24
+    variables `--color-*-rgb`. `danger`/`priority-*` restent dans la même
+    famille de teinte (rouge) dans les deux thèmes — règle
+    `ui-context.md` (réservé à l'urgence réelle) préservée.
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` (vers un
+    `--outDir` hors du dépôt pour contourner l'`EACCES` pré-existant sur
+    `dist/`, déjà documenté dans les unités précédentes) transforme les 59
+    modules sans erreur ; inspection du CSS généré confirme
+    `.bg-danger\/10{background-color:rgba(var(--color-danger-rgb),.1)}`
+    (modificateurs toujours fonctionnels), `.bg-ai-glow{background-color:
+    rgba(var(--color-ai-glow-rgb),.08)}` (défaut correct après correctif),
+    et présence des deux blocs `:root`/`[data-theme=dark]` avec les bonnes
+    valeurs.
+  - Non vérifié : rendu visuel réel en navigateur (pas de Chromium
+    fonctionnel dans cette session, comme les unités précédentes) — le
+    theme toggle lui-même arrive à l'Unit 34, `[data-theme="dark"]` n'est
+    encore posé sur aucun élément.
+
+- **Unit 34 — `ThemeProvider`/`ThemeToggle` + montage global** (2026-07-16) :
+  - Suite de l'Unit 33 (tokens couleur en variables CSS). Nouveau
+    `frontend/src/theme/ThemeProvider.tsx` : contexte React
+    (`useTheme() -> {theme, setTheme, toggleTheme}`), thème initial lu
+    dans `localStorage["email_analyzer_theme"]`, sinon
+    `window.matchMedia("(prefers-color-scheme: dark)")` ; pose
+    `document.documentElement.dataset.theme` (attribut `data-theme` lu
+    par les blocs CSS de l'Unit 33) et persiste à chaque changement.
+    Nouveau `frontend/src/components/ThemeToggle.tsx` : bouton rond
+    soleil/lune (icônes SVG inline, même style que les autres boutons
+    d'icône du repo), pas encore monté dans une page — ce sera fait dans
+    `AppShell.tsx` à l'Unit 35. `frontend/src/main.tsx` : `<App/>` enveloppé
+    dans `<ThemeProvider>`.
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` (outDir hors
+    dépôt) transforme les 60 modules (2 nouveaux fichiers) sans erreur.
+  - Non vérifié : bascule réelle du toggle en navigateur (pas de Chromium
+    dans cette session) — le bouton n'est monté nulle part encore
+    (prévu Unit 35), donc pas testable manuellement avant cette étape de
+    toute façon. Recommandé à l'utilisateur, une fois l'Unit 35 livrée :
+    `npm run dev`, cliquer le toggle, vérifier `document.documentElement`
+    dans les devtools (`data-theme` change), recharger la page (le choix
+    doit persister), et effacer `localStorage` pour vérifier le
+    fallback sur `prefers-color-scheme`.
+
+- **Unit 35 — `AppShell.tsx` prêt pour le mode legacy + montage `ThemeToggle`**
+  (2026-07-16) :
+  - Suite de l'Unit 34. `frontend/src/components/AppShell.tsx` : prop
+    `me: Me` → `me: Me | null` (les 7 appelants actuels — Brief, Projets,
+    Agenda, Actions, Paramètres, Assistant, détail projet — passent tous
+    un `Me` non-null, donc compatibles sans modification, `Me` étant
+    assignable à `Me | null`) ; nouvelle prop optionnelle
+    `saasEnabled = true` (défaut `true` pour ne pas devoir toucher les 7
+    appelants existants dans cette unité — seul le futur `ChatHome`,
+    Unit 36+, passera `false`). Item de nav "Brief" renommé "Accueil".
+    Nav filtrée : liste complète en SaaS, **accueil seul** en legacy
+    puisque `/projects`, `/agenda`, `/actions`, `/settings` redirigent
+    déjà vers `/` sans SaaS (vérifié dans les gardes `Navigate` de ces
+    pages) — pas de liens morts affichés. `SidebarSearch` (recherche en
+    langage naturel → `/assistant?q=…`) et les items "Bientôt disponible"
+    masqués en mode legacy pour la même raison. `ThemeToggle` (Unit 34)
+    monté dans le pied de la sidebar (desktop) et à côté de l'email en
+    haut (mobile), sans dupliquer l'email dans les deux vues.
+  - Restylage volontairement conservateur : la mise en page originale
+    (largeur, labels visibles, recherche pleine largeur) est conservée
+    pour ne pas casser les pages secondaires (Projets/Agenda/Actions/
+    Paramètres) qui ne sont pas la cible de la refonte "chat-first" —
+    seul le futur `ChatHome` (accueil) portera le look inspiré de l'image
+    de référence.
+  - Vérifié : `npx tsc --noEmit` sans erreur (widening de `me` compatible
+    avec les 7 appelants existants sans les modifier) ; `vite build`
+    transforme les 61 modules sans erreur.
+  - Non vérifié : rendu visuel réel en navigateur (pas de Chromium dans
+    cette session) — recommandé à l'utilisateur de lancer `npm run dev`
+    et visiter `/projects` (rail complet inchangé) une fois l'Unit 36
+    livrée et `ChatHome` montée avec `saasEnabled=false`, pour comparer
+    visuellement le rail réduit à "Accueil" en mode legacy.
+
+- **Unit 36 — Squelette statique du shell de chat (`ChatHome`)** (2026-07-16) :
+  - Nouveaux fichiers : `frontend/src/components/chat/messageTypes.ts`
+    (`HomeMessage`, pour l'instant uniquement `kind: "text"` — les variantes
+    `status`/`empty-report`/`analysis` seront ajoutées aux unités qui en ont
+    réellement besoin, pas par anticipation) ; `components/chat/ChatThread.tsx`
+    (liste de bulles + zone de saisie, style porté à l'identique de
+    `ConversationalAssistant.tsx` : bulles `rounded-2xl`, utilisateur
+    `bg-accent-primary text-white`, assistant `bg-bg-tertiary` bordé,
+    `TypingDots`, auto-scroll) ; `pages/ChatHome.tsx` (salutation centrée +
+    avatar "orbe" en dégradé `ai-primary`→`ai-secondary` avec halo
+    pulsant — nouveau `@keyframes orb-glow`/`.animate-orb-glow` dans
+    `index.css`, pas un asset copié de l'image de référence — champ de
+    saisie, 3 cartes d'action rapide dont le contenu dépend de `mode`
+    ("legacy" vs "saas"), le tout enveloppé dans `AppShell` (Unit 35).
+    Messages en `useState` local pour l'instant (aucun appel réseau).
+  - Écart assumé par rapport au découpage initial du plan : `ChatHome`
+    n'est **pas encore montée** sur la route `/` dans cette unité. Le plan
+    prévoyait un montage "temporaire" derrière `HomePage.tsx` pour une
+    vérification visuelle manuelle, mais cette session n'a pas de
+    Chromium fonctionnel (contrainte documentée depuis les unités
+    précédentes) — un montage sans câblage réel n'aurait donc apporté
+    aucune vérification supplémentaire, tout en obligeant à retirer
+    prématurément l'ancien JSX/état de `HomePage.tsx` (qui doit encore
+    fonctionner en attendant l'Unit 37). Le montage réel sur `/`
+    (remplacement de l'ancien formulaire ET de la redirection vers
+    `BriefPage`) se fera à l'Unit 37, en même temps que le branchement du
+    hook de données legacy, pour éviter tout état intermédiaire cassé.
+  - Vérifié : `npx tsc --noEmit` sans erreur sur les 3 nouveaux fichiers ;
+    `vite build` toujours propre (61 modules — les 3 nouveaux fichiers ne
+    sont pas encore dans le graphe de dépendances depuis `main.tsx`, donc
+    absents du bundle tant qu'ils ne sont montés nulle part, ce qui est
+    attendu).
+  - Non vérifié : rendu visuel réel (voir écart ci-dessus) — à faire une
+    fois l'Unit 37 livrée.
+
+- **Unit 37+38+39 — Câblage backend legacy, carte d'analyse inline, retrait
+  du formulaire classique** (2026-07-16) :
+  - Livrées ensemble (au lieu des 3 unités séparées prévues au plan) : le
+    hook legacy produit des messages de type `analysis`/`empty-report`,
+    qui n'ont de sens que rendus par une carte inline — impossible de
+    vérifier l'un sans l'autre, et laisser l'ancien JSX de `HomePage.tsx`
+    vivre à côté du nouveau hook aurait dupliqué toute la logique
+    d'analyse (deux implémentations du même appel `/api/analyze` en
+    parallèle).
+  - Nouveau `frontend/src/analysisTypes.ts` : `ProjectAnalysis`,
+    `DraftResult`, `riskBadgeClass`, `buildChecklist` extraits tels quels
+    de l'ancien `AnalysisDashboard.tsx`.
+  - Nouveau `frontend/src/components/chat/AnalysisCard.tsx` : même contrat
+    de données que l'ancien composant (projectName, analysis,
+    onRequestDraft?, onSelectThread?), restylé largeur-bulle, sections
+    secondaires (sentiment/tech/checklist) repliées dans un `<details>`.
+  - `messageTypes.ts` complété avec les variantes `status` (progression +
+    barre), `empty-report`, `error`, et `analysis` (+ `allowThreadDrilldown`,
+    même règle qu'avant : uniquement sur le résultat d'une analyse sans
+    filtre). `ChatThread.tsx` sait désormais rendre les 5 variantes.
+  - Nouveau `frontend/src/hooks/useLegacyHomeChat.ts` : porte
+    `launchAnalysis`/`pollAnalysis`/`pickProjectBlock`/`NO_FILTER_RESULT_KEY`
+    de l'ancien `HomePage.tsx` et le flux `/api/chat` de l'ancien
+    `ConversationalAssistant.tsx`, tels quels côté endpoints/payloads.
+    Premier message envoyé sans carte d'analyse active → lance
+    `/api/analyze` (filtre = texte du message) ; une fois une carte
+    présente, les messages suivants continuent via `/api/chat` sur ce
+    projet. Relances (bouton "élargir" dans la carte `empty-report`, clic
+    sur un fil détecté) **empilent** une nouvelle carte sous les
+    précédentes (décision utilisateur actée dans le plan) plutôt que de
+    remplacer le panneau comme avant. La mécanique de progression pendant
+    le chargement (ticks du job, `applyAnalyzeTickToStore`/`useSyncStore`)
+    est conservée à l'identique ; le rendu "partiel" pendant le chargement
+    (bloc d'analyse encore incomplet) est conservé aussi, mis à jour en
+    place (même id de message) plutôt que d'empiler un message par tick.
+  - Non porté délibérément : la barre "Réponse rapide" de
+    `ConversationalAssistant.tsx` (génération de brouillon simulée par
+    `setTimeout` + template statique, déjà signalée comme non réelle par
+    l'exploration préalable) — le vrai bouton "Générer brouillon de
+    réponse" de la carte d'analyse (`/api/draft`, réel) couvre le même
+    besoin sans logique fictive.
+  - `frontend/src/pages/ChatHome.tsx` : en mode legacy, câblé sur
+    `useLegacyHomeChat` ; panneau "Outils" repliable (période, LLM,
+    modèles avancés — reprise directe des contrôles de l'ancien
+    formulaire) ; 2 cartes d'action rapide réellement fonctionnelles
+    ("Analyser tous mes emails" lance `send("")` sans filtre, "Choisir une
+    période" ouvre le panneau Outils) — une 3ᵉ carte "Analyser un projet"
+    a été délibérément omise plutôt que rendue décorative sans action
+    réelle derrière (cf. `ai-workflow-rules.md`, pas d'affordance
+    simulée). Mode SaaS : toujours en state local temporaire (inchangé
+    depuis l'Unit 36), câblage réel à l'Unit 40.
+  - `frontend/src/pages/HomePage.tsx` : réduit aux gardes de session
+    (chargement du compte, redirection `/login`) puis rendu unique de
+    `<ChatHome mode={saasEnabled && me ? "saas" : "legacy"} .../>` — tout
+    l'ancien JSX (formulaire, panneau de résultat, bascule
+    classique/conversationnel) et son state (plus de 15 `useState`)
+    supprimés. La branche `if (saasEnabled && me) return <BriefPage .../>`
+    a aussi disparu : `BriefPage.tsx`/`PortfolioAssistant.tsx` n'ont donc
+    plus aucun appelant (orphelins assumés jusqu'à l'Unit 40/41, qui les
+    remplacent puis les suppriment — pas supprimés maintenant pour ne pas
+    perdre le mode SaaS avant d'avoir sa nouvelle implémentation).
+  - Fichiers supprimés : `AnalysisDashboard.tsx`, `ConversationalAssistant.tsx`
+    (plus aucune référence après grep, vérifié avant suppression).
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` (outDir hors
+    dépôt) transforme 61 modules sans erreur.
+  - Non vérifié : exécution réelle contre une vraie boîte IMAP — aucun
+    `.env` avec identifiants IMAP n'existe dans cet environnement (aucun
+    fichier `.env*` trouvé sous `services/email_analyzer/`), et pas de
+    Chromium fonctionnel pour un test navigateur (contrainte déjà
+    documentée). Recommandé à l'utilisateur : renseigner `.env`
+    (`IMAP_USER`/`IMAP_PASSWORD`), lancer `uvicorn` + `npm run dev`,
+    visiter `/`, taper un nom de projet ou envoyer vide via la carte
+    "Analyser tous mes emails", vérifier la progression puis la carte
+    d'analyse, le bouton brouillon (`/api/draft`) et l'enchaînement en
+    chat une fois la carte affichée.
+
+- **Unit 40 — Câblage SaaS de l'accueil chat-first** (2026-07-16) :
+  - Nouveau `frontend/src/hooks/useSaasHomeChat.ts` : porte le chargement
+    (`GET /api/assistant/messages`, repli sur un message d'accueil si vide
+    ou en erreur) et l'envoi (`POST /api/assistant/chat`) de l'ancien
+    `PortfolioAssistant.tsx`, en `HomeMessage[]` (uniquement `kind:"text"`,
+    ce endpoint n'a pas de notion de carte d'analyse). Support de
+    `initialQuestion` (ex-`?q=` de `/assistant`) porté à l'identique,
+    envoyé une seule fois une fois l'historique chargé.
+  - Nouveau `frontend/src/hooks/useBrief.ts` : porte `GET /api/brief`,
+    `greetingName`/`formatSince` de l'ancien `BriefPage.tsx::loadBrief`.
+  - Piège évité : les deux nouveaux hooks sont **toujours instanciés**
+    dans `ChatHome.tsx` quel que soit le mode (les hooks React ne peuvent
+    pas être conditionnels), ce qui aurait déclenché des appels
+    `/api/brief`/`/api/assistant/*` (503 sans SaaS,
+    `_require_saas()`/`assert_saas_enabled`) même en mode legacy. Les deux
+    hooks acceptent donc un paramètre `enabled: boolean` (`mode ===
+    "saas"`) qui court-circuite tout fetch/POST quand `false`.
+  - `frontend/src/pages/ChatHome.tsx` : branche SaaS complète — salutation
+    `Bonjour {greetingName(me.email)}` + "Voici ce qui a changé depuis
+    {formatSince(...)}", 3 cartes d'action réellement fonctionnelles
+    ("Analyser mes emails" ouvre `DiscoverProjectsModal`, réutilisé
+    inchangé, avec le même callback `handleProjectsProcessed` que l'ancien
+    `BriefPage` ; "Actions en attente"/"Projets à risque" affichent le
+    compteur du Brief en badge — navigation vers `/actions`/`/projects`
+    pas encore ajoutée, badges informatifs seulement pour cette unité).
+    Lecture de `?q=` via `useSearchParams` (react-router), effacé après
+    envoi.
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` transforme 65
+    modules sans erreur.
+  - Non vérifié : exécution réelle contre un tenant SaaS (pas de Postgres
+    ni de session JWT réelle dans cet environnement) — recommandé à
+    l'utilisateur de se connecter à un tenant existant, visiter `/`,
+    vérifier le chargement de l'historique persistant, l'envoi d'un
+    message, le badge des cartes d'action et l'ouverture du modal
+    "Analyser mes emails".
+
+- **Unit 41 — Retrait de l'ancienne page Brief/assistant plein écran**
+  (2026-07-16) :
+  - Fichiers supprimés (plus aucun appelant depuis l'Unit 40 :
+    `HomePage.tsx` rend `ChatHome` dans les deux modes depuis l'Unit
+    37+38+39, `App.tsx` routait encore `/assistant` vers `AssistantPage`) :
+    `pages/BriefPage.tsx`, `PortfolioAssistant.tsx`, `pages/AssistantPage.tsx`.
+  - `App.tsx` : route `/assistant` remplacée par un composant
+    `AssistantRedirect` (`useLocation` + `Navigate`) qui redirige vers `/`
+    en conservant `?q=` — pour les anciens liens/favoris, puisque `/assistant`
+    n'existe plus en tant que page.
+  - `components/AppShell.tsx` : `SidebarSearch` repointée de
+    `/assistant?q=…` vers `/?q=…`, lu par `ChatHome` (mode SaaS,
+    `useSaasHomeChat`) au montage. L'item de nav "Assistant" avait déjà
+    disparu du rail à l'Unit 35 (accueil = assistant portefeuille
+    persistant, plus besoin d'une page séparée).
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` transforme 63
+    modules sans erreur ; grep sur les 3 noms de fichiers supprimés et sur
+    tout import résiduel → aucune référence restante.
+  - Non vérifié : navigation réelle d'un ancien lien `/assistant?q=…` en
+    navigateur (pas de Chromium dans cette session) — recommandé à
+    l'utilisateur de vérifier que la redirection atterrit bien sur `/`
+    avec la question envoyée automatiquement.
+
+- **Unit 42 — Synchronisation de la documentation (refonte chat-first)**
+  (2026-07-16) :
+  - `context/ui-context.md` : retiré l'affirmation "thème unique, pas de
+    variante sombre" (§1) — documenté le mécanisme réel (variables CSS
+    `--color-*-rgb`, blocs `:root`/`[data-theme="dark"]`, `ThemeProvider`,
+    aucune classe `dark:`), palette sombre (valeurs clés), et la nouvelle
+    disposition de l'accueil/rail (§4) : item "Assistant" retiré, rail
+    réduit à l'accueil en mode legacy, `ChatHome`/`ChatThread`/
+    `AnalysisCard` comme nouvelle structure de page.
+  - `context/architecture.md` : nouvel addendum daté qui remplace
+    explicitement l'affirmation de l'Unit 24 ("le mode legacy garde
+    l'ancien comportement inchangé", devenue fausse) — liste les fichiers
+    retirés/ajoutés et rappelle que les contrats d'API n'ont pas changé.
+  - `context/project-overview.md` : nouvel addendum daté qui remplace la
+    description du split Brief/formulaire legacy par l'accueil unique.
+  - `context/progress-tracker.md` : "Current Phase" mis à jour pour
+    pointer vers cette refonte plutôt que vers l'Unit 24.
+  - Vérifié : relecture des 3 fichiers modifiés, cohérence avec le code
+    réel (noms de fichiers, chemins) confirmée par grep avant rédaction.
+  - Ceci clôt le plan `refait-le-design-de-lucky-comet` (Units 33-42).
+    Écarts assumés par rapport au plan initial, résumés ici pour
+    référence : (1) la 3ᵉ carte d'action rapide "Analyser un projet" en
+    mode legacy a été omise (pas d'action réelle à lui donner sans
+    dupliquer les 2 autres) ; (2) les badges "Actions en attente"/"Projets
+    à risque" en mode SaaS affichent un compteur mais ne naviguent pas
+    encore vers `/actions`/`/projects` ; (3) le rendu "partiel" pendant le
+    chargement d'une analyse legacy est conservé mais simplifié (mise à
+    jour en place d'une seule carte, pas de striation par tick) ; (4) la
+    barre "Réponse rapide" (brouillon simulé) de l'ancien
+    `ConversationalAssistant.tsx` n'a pas été portée, déjà signalée comme
+    non réelle avant la refonte. Aucune de ces unités n'a pu être vérifiée
+    en navigateur réel ni contre un vrai tenant SaaS/boîte IMAP (pas de
+    Chromium fonctionnel ni de `.env`/Postgres configurés dans cette
+    session) — recommandé à l'utilisateur de tester manuellement les
+    parcours legacy et SaaS avant de considérer le chantier terminé.
+
+- **Unit 43 — Parallélisation de `generate_intelligent_summary` (fix
+  timeout `run_analysis_saas`)** (2026-07-17) :
+  - Contexte : job arq `run_analysis_saas` observé en échec
+    (`TimeoutError`) après avoir atteint le `job_timeout` de 1800s
+    (`analysis_tasks.py:880`). Cause identifiée : `generate_intelligent_summary`
+    (`project_mail.py`) traitait les projets d'un tenant en boucle
+    strictement séquentielle, avec 1-2 appels LLM bloquants par projet
+    (jusqu'à ~120s au pire cas avec retries Gemini) — un tenant à plusieurs
+    projets dépassait donc facilement les 1800s, la charge étant
+    entièrement additive.
+  - Fix choisi (option "paralléliser les appels LLM", décision utilisateur
+    explicite parmi 4 options proposées — pas une décision autonome) : le
+    corps de boucle par projet a été extrait en une méthode
+    `_generate_project_summary` (retourne `(project_name, summary)`),
+    exécutée via `ThreadPoolExecutor(max_workers=min(5, nb_projets))` dans
+    `generate_intelligent_summary`. `self.record_timing` (incréments
+    `defaultdict` non-atomiques) a été protégé par un `threading.Lock`
+    (`self._timing_lock`, posé dans `__init__`) pour éviter une perte de
+    mises à jour sous concurrence.
+  - Vérifié avant modification (recherche dédiée) : les 4 fonctions LLM
+    (`generate_openai_assistant_summary`, `generate_gemini_assistant_summary`,
+    `extract_structured_project_summary_openai/gemini`, `llm.py`)
+    instancient un client local par appel — pas d'état module partagé
+    dangereux ; `self.ai_analyzer` (singleton partagé, `ai_intelligent.py`)
+    ne mute aucun état pendant ces méthodes ; `self.mail` (connexion IMAP)
+    n'est pas touché dans cette boucle (déjà terminée avant la phase de
+    résumé).
+  - Vérifié après modification : `python3 -m py_compile` OK ; test manuel
+    (script ad hoc, 6 projets factices, `assistant_provider=none`) confirme
+    que les 6 clés attendues sont bien produites et que
+    `step_counts["ia_sentiment"] == 6` exactement (aucune perte
+    d'incrément sous les threads concurrents, donc le lock fonctionne).
+    Non vérifié : exécution réelle contre un tenant SaaS multi-projets via
+    arq (pas de `.env`/Postgres/IMAP configurés dans cette session) —
+    recommandé à l'utilisateur de relancer une analyse SaaS réelle pour
+    confirmer que le job termine désormais sous 1800s.
+  - Non traité (hors scope de cette décision) : la phase de fetch IMAP
+    reste séquentielle (un `fetch` par email, `project_mail.py:520-562`) —
+    si des timeouts réapparaissent sur des tenants à très large fenêtre
+    `days`, c'est le prochain goulot à adresser (options déjà notées :
+    plafonner `days`/nb projets, ou paralléliser le fetch avec un pool de
+    connexions IMAP dédié — non trivial, connexion IMAP non thread-safe en
+    l'état).
+
+- **Unit 44 — Pivot stratégique documentaire : "Personal Executive AI
+  Assistant" (2026-07-17)** :
+  - Contexte : l'utilisateur a défini une nouvelle vision long terme
+    (document "Strategic Pivot Plan") repositionnant my-connector d'un
+    "Email AI Assistant" vers une IA Exécutive Personnelle conversationnelle
+    avec mémoire persistante, knowledge graph, context engine et
+    architecture agent/tools. Reprend directement le chantier laissé en
+    attente à l'entrée Unit 13 ("Doc d'implémentation en attente d'une
+    session dédiée").
+  - `context/project-overview.md` : réécriture complète. Retire le corps
+    obsolète (Celery, React Native, cache vectoriel device 30 jours,
+    "Zero-Touch Project Creation") et les deux notes datées Unit 24 /
+    Units 33-41 (contenu absorbé). Nouvelle structure : Mission,
+    positionnement avant/après, philosophie "conversation-first", 5 piliers
+    produit (Conversation/Mémoire/Knowledge Graph/Agent/Tools) chacun
+    annoté de son état réel actuel entre parenthèses, sources d'information
+    par phase, scope actuel/hors-scope basés sur le vrai stack, roadmap IA
+    en 4 phases, principes de développement, vision finale.
+  - `context/architecture.md` : réécriture complète. Retire le corps
+    français obsolète (stack Celery/RabbitMQ/Orama-Voy/SQLCipher,
+    arborescence `apps/web`+`apps/mobile` fictive, invariants "Zero
+    Clear-Text"/"30-Day Device Cache" jamais implémentés) et les deux notes
+    datées. Nouvelles sections : stack technique réelle, arborescence réelle
+    (`services/email_analyzer/{api,email_analyzer,frontend}`), modèle de
+    données réel (tables SQLAlchemy listées une à une, avec mention
+    explicite que `Memory`/`Fact`/`Entity`/`KnowledgeGraphEdge` etc.
+    n'existent pas), architecture planifiée court/moyen terme (basée sur
+    `evolution-plan.md`/`rfc-email-pipeline-v2.md` : pgvector, sync
+    incrémental réel, threading JWZ), vision long terme Executive Assistant
+    (diagramme Memory Engine/Knowledge Graph/Context Engine/Agent-Tools,
+    marqué non implémenté), invariants réduits aux 4 qui s'appliquent
+    réellement au code actuel.
+  - `context/ai-workflow-rules.md` : mise à jour ciblée (pas de réécriture
+    complète) — références Celery→`arq`, retrait React Native, nouvelle
+    règle de scoping "conversation-first" (reprise des 5 critères du plan
+    utilisateur), correction de l'item checklist "Data Encryption" qui
+    affirmait à tort une garantie de chiffrement au repos non implémentée
+    (reformulé en "Log Masking" + renvoi vers le statut réel documenté dans
+    `architecture.md`).
+  - Décision explicite (validée avec l'utilisateur avant exécution) :
+    `context/code-standards.md` **non touché** dans cette session (hors
+    scope explicite du pivot, malgré ses propres références obsolètes à
+    Celery/React Native) — voir entrée "Next Up" ci-dessous pour le suivi.
+    `context/ui-context.md` (déjà à jour depuis Units 33-42),
+    `context/evolution-plan.md` et `context/rfc-email-pipeline-v2.md`
+    également non touchés (déjà alignés sur le vrai stack, utilisés comme
+    source de vérité pour la section "architecture planifiée" du nouvel
+    `architecture.md`).
+  - Vérifié : relecture manuelle de chaque fait technique cité (noms de
+    tables, endpoints, chemins de fichiers) contre l'inventaire réel du
+    code (`email_analyzer/db/models.py`, `api/routers/*.py`,
+    `frontend/src/` — obtenu via exploration du code dans cette session).
+    Aucun code modifié ; aucune fonctionnalité de la vision long terme
+    (Memory Engine, Knowledge Graph, Agent/Tools, briefing quotidien
+    complet) n'est implémentée par cette entrée — uniquement documentée
+    comme vision/roadmap, avec état actuel clairement distingué.
+  - Non vérifié : aucune vérification automatisée possible pour un
+    changement purement documentaire (pas de build/test applicable).
+
+- **Unit 45 — Conversation layer, fondation (2026-07-17)** :
+  - Contexte : première brique de code de la roadmap Unit 44 (Phase 4 du
+    plan de pivot — "créer la fondation de la couche conversation, sans
+    raisonnement avancé"). Recherche préalable (inventaire complet du code
+    via exploration dédiée) : deux chats existent déjà (legacy éphémère
+    `/api/chat` scopé projet, et assistant portefeuille persistant
+    `/api/assistant/chat` sur `AssistantMessage`) et aucune notion de
+    `Conversation`/session séparée. Décision : **étendre** l'existant
+    (`AssistantMessage`) plutôt que créer une nouvelle table ou dupliquer la
+    logique — pas de `Conversation`/session multiple ajoutée dans cette
+    unité (un seul historique continu par tenant+utilisateur, comme
+    documenté sur le modèle existant ; ajouter du multi-conversation
+    maintenant aurait été de la scope creep non demandée).
+  - Ajout `email_analyzer/repositories/conversation_repository.py` :
+    `ConversationRepository` — seul point d'accès SQL à `AssistantMessage`
+    (`list_messages`, `append_turn`).
+  - Ajout `email_analyzer/services/conversation_service.py` :
+    `ConversationService` — orchestration (sélection fournisseur
+    OpenAI/Gemini, construction du contexte portefeuille via
+    `llm.build_portfolio_context`, appel LLM, persistance), avec logging
+    explicite start/done/erreur (`logger.info`/`logger.error`). Reprend telle
+    quelle la logique auparavant inline dans le routeur (`_select_provider`,
+    `_pending_action_descriptions`, `_portfolio_projects_context`) — aucun
+    changement de comportement.
+  - Refactor `api/routers/assistant.py` : devient un contrôleur HTTP fin
+    (auth, validation, mapping HTTP) qui délègue entièrement à
+    `ConversationService`. Suit l'ordre Model → Repository → Service → API
+    prescrit par les règles de développement.
+  - Suit le pattern `Service ↓ Repository ↓ Model` demandé (pas
+    d'abstraction supplémentaire, pas d'héritage).
+  - Vérifié : syntaxe (`ast.parse`) des 3 fichiers modifiés/créés ; import
+    réel des modules (`ConversationService`, `ConversationRepository`,
+    routeur `assistant`) dans le venv du projet (`myenv`) ; `api.main:app`
+    s'importe et expose toujours ses 22 routes (aucune route perdue/cassée).
+  - Non vérifié : appel HTTP réel (`/api/assistant/chat`) contre une base
+    Postgres + clé LLM réelle (pas d'environnement disponible dans cette
+    session) — le comportement métier n'a pas changé (code déplacé, pas
+    réécrit), le risque de régression est donc limité au déplacement lui-même.
+  - Prochaine étape naturelle (Phase 5 du plan, non commencée) : Memory
+    Engine (`MemoryService`/`MemoryRepository`/extraction de faits) —
+    nécessitera de décider si la mémoire s'accroche à `ConversationService`
+    existant ou reste un pilier séparé consommé par lui.
+
+- **Unit 46 — Memory Engine, fondation (2026-07-17)** :
+  - Contexte : suite directe d'Unit 45, Phase 5 du plan de pivot ("créer
+    MemoryService/MemoryRepository/MemoryExtractor/MemoryStore/
+    MemoryRetriever/MemoryScoring, PostgreSQL, pas de vector DB, rester
+    simple/compréhensible"). Recherche préalable confirmée par l'inventaire
+    d'Unit 44/45 : aucune notion de mémoire structurée n'existait, seul
+    `AssistantMessage` (historique brut) s'en approchait.
+  - Décision d'architecture (documentée pour transparence) : les 6 modules
+    "suggérés" par le plan (Extractor/Store/Retriever/Scoring/Service/
+    Repository) sont **collapsés en 2 classes** — `MemoryService`
+    (orchestration + extraction + scoring simple = tri par confidence/
+    récence) et `MemoryRepository` (accès SQL, incluant la déduplication).
+    Créer 6 classes pour quelques méthodes chacune aurait été une
+    abstraction prématurée, contraire à `ai-workflow-rules.md` ("avoid
+    unnecessary abstractions") — à scinder plus tard seulement si une
+    responsabilité grossit réellement.
+  - `email_analyzer/db/models.py` : nouveau modèle `Memory` (`memories`) +
+    enums `MemoryCategory` (preference/fact/context) et `MemorySource`
+    (conversation pour l'instant — pas d'extraction depuis les emails dans
+    cette unité). Colonnes : `tenant_id`, `user_id`, `content`, `category`,
+    `source`, `confidence` (float), `created_at`/`updated_at`. Import
+    `Float` ajouté à `sqlalchemy`.
+  - `alembic/versions/011_memory.py` : migration `memories`
+    (`010_agenda` → `011_memory`), même style que `008_assistant_messages.py`
+    (index tenant_id/user_id, downgrade symétrique).
+  - `email_analyzer/llm.py` : nouveau bloc "Memory extraction" —
+    `MemoryFactLLM`/`MemoryExtractionLLM` (schémas Pydantic),
+    `extract_memory_candidates_openai`/`_gemini` (même discipline que
+    `extract_structured_project_summary_openai`/`_gemini` : jamais
+    d'exception, toujours `{"data": ..., "erreur": ...}`). Ajout aussi
+    `select_assistant_provider(preferred)` — extrait de la logique
+    `_select_provider` qui était dupliquée dans
+    `api/routers/assistant.py`/`ConversationService`, maintenant partagée
+    entre `ConversationService` et `MemoryService` (évite la duplication
+    signalée explicitement par l'utilisateur avant cette session).
+    `ConversationService._select_provider` refactorée pour l'utiliser.
+  - `email_analyzer/repositories/memory_repository.py` : `MemoryRepository`
+    — `list_for_user` (tri confidence desc puis created_at desc = le
+    "scoring" v1, pas de classe séparée), `find_by_content` (dédup exacte
+    insensible casse/espaces, pas de similarité vectorielle), `create`,
+    `delete`.
+  - `email_analyzer/services/memory_service.py` : `MemoryService` —
+    `list_memories`, `delete_memory`, `extract_and_store(tenant_id, user_id,
+    turns, ...)` : sélectionne le fournisseur (`select_assistant_provider`,
+    retourne `[]` silencieusement si aucune clé — pas d'exception, cohérent
+    avec le reste de `llm.py`), appelle l'extraction LLM, filtre les
+    candidats (`confidence < 0.5` ignorés, catégorie invalide repliée sur
+    `fact`), déduplique via le repository, persiste. Logging explicite
+    start/done/erreur (`logger.info`/`logger.warning`).
+  - `api/routers/memory.py` (nouveau) : `GET /api/memory` (liste, triée),
+    `POST /api/memory/extract` (déclenchement **explicite** — lit les N
+    derniers tours de `ConversationService.list_history`, appelle
+    `MemoryService.extract_and_store`, retourne les souvenirs créés),
+    `DELETE /api/memory/{id}` (droit à l'oubli minimal). Décision
+    volontaire : **pas d'extraction automatique après chaque message** de
+    `/api/assistant/chat` — l'ajouter silencieusement aurait changé le
+    coût/latence d'un endpoint existant sans le documenter comme tel
+    (contraire à "avoid hidden behaviors"). Le branchement automatique est
+    laissé à une décision produit explicite dans une session dédiée
+    (Context Engine, Phase 7, où la mémoire doit de toute façon être
+    injectée dans le prompt système du chat).
+  - `api/main.py` : router `memory_router` importé et enregistré après
+    `assistant_router`.
+  - `context/project-overview.md` : pilier "Mémoire persistante" mis à jour
+    (était "non implémenté", maintenant "fondation posée" avec détail de ce
+    qui existe/n'existe pas encore).
+  - Vérifié : syntaxe (`ast.parse`) de tous les fichiers créés/modifiés ;
+    import réel dans le venv du projet (`myenv`) de `Memory`,
+    `MemoryRepository`, `MemoryService`, du routeur `memory`, et de
+    `api.main:app` — le nouveau router apparaît bien dans `app.routes`
+    (10 routers montés désormais, contre 9 après Unit 45) ; chaîne de
+    migrations Alembic cohérente (`011_memory.down_revision ==
+    "010_agenda"`).
+  - Non vérifié : migration réellement appliquée sur une base Postgres
+    (`alembic upgrade head`), et appel HTTP réel des 3 nouveaux endpoints
+    avec une vraie clé LLM (pas d'environnement disponible dans cette
+    session — même limite que Unit 45).
+  - Prochaine étape naturelle (Phase 6, non commencée) : Knowledge Layer
+    (Entities/Facts/Relationships/Contacts/Organizations/Project Links,
+    PostgreSQL, pas de graphe) — pourrait réutiliser `MemoryCategory` ou
+    rester un modèle séparé selon ce que la Phase 6 exige réellement,
+    décision à prendre au moment venu plutôt qu'anticipée ici.
+
+- **Unit 47 — Knowledge Layer, fondation (2026-07-17)** :
+  - Contexte : suite directe d'Unit 46, Phase 6 du plan de pivot ("Entities/
+    Facts/Relationships/Contacts/Organizations/Project Links, pas de
+    graphe, PostgreSQL, stocker les relations simplement").
+  - Recherche préalable (obligatoire avant toute nouvelle brique, cf.
+    consigne utilisateur) : `ProjectSummaryLLM` (`llm.py`) extrait déjà
+    `participants: List[str]` et `companies: List[str]` par projet, persistés
+    tels quels dans `ProjectSummary.structured_content` (JSONB, voir
+    `project_mail.py:1055` et `analysis_tasks.py`) — mais uniquement comme
+    JSON non normalisé par projet, sans identité partagée entre projets
+    (le même contact apparaissant sur 2 projets = 2 chaînes de caractères
+    sans lien). Décision : **ne pas ajouter de nouvel appel LLM** pour la
+    Knowledge Layer — normaliser cette donnée déjà produite plutôt que la
+    ré-extraire (évite un doublon de pipeline d'extraction et un coût LLM
+    superflu).
+  - Décision d'architecture (documentée pour transparence, même logique
+    qu'Unit 46) : le plan nomme "Entities/Facts/Relationships" de façon
+    générique — implémenté concrètement comme `Organization`/`Contact`/
+    `ProjectContactLink` (le sous-ensemble pour lequel il existe déjà des
+    données réelles). Pas de table `Fact` générique : aurait dupliqué
+    `Memory` (Unit 46) — une seule notion de "fait durable" dans le code,
+    pas deux.
+  - `email_analyzer/db/models.py` : `Organization` (`organizations`, unique
+    par tenant+nom), `Contact` (`contacts`, unique par tenant+nom, FK
+    optionnelle vers `organizations`), `ProjectContactLink`
+    (`project_contact_links`, association project↔contact, unique par
+    couple). Dédup par nom exact, même discipline que `Memory`
+    (`find_by_content`) — pas de résolution d'identité floue en v1.
+  - `alembic/versions/012_knowledge.py` : migration des 3 tables
+    (`011_memory` → `012_knowledge`), mêmes conventions que les migrations
+    précédentes (index, contraintes uniques, downgrade symétrique).
+  - `email_analyzer/repositories/knowledge_repository.py` :
+    `KnowledgeRepository` — `get_or_create_organization`,
+    `get_or_create_contact` (met à jour `organization_id` si l'organisation
+    était inconnue lors de la première création), `link_project_contact`
+    (idempotent), `list_contacts_for_tenant`, `list_contacts_for_project`,
+    `list_organizations_for_tenant`.
+  - `email_analyzer/services/knowledge_service.py` : `KnowledgeService` —
+    `sync_from_project_summary(tenant_id, project_id)` relit
+    `ProjectSummary.structured_content`, upsert une `Organization` par nom
+    de société cité, lie tous les participants à la **première** société
+    trouvée (limite explicitement documentée : le LLM ne fournit pas
+    aujourd'hui de mapping fiable "quel participant appartient à quelle
+    société" — pas d'invention de ce lien côté code), puis crée les
+    `ProjectContactLink`. `list_contacts`/`list_organizations`/
+    `list_project_contacts` pour la lecture. Logging explicite
+    start/done. Suit le même choix qu'Unit 46 : pas de classes séparées
+    par "verbe" (Extractor/Store/Retriever) pour une poignée de méthodes.
+  - `api/routers/knowledge.py` (nouveau) : `GET /api/knowledge/contacts`
+    (optionnellement filtré par `project_id`), `GET
+    /api/knowledge/organizations`, `POST
+    /api/knowledge/projects/{project_id}/sync` (déclenchement **explicite**
+    — même raisonnement qu'Unit 46 pour `/api/memory/extract` : ne pas
+    changer silencieusement le comportement du Fast-Track existant
+    (`analysis_tasks.py`) en y greffant cette synchronisation sans décision
+    produit explicite).
+  - `api/main.py` : router `knowledge_router` importé et enregistré après
+    `memory_router`.
+  - `context/project-overview.md` : pilier "Knowledge Graph" mis à jour
+    (était "non implémenté", maintenant "fondation posée" avec détail de ce
+    qui existe/n'existe pas encore, notamment l'absence de résolution
+    contact↔organisation fiable et l'absence d'adresses email normalisées
+    sur `Email`).
+  - Vérifié : syntaxe (`ast.parse`) de tous les fichiers créés/modifiés ;
+    import réel dans le venv du projet (`myenv`) de `Organization`,
+    `Contact`, `ProjectContactLink`, `KnowledgeRepository`,
+    `KnowledgeService`, du routeur `knowledge`, et de `api.main:app` — 11
+    routers montés désormais (10 après Unit 46, +1) ; chaîne de migrations
+    Alembic cohérente (`012_knowledge.down_revision == "011_memory"`).
+  - Non vérifié : migration réellement appliquée sur une base Postgres, et
+    appel HTTP réel des 3 nouveaux endpoints sur un vrai projet avec
+    `structured_content` rempli (pas d'environnement disponible dans cette
+    session — même limite que Units 45/46). **Recommandé avant d'aller plus
+    loin** : appliquer `alembic upgrade head` (couvre aussi 011) et vérifier
+    en conditions réelles Units 45-47 ensemble plutôt que migration par
+    migration.
+  - Prochaine étape naturelle (Phase 7, non commencée) : Context Engine —
+    le premier composant qui consommera réellement Memory (Unit 46) et
+    Knowledge Layer (cette unité) pour construire le contexte unifié
+    injecté dans `ConversationService`/le chat portefeuille ; c'est aussi
+    le moment naturel pour décider si l'extraction mémoire/la synchronisation
+    connaissance doivent devenir automatiques après un tour de chat ou un
+    Fast-Track (actuellement explicites par choix, voir Units 46-47).
+
+- **Unit 48 — Context Engine, fondation (2026-07-17)** :
+  - Contexte : suite directe d'Unit 47, Phase 7 du plan de pivot ("Context
+    Builder : Input = Conversation/Projects/Emails/Memory/Actions/Documents,
+    Output = contexte IA unifié ; devient le seul fournisseur de contexte
+    pour les requêtes LLM"). Recherche préalable : `ConversationService`
+    construisait déjà un contexte "projets" en interne
+    (`_build_portfolio_context`/`_pending_action_descriptions`, dupliquant
+    des requêtes déjà écrites une fois) et ne consommait ni `Memory` (Unit
+    46) ni la Knowledge Layer (Unit 47), posées mais jamais lues nulle part
+    jusqu'ici. Décision : **déplacer** cette logique existante vers
+    `ContextService` plutôt que la dupliquer, et y **brancher** Memory/
+    Knowledge — pas de nouveau modèle de données.
+  - `email_analyzer/llm.py` : `build_portfolio_chat_system_prompt` gagne un
+    paramètre optionnel `extra_context_sections` (rétrocompatible, défaut
+    `None`) qui insère des blocs de contexte additionnels déjà formatés
+    avant la section "Règles". Deux nouveaux formatteurs suivant exactement
+    la convention de `build_portfolio_context` (dicts simples en entrée, pas
+    de dépendance DB dans `llm.py`) : `build_memory_context` (liste
+    `{"category","content"}` → texte, chaîne vide si vide) et
+    `build_knowledge_context` (liste `{"name","organization"}` → texte).
+  - `email_analyzer/services/context_service.py` (nouveau) : `ContextService`
+    — `build_portfolio_system_prompt(tenant_id, user_id)` orchestre
+    `_build_projects_context` (reprise telle quelle de l'ancienne logique de
+    `ConversationService`), `_build_memory_section` (appelle
+    `MemoryService.list_memories`, ne déclenche **pas** d'extraction),
+    `_build_knowledge_section` (appelle `KnowledgeService.list_contacts`/
+    `list_organizations`, ne déclenche **pas** de sync), puis assemble le
+    tout via `llm.build_portfolio_chat_system_prompt`. Documenté comme la
+    seule source de vérité pour "quelles données entrent dans le prompt" —
+    Emails/Documents explicitement exclus du scope v1 (pas de source de
+    lecture dédiée pour les emails bruts, pas de modèle `Document`) plutôt
+    que d'inventer une lecture partielle.
+  - `email_analyzer/services/conversation_service.py` : supprime
+    `_build_portfolio_context`/`_pending_action_descriptions` et les imports
+    `Project`/`ProjectSummary`/`SuggestedAction`/`build_portfolio_context`
+    devenus inutiles ; `send_message` appelle désormais
+    `self._context.build_portfolio_system_prompt(tenant_id, user_id)`.
+    Comportement observable inchangé tant que `memories`/`contacts` sont
+    vides pour un tenant (nouveauté : dès qu'un utilisateur a des souvenirs
+    ou des contacts synchronisés, ils apparaissent dans les réponses du chat
+    portefeuille — c'est le but de cette unité).
+  - Vérifié : syntaxe (`ast.parse`) de tous les fichiers modifiés/créés ;
+    import réel dans le venv du projet (`myenv`) de `ContextService`,
+    `ConversationService`, des nouveaux formatteurs `llm.py`, et de
+    `api.main:app` (toujours 11 routers — Phase 7 n'ajoute aucun endpoint,
+    uniquement du câblage interne) ; appel direct de
+    `build_portfolio_chat_system_prompt("Aucun projet.", ["souvenir X"])`
+    hors DB pour confirmer l'assemblage du prompt (bloc "souvenir X" bien
+    inséré avant "Règles :").
+  - Non vérifié : appel HTTP réel `/api/assistant/chat` sur un tenant ayant
+    à la fois des `Memory` et des `Contact` réels, pour confirmer que le
+    LLM reçoit et utilise correctement ces sections (pas d'environnement
+    disponible dans cette session — même limite que Units 45-47).
+    **Recommandé avant la suite** : appliquer les migrations 011/012,
+    peupler un tenant de test (`POST /api/memory/extract` après quelques
+    messages, `POST /api/knowledge/projects/{id}/sync` sur un projet ayant
+    un résumé structuré), puis vérifier visuellement que
+    `/api/assistant/chat` en tient compte.
+  - Prochaine étape naturelle (Phase 8, non commencée) : Tool Architecture
+    (remplacer les appels de service directs par des tools nommés —
+    `SearchEmailsTool`, `SearchProjectsTool`, `SearchMemoryTool`,
+    `DraftReplyTool`, etc.) — Phase 7 rend cette étape plus naturelle
+    puisque `ContextService`/`MemoryService`/`KnowledgeService` exposent déjà
+    des méthodes à granularité "tool-sized" ; il s'agira surtout de les
+    envelopper avec un contrat entrée/sortie simple, pas de les réécrire.
+
+- **Unit 49 — Vérification bout-en-bout réelle, Units 45-48 (2026-07-17)** :
+  - Contexte : Units 45-48 avaient toutes été livrées avec une ligne "Non
+    vérifié : appel HTTP réel / migration réellement appliquée" faute
+    d'environnement disponible en session. L'utilisateur a demandé une
+    vérification explicite avant de poursuivre vers la Phase 8 — traité
+    comme une unité à part entière plutôt que rattaché rétroactivement aux
+    précédentes, pour garder une trace propre de ce qui a été exercé et
+    quand (cf. [[project-my-connector-verification-style]]).
+  - Environnement trouvé disponible en session (absent lors des Units
+    45-48) : Postgres local actif (`pg_isready` OK), `DATABASE_URL` réel
+    dans `.env` racine pointant sur la base `connector`, `GEMINI_API_KEY`
+    configurée (pas de clé OpenAI). Vérification donc faite avec le
+    fournisseur Gemini.
+  - `alembic upgrade head` exécuté depuis `services/email_analyzer` avec
+    l'environnement du `.env` racine chargé : `010_agenda` →
+    `011_memory` → `012_knowledge`, sans erreur. Confirmé par
+    inspection directe (`psql \dt`) : les 4 tables (`memories`,
+    `organizations`, `contacts`, `project_contact_links`) existent bien
+    dans la base réelle.
+  - Script de vérification jetable (créé dans le scratchpad de session,
+    supprimé après usage — pas de framework de test dans ce repo, voir
+    [[project-my-connector-verification-style]]) pilotant l'app FastAPI
+    réelle via `starlette.testclient.TestClient` (pas de serveur uvicorn
+    séparé nécessaire) :
+    1. Seed direct via les modèles SQLAlchemy réels d'un tenant/user/
+       membership/project/`ProjectSummary` de test (`structured_content`
+       avec `participants`/`companies`, comme le produit vraiment le
+       Fast-Track) — token JWT réel minté avec `create_access_token`.
+    2. `POST /api/knowledge/projects/{id}/sync` → 200, contacts "Alice
+       Dupont"/"Bob Martin" créés et liés à l'organisation "Acme Corp" —
+       confirmé aucun appel LLM nécessaire pour cette route (lecture pure
+       de `structured_content`).
+    3. Deux `AssistantMessage` seedées directement (préférence utilisateur :
+       "être appelé par mon prénom, Mohamed").
+    4. `POST /api/memory/extract` → 200, **vrai appel Gemini** : le fait
+       extrait correspond exactement à l'intention (`"L'utilisateur préfère
+       être appelé par son prénom, Mohamed."`, catégorie `preference`,
+       confiance 1.0) — confirme `extract_memory_candidates_gemini`/
+       `MemoryService.extract_and_store` fonctionnels avec un vrai modèle,
+       pas seulement en syntaxe.
+    5. `ContextService.build_portfolio_system_prompt` appelé directement
+       (hors HTTP) : le prompt assemblé contient bien les 3 sections
+       (projet, souvenirs, contacts) dans l'ordre attendu — vérifié par
+       inspection du texte complet, pas seulement par assertions
+       partielles.
+    6. `POST /api/assistant/chat` → 200, **second vrai appel Gemini** avec
+       ce prompt enrichi : réponse obtenue — **"Mohamed, le projet de
+       Refonte site vitrine avance bien..."** — la réponse commence
+       spontanément par le prénom mémorisé, preuve comportementale (pas
+       seulement structurelle) que Memory influence réellement une réponse
+       réelle du chat portefeuille via le Context Engine.
+    7. `GET /api/knowledge/contacts`, `GET /api/knowledge/organizations`,
+       `GET /api/memory` relus après coup → cohérents avec ce qui précède.
+    8. Toutes les données de test supprimées explicitement en fin de script
+       (tenant, user, membership, project, summary, memories, contacts,
+       organizations, liens) — base ramenée à son état initial, aucune
+       donnée de test laissée dans `connector`.
+  - Vérifié (récapitulatif, remplace les lignes "Non vérifié" des Units
+    45-48 pour cette partie) : migrations 011/012 appliquées sur Postgres
+    réel ; `POST /api/knowledge/projects/{id}/sync` réel (sans LLM) ;
+    `POST /api/memory/extract` réel (avec Gemini) ; assemblage du prompt
+    par `ContextService` avec données réelles ; `POST /api/assistant/chat`
+    réel (avec Gemini) démontrant l'effet de la mémoire sur la réponse ;
+    `GET /api/memory`, `GET /api/knowledge/contacts`,
+    `GET /api/knowledge/organizations`.
+  - Non vérifié (reste ouvert, hors scope de cette unité) : fournisseur
+    OpenAI (pas de clé disponible en session — seul le chemin Gemini est
+    exercé pour l'extraction/le chat) ; passage réel par le frontend/
+    navigateur (aucune de ces routes n'est encore appelée depuis
+    `ChatHome.tsx`/les hooks frontend — Memory/Knowledge restent
+    entièrement backend à ce stade) ; comportement sous charge/concurrence ;
+    `POST /api/knowledge/projects/{id}/sync` et `POST /api/memory/extract`
+    testés isolément, pas encore dans le flux réel d'usage répété (plusieurs
+    tours de chat, plusieurs projets).
+
+- **Unit 50 — Tool Architecture, fondation (2026-07-17)** :
+  - Contexte : Phase 8 du plan de pivot ("remplacer les appels de service
+    directs par des tools nommés — SearchEmailsTool, SearchProjectsTool,
+    SearchMemoryTool, DraftReplyTool, SummarizeProjectTool, FindContactTool
+    — une responsabilité, entrée/sortie simples, facile à tester").
+  - Recherche préalable : les services des Units 45-48
+    (`ConversationService`, `MemoryService`, `KnowledgeService`,
+    `ContextService`) exposent déjà des méthodes à granularité "tool-sized"
+    (noté explicitement dans Unit 48). Le pattern de requête "emails
+    importants d'un projet" existait déjà dans
+    `api/routers/projects.py` (endpoint détail projet). Décision : chaque
+    tool est une **enveloppe fine** — délégation pure vers un service
+    existant (`SearchMemoryTool`→`MemoryService`, `FindContactTool`→
+    `KnowledgeService`) ou reprise d'une requête déjà écrite ailleurs
+    (`SearchEmailsTool` reprend exactement la requête de
+    `projects.py::project_detail`) — aucune nouvelle logique métier créée
+    à cette occasion, seulement un nouveau point d'entrée uniforme.
+  - Décision d'architecture : pas de classe de base par héritage — suit
+    explicitement `ai-workflow-rules.md` ("Avoid inheritance. Prefer
+    composition."). `email_analyzer/tools/base.py` définit `Tool` comme un
+    `typing.Protocol` (structural typing, documentation/vérification
+    statique uniquement) plutôt qu'une classe abstraite à sous-classer. Pas
+    de registre/dispatch dynamique par nom (aurait été de la
+    métaprogrammation/réflexion, explicitement proscrites) — Phase 9
+    (Agent) appellera ces classes directement et de façon séquentielle.
+  - `email_analyzer/tools/search_projects_tool.py` : `SearchProjectsTool`
+    — liste/filtre les projets d'un tenant par mot-clé sur le nom (nouveau
+    filtre `ilike`, seule vraie logique ajoutée dans cette unité), retourne
+    nom/statut/sentiment/résumé.
+  - `email_analyzer/tools/summarize_project_tool.py` : `SummarizeProjectTool`
+    — relit `ProjectSummary` existant pour un projet (ne relance jamais de
+    calcul — le recalcul reste le rôle du Fast-Track,
+    `POST /api/projects/{id}/refresh`).
+  - `email_analyzer/tools/search_emails_tool.py` : `SearchEmailsTool` —
+    reprend telle quelle la requête "top 10 emails par
+    `importance_score`/`received_at`" déjà présente dans
+    `projects.py::project_detail`, scopée à un projet. Pas de recherche
+    plein texte ni cross-projet en v1 : `Email.body_encrypted` n'a pas
+    vocation à être parcouru ainsi et il n'existe aucun index de recherche
+    — documenté comme limite explicite plutôt que d'inventer une capacité
+    absente.
+  - `email_analyzer/tools/search_memory_tool.py` /
+    `find_contact_tool.py` : délégation pure vers `MemoryService`/
+    `KnowledgeService` (Units 46-47) avec un filtre par sous-chaîne
+    optionnel côté tool (pas de nouvelle requête SQL).
+  - Volontairement absents de cette unité : `DraftReplyTool` (le seul
+    brouillon existant, `POST /api/draft` dans `api/main.py`, appartient au
+    sous-système legacy IMAP sans tenant — l'envelopper maintenant aurait
+    mélangé deux architectures différentes sans décision produit explicite
+    sur laquelle des deux le futur Agent doit cibler) ; aucune exposition
+    API (ces tools sont un usage interne, en préparation de l'Agent Phase
+    9 — les exposer en REST maintenant dupliquerait `api/routers/*`
+    existants sans consommateur réel).
+  - Vérifié : syntaxe (`ast.parse`) de tous les fichiers ; **script de
+    vérification réel** (scratchpad, supprimé après usage, pas de LLM
+    nécessaire — ces 5 tools sont en lecture seule) : seed direct d'un
+    tenant/projet/résumé/2 emails/organisation/contact/souvenir dans la
+    vraie base Postgres locale, chaque tool exécuté et son retour comparé
+    à la donnée seedée — `SearchProjectsTool` (filtre positif "ERP" trouve
+    le projet, filtre négatif "nope" retourne `[]`), `SummarizeProjectTool`
+    (résumé exact retourné), `SearchEmailsTool` (email à
+    `importance_score=80` bien en tête devant celui à 40),
+    `SearchMemoryTool` (filtre "lundi" trouve le souvenir, filtre "nope" ne
+    trouve rien), `FindContactTool` (contact + organisation "Globex"
+    retournés correctement). Toutes les données de test supprimées en fin
+    de script.
+  - Non vérifié : usage réel par un agent/LLM (Phase 9, non commencée — ces
+    tools n'ont encore aucun appelant en dehors du script de vérification).
+  - Prochaine étape naturelle (Phase 9, non commencée) : AI Agent — un
+    Planner/Executor déterministe (pas de planification autonome, pas
+    d'agents récursifs, per le plan) qui appelle ces 5 tools de façon
+    séquentielle pour répondre à une requête, avant de basculer sur le
+    chat portefeuille actuel (prompt unique, pas de sélection d'outils) ;
+    décision à prendre à ce moment-là : le nouvel Agent remplace-t-il
+    `ConversationService.send_message` ou coexiste-t-il comme un mode
+    alternatif le temps d'être validé.
+
+- **Unit 51 — AI Agent, fondation (2026-07-17)** :
+  - Contexte : Phase 9 du plan de pivot ("Agent, Planner, Executor,
+    Response Builder ; première version = exécution séquentielle de tools ;
+    pas de planification autonome, pas d'agents récursifs, tout
+    déterministe").
+  - Décision explicite tranchée dans cette unité (laissée ouverte par Unit
+    50) : l'Agent **coexiste** avec `ConversationService`/
+    `/api/assistant/chat`, il ne le remplace pas. Raison : v1 est sans
+    historique/persistance (une question isolée → une réponse), donc
+    objectivement moins capable que le chat portefeuille existant pour un
+    usage conversationnel réel ; le remplacer maintenant aurait cassé une
+    fonctionnalité qui marche (violerait "Never break existing
+    functionality") pour une version non encore éprouvée. Nouvel endpoint
+    séparé `POST /api/agent/query`, pas de changement pour
+    `/api/assistant/chat`.
+  - `email_analyzer/llm.py` : `build_agent_context` (formate la liste de
+    résultats d'outils — `{"tool","description","data"|"error"}` — en JSON
+    lisible par bloc, signale explicitement un outil en échec plutôt que de
+    l'omettre silencieusement) et `build_agent_chat_system_prompt` (prompt
+    système : le LLM rédige uniquement à partir des données déjà
+    récupérées, ne choisit aucun outil lui-même). Aucune nouvelle fonction
+    d'appel LLM : `ResponseBuilder` réutilise
+    `portfolio_assistant_chat_openai/_gemini` (Unit existante) — un prompt
+    système + un thread de messages est un contrat assez générique pour ne
+    pas justifier une troisième paire de fonctions dupliquée.
+  - `email_analyzer/agent/planner.py` : `Planner.plan(query)` retourne
+    **toujours** la même liste fixe (`search_projects`, `search_memory`,
+    `find_contact`) — aucune analyse de la requête. C'est la lecture
+    littérale de "no autonomous planning" pour une v1 : le module existe
+    avec la bonne interface pour que Executor/ResponseBuilder n'aient pas à
+    changer le jour où une vraie logique de planification (même simple,
+    par mots-clés) sera ajoutée.
+  - `email_analyzer/agent/executor.py` : `Executor` — mapping explicite
+    `{nom_outil: instance_Tool}` construit dans `__init__` (pas de
+    registre/découverte dynamique — proscrit par
+    `ai-workflow-rules.md` "Avoid ... Reflection ... Dynamic imports").
+    `execute(plan, tenant_id, user_id)` exécute chaque outil dans l'ordre,
+    logge start/done/erreur avec durée en ms
+    (`logger.info`/`logger.warning`), et **capture les exceptions par
+    outil** — un outil cassé dégrade la réponse (résultat marqué `error`)
+    plutôt que de faire échouer toute la requête (`ERROR HANDLING` du plan
+    : erreurs explicites, jamais avalées silencieusement — ici elles sont
+    capturées *et* propagées dans le résultat, pas juste avalées).
+  - `email_analyzer/agent/response_builder.py` : `ResponseBuilder.build(...)`
+    assemble le contexte, choisit `portfolio_assistant_chat_openai` ou
+    `_gemini` selon le fournisseur déjà résolu par l'appelant.
+  - `email_analyzer/agent/agent.py` : `Agent.answer(tenant_id, user_id,
+    query, ...)` — orchestrateur unique : valide la requête, résout le
+    fournisseur LLM (`select_assistant_provider`, Unit 46), appelle
+    Planner → Executor → ResponseBuilder dans cet ordre, logge
+    start/plan/done/erreur avec durée totale. Aucune boucle, aucune
+    récursion, aucun appel LLM pour décider quoi faire ensuite — un seul
+    passage séquentiel, conforme à "no recursive agents".
+  - `api/routers/agent.py` (nouveau) : `POST /api/agent/query` —
+    contrôleur HTTP fin (auth, validation, délégation à `Agent`), même
+    structure que `assistant.py`/`memory.py`/`knowledge.py`.
+  - `api/main.py` : router `agent_router` importé et enregistré.
+  - Vérifié : syntaxe (`ast.parse`) de tous les fichiers créés/modifiés ;
+    import réel dans le venv du projet (`myenv`) de `Agent` et de
+    `api.main:app` — 12 routers montés désormais (11 après Unit 50, +1) ;
+    **script de vérification réel** (scratchpad, supprimé après usage) :
+    seed d'un tenant avec un projet ("Lancement app mobile"), un contact
+    lié à une organisation, et un souvenir, dans la vraie base Postgres
+    locale ; `POST /api/agent/query` avec la question "Quels sont mes
+    projets en cours ?" → **vrai appel Gemini** → réponse 200 citant
+    correctement le nom du projet, son statut et son résumé (donnée passée
+    par les tools, pas inventée) ; requête à question vide → 422 propre
+    (`Agent.answer` valide avant d'exécuter le plan). Toutes les données de
+    test supprimées après coup.
+  - Non vérifié : fournisseur OpenAI (même limite que Unit 49 — pas de clé
+    disponible) ; comportement quand un outil échoue réellement en base
+    (le chemin `except Exception` de `Executor` est écrit et raisonné mais
+    pas déclenché par un scénario réel dans cette session) ; usage frontend
+    (`/api/agent/query` n'est appelé depuis aucun composant React — c'est
+    une API backend pure pour l'instant, à la manière de Memory/Knowledge).
+  - Prochaine étape naturelle (Phase 10, non commencée) : Daily Brief
+    (`DailyBriefService`, `DailySummaryGenerator`, `PriorityDetector`) —
+    le plan demande de réutiliser les résumés existants ; `GET /api/brief`
+    (Unit du pivot précédent) existe déjà et fait une partie de ce travail
+    (compteurs + actions recommandées) sans être encore structuré comme un
+    service dédié nommé — même geste que les Phases 4-7 : chercher
+    l'existant (`api/routers/brief.py`) avant d'ajouter, l'étendre/le
+    renommer plutôt que le dupliquer.
+
+- **Unit 52 — Daily Brief, extraction (2026-07-17)** :
+  - Contexte : Phase 10 du plan de pivot ("réutiliser les résumés
+    existants" — `GET /api/brief` existait déjà et fonctionnait, faisait
+    tout son travail directement dans le routeur). Entrée retroactive :
+    résumée dans "Current Phase" au moment de sa livraison mais jamais
+    détaillée ici — corrigé maintenant, pendant Unit 53, en relisant le
+    code réel plutôt que de laisser le tracker incomplet.
+  - `email_analyzer/services/brief_service.py` (nouveau) : `BriefService`
+    — `build_daily_brief(tenant_id, previous_login_at)` calcule les
+    compteurs (`BriefCounts` : nouveaux projets, actions en attente,
+    échéances à venir sous `UPCOMING_DEADLINE_DAYS`=7 jours, emails
+    importants, projets à risque) et les `RECOMMENDED_ACTIONS_LIMIT`=5
+    actions recommandées, à partir de `Project`/`SuggestedAction` déjà
+    persistés — aucune génération de résumé, comportement explicitement
+    non un `DailySummaryGenerator`/`PriorityDetector` séparés (jugé
+    prématuré, mêmes deux-trois lignes que Memory/Knowledge Units 46-47).
+    Repli `FIRST_VISIT_FALLBACK_DAYS`=7 jours si `previous_login_at` est
+    absent (premier login).
+  - `email_analyzer/repositories/brief_repository.py` (nouveau) :
+    `BriefRepository` — seul point d'accès SQL utilisé par `BriefService`.
+  - `api/routers/brief.py` : `GET /api/brief` appelle désormais
+    `BriefService(db).build_daily_brief(tenant.id, user.previous_login_at)`
+    au lieu de la logique inline précédente — même forme de réponse,
+    aucun changement de contrat pour `hooks/useBrief.ts`.
+  - Vérifié bout-en-bout (base Postgres locale réelle, données seedées) :
+    compteurs identiques à ceux seedés avant et après l'extraction, aucune
+    régression de comportement.
+
+- **Unit 53 — Planner v2 (query-aware) + première UI Memory/Knowledge
+  (2026-07-17)** :
+  - Contexte : reprise du pivot après Unit 52, en mode autonome
+    (préférence utilisateur établie — décider et documenter plutôt que
+    demander validation à chaque décision). Une question a été posée en
+    amont, hors du périmètre "autonome" habituel, car génuinement
+    ambiguë : le tracker référence trois numérotations de phases
+    différentes selon le document (`project-overview.md` Roadmap IA,
+    `evolution-plan.md` V2, et la numérotation du "Strategic Pivot Plan"
+    utilisateur reprise par les Units 44-52 — ce dernier document n'est
+    lui-même pas stocké dans le dépôt, seulement référencé). Réponse
+    utilisateur : continuer la suite du pivot exécutif (troisième option).
+  - **Partie 1 — Planner v2** (`email_analyzer/agent/planner.py`,
+    `email_analyzer/agent/executor.py`, `email_analyzer/agent/agent.py`) :
+    - Découverte avant modification : `Planner.plan(query)` ignorait
+      totalement `query` (toujours `["search_projects", "search_memory",
+      "find_contact"]`), et `Executor._run_tool` appelait chaque outil
+      avec `tool.run(tenant_id)` seul — jamais de `keyword`/`name`, alors
+      que `SearchProjectsTool`/`SearchMemoryTool`/`FindContactTool`
+      acceptent tous un filtre optionnel depuis Phase 8 (jamais utilisé
+      par l'Agent jusqu'ici).
+    - `planner.py` : `_BASE_PLAN = ["search_projects", "search_memory"]`
+      toujours inclus ; `find_contact` ajouté seulement si la requête
+      contient un motif court et explicite ("contact", "qui est",
+      "coordonnées", "numéro de", "email de", "joindre" — pas de NLP,
+      substring matching sur la requête en minuscules).
+    - `executor.py` : `execute(plan, tenant_id, user_id, query="")` —
+      dérive un mot-clé déterministe via `_extract_keyword` (premier mot
+      commençant par une majuscule après le premier mot de la phrase,
+      regex simple ; volontairement pas de NER/LLM) et le transmet à
+      `search_projects`(`keyword=`)/`search_memory`(`keyword=`)/
+      `find_contact`(`name=`). `summarize_project`/`search_emails`
+      restent hors du plan (nécessitent un `project_id` que rien ne
+      résout depuis le texte libre — même limite que v1, non traitée
+      dans cette unité).
+    - `agent.py` : un seul changement, `self._executor.execute(plan,
+      tenant_id, user_id, query=query)` (passage du paramètre manquant).
+    - Vérifié en conditions réelles (Postgres local, tenant/utilisateur/
+      2 projets/2 souvenirs/1 contact+organisation seedés puis
+      entièrement supprimés après coup) : le plan varie bien selon la
+      question ("Qui est le contact chez Ezikash ?" → inclut
+      `find_contact`, "Quels sont mes projets en cours ?" → non) ; le
+      mot-clé extrait filtre réellement les résultats (`search_projects`
+      passe de 2 à 1 résultat sur "Que sais-tu du projet Lancement ?",
+      motclé "Lancement") ; aucune exception levée sur les 4 requêtes
+      testées. Limite connue et acceptée (repli sans erreur, documentée
+      dans le docstring d'`_extract_keyword`) : une élision française
+      ("d'Amina") fusionne l'apostrophe dans le token et empêche la
+      détection de majuscule — le mot-clé reste alors `None`, pas de
+      filtre, comportement identique à avant cette unité, pas un
+      régression.
+    - `python -m py_compile` OK sur les 3 fichiers modifiés.
+  - **Partie 2 — UI Memory & Knowledge** (`frontend/src/`) :
+    - Découverte avant modification (exploration dédiée) : `GET/DELETE
+      /api/memory` et `GET /api/knowledge/contacts`/`/organizations`
+      existent et fonctionnent depuis Units 46-47, mais aucune ligne de
+      `frontend/src` ne les référence — confirmé par `grep -rn
+      "api/agent\|api/memory\|api/knowledge" frontend/src` (aucune
+      correspondance avant cette unité).
+    - `memoryApi.ts`/`knowledgeApi.ts` (nouveaux) : suivent exactement le
+      pattern déjà en place (`actionsApi.ts`/`agendaApi.ts` — type miroir
+      du schéma Pydantic backend + fonctions `fetch*`/`delete*` via
+      `apiFetch`+`parseResponseJson`/`parseApiError`).
+    - `hooks/useMemoryAndKnowledge.ts` (nouveau) : pattern `useBrief.ts`
+      (`useXxx(enabled) -> {data, loading, error, reload}`, gated par
+      `saasEnabled`) — charge les 3 ressources en parallèle
+      (`Promise.all`) ; `removeMemory(id)` appelle `DELETE
+      /api/memory/{id}` puis retire la ligne localement (pas de refetch
+      complet).
+    - `pages/MemoryPage.tsx` (nouveau) : deux sections (souvenirs avec
+      bouton supprimer par ligne ; contacts groupés par organisation).
+      Mêmes garde-fous que `ProjectHubPage.tsx` (SaaS uniquement →
+      `Navigate` vers `/` sinon, jeton absent → `/login`). Tokens
+      réutilisés tels quels (`rounded-lg`, `bg-surface`,
+      `border-border-default`, `bg-accent-soft`/`text-accent-primary`
+      pour les badges de catégorie) — aucun nouveau token ajouté à
+      `tailwind.config.js`.
+    - `components/AppShell.tsx` : entrée "Mémoire" ajoutée à
+      `SAAS_NAV_ITEMS` (icône 🧠, entre Actions et Paramètres).
+    - `App.tsx` : route `/memory` → `MemoryPage`, même pattern que
+      `/projects`/`/agenda`.
+    - **Décision explicite de ne pas faire cette fois** : brancher `POST
+      /api/agent/query` dans le frontend. Raison : `ConversationService`
+      (le chat portefeuille réellement utilisé, `/api/assistant/chat`)
+      injecte déjà Projects+Memory+Knowledge dans son prompt système à
+      chaque message depuis Unit 48 (`ContextService`) — avant cette
+      unité, l'Agent (plan fixe, sans historique) n'apportait donc aucune
+      capacité que le chat portefeuille n'avait pas déjà en mieux
+      (historique multi-tours). Lui donner une UI séparée aurait dupliqué
+      une capacité sans l'améliorer. Le Planner v2 ci-dessus est un
+      préalable raisonnable avant de rouvrir cette question, pas encore
+      suffisant pour la trancher (le chat portefeuille n'utilise toujours
+      aucun outil/plan, juste un prompt système enrichi).
+    - Vérifié : `npx tsc --noEmit` sans erreur ; `npx vite build`
+      transforme les 67 modules sans erreur (échec ensuite limité au même
+      nettoyage de `dist/` pré-existant appartenant à `root`, problème
+      d'environnement déjà documenté dans plusieurs entrées précédentes,
+      sans rapport avec ce code). Types frontend vérifiés cohérents avec
+      les schémas Pydantic réels des routeurs (lus directement, pas
+      supposés).
+    - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+      d'environnement que toutes les entrées précédentes — pas d'outil
+      navigateur fonctionnel dans cette session) ; recommandé à
+      l'utilisateur de lancer `npm run dev` localement pour un premier
+      passage visuel de `/memory`.
+  - Prochaine étape naturelle (non commencée) : maintenant que Memory et
+    Knowledge ont une UI et que le Planner est query-aware, rouvrir la
+    question laissée en suspens par Unit 51 (Agent vs. chat portefeuille)
+    avec des éléments concrets en main plutôt qu'en théorie ; ou
+    `DraftReplyTool`/`ListMeetingsTool` (Phase 8, toujours pas faits — le
+    premier exigerait d'adapter la forme `analysis` de `POST /api/draft`
+    au modèle `ProjectSummary` persisté, pas un simple wrapper ; le second
+    est un wrapper propre autour de `api/routers/agenda.py`, plus proche
+    du contrat "lecture seule" des tools existants).
+
+- **Unit 54 — Objectives, fondation (2026-07-17)** :
+  - Contexte : reprise du pivot en mode autonome (« continue
+    l'implémentation des phases restantes »), Phase 11 du plan
+    ("Objective/Milestone/Progress/Blocking Issue ; réutiliser `Project`
+    autant que possible"). Recherche préalable : `grep -n
+    "Objective\|Milestone\|Blocking"` sur `db/models.py` et
+    `api/routers/*.py` → aucune correspondance, rien à étendre, concept
+    réellement absent.
+  - Décision d'architecture (documentée pour transparence, même logique
+    que Units 46/47/52) : le plan nomme 4 concepts
+    (Objective/Milestone/Progress/Blocking Issue) ; implémentés comme
+    **2 tables seulement**. "Progress" n'est pas une table — c'est un
+    calcul à la lecture (jalons terminés / total, voir
+    `ObjectiveService._with_progress`), stocker une progression
+    redondante avec les jalons aurait créé une resynchronisation à gérer
+    pour rien. "Blocking Issue" n'est pas une table — c'est la colonne
+    `Objective.blocking_reason` (texte, vidée automatiquement quand le
+    statut quitte `blocked`), un objectif n'ayant qu'un seul blocage actif
+    possible en v1, pas une liste.
+  - `email_analyzer/db/models.py` : `ObjectiveStatus`
+    (on_track/at_risk/blocked/done), `MilestoneStatus` (pending/done),
+    `Objective` (`objectives` — `project_id` nullable, FK vers `Project`,
+    "use existing projects whenever possible" du plan : un objectif peut
+    soit prolonger un projet existant, soit rester un but personnel du
+    tenant sans projet), `Milestone` (`milestones`, FK vers `objectives`).
+  - `alembic/versions/013_objectives.py` : migration des 2 tables
+    (`012_knowledge` → `013_objectives`), mêmes conventions (index,
+    downgrade symétrique) — **appliquée réellement**
+    (`alembic upgrade head`) sur la base Postgres locale `connector`.
+  - `email_analyzer/repositories/objective_repository.py` :
+    `ObjectiveRepository` — CRUD objectifs + jalons, `update_status` vide
+    automatiquement `blocking_reason` si le nouveau statut n'est pas
+    `blocked` (évite une raison de blocage orpheline après déblocage).
+  - `email_analyzer/services/objective_service.py` : `ObjectiveService` —
+    valide le titre (non vide), valide que `project_id` (si fourni)
+    appartient bien au tenant (404 sinon, même garde-fou que les autres
+    services), valide les statuts contre les enums (422 sinon), calcule la
+    progression (`ObjectiveProgress` dataclass, pas de dépendance
+    Pydantic/FastAPI dans le service). Logging explicite
+    (`logger.info` sur create/update_status).
+  - `api/routers/objectives.py` (nouveau) : `GET/POST /api/objectives`
+    (filtre optionnel `project_id`), `PATCH /api/objectives/{id}` (statut +
+    raison de blocage), `POST /api/objectives/{id}/milestones`,
+    `PATCH /api/objectives/{id}/milestones/{milestone_id}` — CRUD complet,
+    contrairement aux fondations précédentes (Memory/Knowledge) qui
+    n'exposaient que lecture + une action d'écriture explicite ; ici
+    justifié par la nature du concept (un objectif se construit
+    incrémentalement, pas en un seul appel).
+  - `api/main.py` : router `objectives_router` importé et enregistré.
+  - Vérifié : syntaxe (`ast.parse`) de tous les fichiers créés/modifiés ;
+    migration réellement appliquée (`012_knowledge` → `013_objectives`
+    sans erreur) ; import réel dans le venv du projet (`myenv`) de
+    `ObjectiveService` et de `api.main:app` — 13 routers montés désormais
+    (12 après Unit 51, +1) ; **script de vérification réel** (scratchpad,
+    supprimé après usage, pas de LLM nécessaire) contre la vraie base
+    Postgres locale : création d'un objectif lié à un projet existant et
+    d'un objectif personnel sans projet, 404 confirmé sur `project_id`
+    inconnu, ajout de 2 jalons (0% → confirmé), complétion d'un jalon (50%
+    exact), passage à `blocked` avec raison puis retour à `on_track`
+    (`blocking_reason` bien remis à `None` automatiquement), 422 confirmé
+    sur un statut invalide, filtre `project_id` sur `GET /api/objectives`
+    confirmé (1 résultat vs 2 sans filtre). Toutes les données de test
+    supprimées après coup.
+  - Non vérifié : UI frontend (aucune page ne consomme encore
+    `/api/objectives` — même situation que Memory/Knowledge avant Unit 53,
+    documenté explicitement dans "Hors scope" de `project-overview.md`
+    plutôt que laissé implicite) ; usage réel par l'Agent/le chat
+    portefeuille (`ContextService` n'inclut pas encore les objectifs dans
+    le prompt système — pas fait dans cette unité, resterait à décider si
+    ça a sa place aux côtés de Projects/Memory/Knowledge ou si c'est trop
+    tôt tant qu'il n'y a pas d'UI pour en créer).
+  - Prochaine étape naturelle (Phase 12, non commencée) : Timeline unifiée
+    — `GET /api/timeline` (`api/routers/brief.py`) existe déjà et fusionne
+    emails + mises à jour de résumé par ordre chronologique, mais pas
+    encore les actions suggérées ni les rendez-vous d'agenda (`Appointment`)
+    que le plan demande d'inclure ("Merge Emails, Actions, Summaries,
+    Future Meetings"). Même geste attendu : étendre `get_timeline`
+    existant (l'extraire vers un `TimelineService` au passage, comme
+    Unit 52 pour le Brief) plutôt qu'une nouvelle route.
+
+- **Unit 55 — Timeline unifiée (2026-07-17)** :
+  - Contexte : suite directe d'Unit 54 en mode autonome, Phase 12 du plan
+    de pivot ("Merge Emails, Actions, Summaries, Future Meetings. Display
+    everything chronologically."). `GET /api/timeline` existait déjà
+    (`api/routers/brief.py`) et fusionnait 2 des 4 types demandés
+    (emails, résumés) avec la logique inline dans le routeur — même
+    situation que le Brief avant Unit 52. Décision : même geste, extraire
+    puis étendre plutôt que dupliquer.
+  - `email_analyzer/repositories/timeline_repository.py` (nouveau) :
+    `TimelineRepository` — reprend telles quelles les 2 requêtes
+    existantes (`list_email_events`, `list_summary_events`) et ajoute
+    `list_action_events` (`SuggestedAction`) et `list_appointment_events`
+    (`Appointment`), toutes acceptant le même filtre `project_id` optionnel
+    que l'ancien code.
+  - `email_analyzer/services/timeline_service.py` (nouveau) :
+    `TimelineService.build_timeline(tenant_id, project_id, limit)` —
+    assemble les 4 types d'événements (`TimelineEvent` dataclass : `type`
+    ∈ {email, summary_update, action_suggested, meeting}), trie par `at`
+    décroissant, tronque à `limit` — reprend exactement la logique de tri
+    de l'ancien `get_timeline`, étendue aux 2 nouveaux types. Aucune
+    nouvelle donnée : les 4 tables lues existaient déjà et étaient déjà
+    peuplées par le Fast-Track/l'agenda IA.
+  - `api/routers/brief.py` : `get_timeline` délègue à `TimelineService`
+    (contrôleur HTTP fin) ; imports `Email`/`Project`/`ProjectSummary`
+    retirés (plus utilisés directement dans ce fichier — la requête
+    `discover_projects` n'en a jamais eu besoin) ; commentaire du type
+    `TimelineEventOut.type` mis à jour pour lister les 4 valeurs possibles.
+  - Vérifié : syntaxe (`ast.parse`) des 3 fichiers modifiés/créés ; import
+    réel dans le venv du projet (`myenv`) de `TimelineService` et de
+    `api.main:app` (toujours 13 routers — extension interne, pas de
+    nouvelle route) ; **script de vérification réel** (scratchpad,
+    supprimé après usage, pas de LLM nécessaire) contre la vraie base
+    Postgres locale : un projet avec 1 email, 1 résumé, 1 action suggérée
+    et 1 rendez-vous, chacun à une heure différente ; `GET /api/timeline`
+    → les 4 types présents (`{"email", "summary_update",
+    "action_suggested", "meeting"}`), triés du plus récent (email) au plus
+    ancien (rendez-vous), exactement dans l'ordre attendu ; filtre
+    `project_id` sur un projet inexistant → liste vide confirmée. Données
+    de test supprimées après coup.
+  - Non vérifié : usage frontend (aucune page ne consomme
+    `GET /api/timeline` pour l'instant, à confirmer/vérifier séparément —
+    pas exploré dans cette unité) ; comportement avec un grand volume
+    d'événements mélangés (pas de pagination au-delà de `limit`, testé
+    seulement avec 1 événement par type).
+  - **Bilan à ce stade** : les 12 phases du plan de pivot ont chacune au
+    moins une fondation implémentée et vérifiée avec de vraies données
+    (Postgres local, et pour Conversation/Memory/Agent des appels Gemini
+    réels). Ce qui reste ouvert, recensé pour référence plutôt que traité
+    dans cette unité : UI frontend pour Objectives et Timeline ; decision
+    Agent vs. chat portefeuille (Unit 51/53) ; `DraftReplyTool`/
+    `ListMeetingsTool` (Phase 8) ; injection des Objectives dans
+    `ContextService` ; extraction mémoire/sync connaissance automatiques
+    (actuellement explicites par choix, Units 46-47) ; `code-standards.md`
+    toujours non aligné (Unit 44).
+
+- **Unit 56 — UI Objectifs & Timeline (2026-07-19)** :
+  - Contexte : reprise du point suivant sur la liste laissée par Unit 55
+    ("Attaque le point suivant" — premier de la liste : UI frontend pour
+    Objectives et Timeline). Découverte avant modification (confirmée par
+    grep) : `/api/objectives` et `/api/timeline` fonctionnels côté backend
+    depuis Units 54-55, aucune référence dans `frontend/src` — même
+    situation que Memory/Knowledge avant Unit 53, même geste appliqué.
+  - `frontend/src/objectivesApi.ts` (nouveau) : miroir de
+    `MilestoneOut`/`ObjectiveOut` (`api/routers/objectives.py`) —
+    `fetchObjectives`, `createObjective`, `updateObjectiveStatus`,
+    `addMilestone`, `setMilestoneStatus`. Suit le pattern déjà en place
+    (`actionsApi.ts` pour le PATCH, `memoryApi.ts`/`knowledgeApi.ts` pour
+    la forme générale).
+  - `frontend/src/timelineApi.ts` (nouveau) : miroir de `TimelineEventOut`,
+    une seule fonction `fetchTimeline(limit)`.
+  - `frontend/src/hooks/useObjectivesAndTimeline.ts` (nouveau) : même
+    pattern que `useMemoryAndKnowledge.ts` (Unit 53) —
+    `useXxx(enabled) -> {data, loading, error, reload}`, chargement
+    parallèle (`Promise.all`) des deux ressources ; actions optimistes
+    côté client après chaque mutation (`addObjective`,
+    `toggleObjectiveBlocked`, `addObjectiveMilestone`, `toggleMilestone`)
+    qui remplacent l'objectif modifié dans le state local avec la réponse
+    du serveur (le backend renvoie l'objectif complet à jour, y compris le
+    pourcentage recalculé — pas de refetch complet nécessaire).
+  - `frontend/src/pages/ObjectivesPage.tsx` (nouveau) : deux sections,
+    même structure que `MemoryPage.tsx` — "Objectifs" (formulaire de
+    création, liste avec barre de progression, badge de statut coloré,
+    raison de blocage si présente, jalons à cocher, formulaire d'ajout de
+    jalon inline, bouton bloquer/débloquer) et "Timeline" (flux
+    chronologique en lecture seule, icône par type d'événement). Mêmes
+    garde-fous que les autres pages SaaS (`Navigate` vers `/` si mode
+    legacy, vers `/login` si jeton absent).
+    - Correction en cours de rédaction : première version utilisait des
+      classes Tailwind inventées (`bg-warning-soft`, `bg-danger-soft`) qui
+      n'existent pas dans `tailwind.config.js` — repérée en vérifiant les
+      tokens réels (`grep` sur les usages existants de `bg-warning`/
+      `bg-danger` dans `AgendaPage.tsx`/`ProjectHub.tsx`) plutôt que
+      supposés ; corrigée en `bg-warning/10`/`bg-danger/10` (modificateur
+      d'opacité natif Tailwind, déjà la convention du projet pour les
+      teintes sans variante "soft" dédiée).
+  - `components/AppShell.tsx` : entrée "Objectifs" ajoutée à
+    `SAAS_NAV_ITEMS` (icône 🎯, entre Mémoire et Paramètres).
+  - `App.tsx` : route `/objectives` → `ObjectivesPage`, même pattern que
+    `/memory`.
+  - Volontairement pas dans cette unité : édition du titre d'un objectif,
+    suppression d'un objectif ou d'un jalon, sélection d'un projet à la
+    création (le formulaire ne crée que des objectifs personnels sans
+    projet — lier un objectif à un projet reste possible via l'API mais
+    pas encore depuis l'UI) — cohérent avec Memory/Knowledge (Unit 53) où
+    la première UI était volontairement minimale (lecture + une action
+    d'écriture), ici légèrement plus riche car le concept d'Objective
+    l'exige (rien d'utile à afficher sans pouvoir en créer un).
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `npx vite build` transforme
+    71 modules sans erreur (67 après Unit 53, +4 fichiers ajoutés dans
+    cette unité — cohérent) ; échec ensuite limité au même nettoyage de
+    `dist/` pré-existant appartenant à `root`, problème d'environnement
+    déjà documenté dans plusieurs entrées précédentes, sans rapport avec ce
+    code. Types frontend vérifiés cohérents avec les schémas Pydantic
+    réels des routeurs (lus directement).
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que toutes les entrées précédentes) ; recommandé à
+    l'utilisateur de lancer `npm run dev` localement pour un premier
+    passage visuel de `/objectives` — en particulier le calcul de largeur
+    de la barre de progression (`style={{width: '${percent}%'}}`, jamais
+    vérifié rendu, seulement vérifié par le type-check).
+  - Prochaine étape naturelle (point suivant sur la liste laissée par Unit
+    55) : la décision Agent vs. chat portefeuille (Unit 51/53), ou
+    `DraftReplyTool`/`ListMeetingsTool` (Phase 8, toujours pas faits).
+
+- **Unit 57 — Décision Agent/chat portefeuille + ListMeetingsTool
+  (2026-07-19)** :
+  - Contexte : reprise du point suivant sur la liste (« continue » après
+    Unit 56) — deux items ouverts, traités ensemble car liés : la question
+    Agent vs. chat (Unit 51/53) et `ListMeetingsTool` (Phase 8).
+  - **Partie 1 — Décision Agent vs. chat portefeuille** (documentaire, pas
+    de code) : la question restait ouverte depuis Unit 51 ("l'Agent
+    remplace-t-il `ConversationService` ou coexiste-t-il ?"), rouverte
+    explicitement par Unit 53 une fois le Planner devenu query-aware.
+    Analyse : le chat portefeuille (`ContextService`) injecte
+    *systématiquement* la totalité des projets/souvenirs/contacts du
+    tenant dans le prompt système à chaque message — ça fonctionne mais ne
+    passe pas à l'échelle indéfiniment. L'Agent (Planner+Executor) ne
+    récupère que les données pertinentes à la question via des tools
+    filtrés — ça passerait mieux à l'échelle mais n'a ni historique ni
+    mémoire de conversation. Décision : **coexistence tranchée
+    durablement**, pas de fusion. Raison explicite : fusionner
+    maintenant (faire router `ConversationService` vers
+    Planner/Executor pour construire son contexte au lieu de
+    `ContextService`) serait une optimisation de la taille du contexte
+    non justifiée par un problème réel observé — aucun signal actuel
+    (nombre de projets/souvenirs) ne montre que le "tout injecter" de
+    `ContextService` pose un problème de coût/latence/qualité. Contraire à
+    "Ignore premature optimization. Correctness first." (règles de
+    développement du pivot). Cette décision ferme la question tant qu'un
+    signal concret (tenant avec beaucoup de données, plainte sur la
+    qualité des réponses, coût token mesuré) ne la rouvre pas — documentée
+    ici pour ne pas la rouvrir sans raison à chaque session.
+  - **Partie 2 — `ListMeetingsTool`** (code) :
+    `email_analyzer/tools/list_meetings_tool.py` (nouveau) — reprend
+    exactement la requête déjà utilisée par `api/routers/agenda.py::
+    get_agenda` (rendez-vous non annulés, `scheduled_at >= now`, tri
+    ascendant), scopable par `project_id`. `DraftReplyTool` reste
+    volontairement non fait (même raison que documentée depuis Unit 50 :
+    `POST /api/draft` est un sous-système legacy IMAP non multi-tenant,
+    l'adapter au modèle `ProjectSummary` persisté est un vrai chantier,
+    pas un simple wrapper — pas traité dans cette unité, faute de
+    justification suffisante pour l'ouvrir maintenant).
+  - `email_analyzer/agent/planner.py` : nouveau `_MEETING_TRIGGERS`
+    ("réunion", "rendez-vous", "rdv", "meeting", "calendrier", "agenda"),
+    ajoute `list_meetings` au plan selon le même mécanisme substring que
+    `_CONTACT_TRIGGERS` (Unit 53) — aucune nouvelle abstraction, extension
+    directe du motif existant.
+  - `email_analyzer/agent/executor.py` : `ListMeetingsTool` ajouté au
+    mapping explicite `self._tools` ; passe par le chemin de repli
+    `tool.run(tenant_id)` de `_run_tool` (le tool n'a pas besoin de
+    `keyword`, seulement d'un `project_id` optionnel non résolu par le
+    Planner — même limite que `summarize_project`/`search_emails`, mais
+    ici sans bloquer l'inclusion dans le plan puisque le mode tenant-large
+    a un sens pour ce tool, contrairement aux deux autres qui exigent un
+    projet précis).
+  - Vérifié : syntaxe (`ast.parse`) des 3 fichiers modifiés/créés ;
+    **script de vérification réel** (scratchpad, supprimé après usage)
+    contre la vraie base Postgres locale : `Planner().plan(...)` inclut
+    bien `list_meetings` sur "Quels sont mes prochains rendez-vous ?" et
+    pas sur "Comment vont mes projets ?" ; `ListMeetingsTool.run` direct
+    sur 3 rendez-vous seedés (1 futur non annulé, 1 futur annulé, 1 passé)
+    → ne retourne que le bon ; **vrai appel Gemini** via
+    `POST /api/agent/query` avec la question "Quel est mon prochain
+    rendez-vous ?" → réponse citant correctement la description, le
+    projet, la date et le statut du rendez-vous seedé. Données de test
+    supprimées après coup.
+  - Non vérifié : `DraftReplyTool` (non fait, voir ci-dessus) ; usage
+    frontend de l'Agent (toujours aucune UI, cohérent avec la décision de
+    coexistence — pas de raison d'en ajouter une tant que l'Agent n'offre
+    rien que le chat n'ait déjà).
+  - Prochaine étape naturelle : plus d'item non traité sur la liste des 5
+    laissée après Unit 55, à l'exception de `code-standards.md` (non
+    aligné depuis Unit 44, référence toujours Celery/React Native) et de
+    `DraftReplyTool` (délibérément non prioritaire, chantier plus lourd).
+    Le pivot exécutif a maintenant une fondation vérifiée pour chacune des
+    12 phases, une UI pour les 4 piliers qui en avaient besoin
+    (Conversation, Memory, Knowledge, Objectives/Timeline), et une
+    décision d'architecture documentée sur l'Agent — bon point d'arrêt
+    naturel pour cette série de sessions autonomes.
+
+- **Unit 58 — Rattrapage documentaire : architecture.md + code-standards.md
+  (2026-07-19)** :
+  - Contexte : en préparant `code-standards.md` (point suivant sur la
+    liste après Unit 57), relecture de `architecture.md` pour vérifier la
+    cohérence avant de le citer — découverte que §2 (arborescence), §3
+    (modèle de données) et §7 (vision long terme) n'avaient **jamais été
+    mis à jour depuis Unit 44** (2026-07-17) alors que 13 unités de code
+    ont suivi (45-57) : §3 affirmait encore explicitement "il n'existe
+    aucune des tables suivantes : Memory, ..., Contact, Organization,
+    Objective, ..." — toutes existent depuis Units 46/47/54. §7 affirmait
+    "Memory Engine : non commencé", "Knowledge Graph : non commencé",
+    "Context Engine : non commencé", "Couche Agent/Tools : non commencé,
+    aucune forme de tool-calling n'existe" — tout ceci était faux au
+    moment de la lecture. Violation directe de la règle "Sync Specs
+    Instantly" (`ai-workflow-rules.md` §5.1), passée inaperçue parce que
+    chaque unité 45-57 mettait à jour `progress-tracker.md` et
+    `project-overview.md` mais pas systématiquement `architecture.md`.
+  - `context/architecture.md` :
+    - §2 (arborescence) : ajout des dossiers `repositories/`, `services/`,
+      `tools/`, `agent/`, des 4 nouveaux routeurs (`memory.py`,
+      `knowledge.py`, `agent.py`, `objectives.py`), des nouvelles pages/
+      hooks frontend (`MemoryPage.tsx`, `ObjectivesPage.tsx`,
+      `useMemoryAndKnowledge.ts`, `useObjectivesAndTimeline.ts`).
+    - §3 (modèle de données) : ajout de `Memory`, `Organization`/
+      `Contact`/`ProjectContactLink`, `Objective`/`Milestone` avec leur
+      rôle réel (une phrase chacun, cf. leurs docstrings dans
+      `db/models.py`) ; la liste "n'existe pas" réduite à ce qui est
+      encore vrai (`Fact` générique, `Entity` générique, `Document`,
+      `Insight`, `Decision`, `ToolExecution`, `KnowledgeGraphEdge`).
+    - §7 (vision long terme) : les 4 sous-sections (Memory Engine,
+      Knowledge Graph, Context Engine, Agent/Tools) réécrites de "non
+      commencé" à "fondation posée (Unit XX)" avec le détail réel de ce
+      qui existe et n'existe toujours pas — même niveau de précision que
+      `project-overview.md`, pour que les deux documents ne divergent
+      plus sur le statut d'implémentation.
+    - §8 (invariants) : ajout de l'invariant 5, "Model → Repository →
+      Service → API", qui décrit une convention réellement suivie depuis
+      Unit 45 mais jamais formalisée comme invariant (seulement respectée
+      par habitude/répétition dans le code).
+  - `context/code-standards.md` : réécriture complète. Contenu retiré
+    (jamais implémenté dans ce dépôt, confirmé par recherche —
+    `find`/`grep` sur `pyproject.toml`, `.pre-commit-config.yaml`,
+    `mypy.ini`, `.eslintrc*`, `requirements.txt`, `package.json` : aucune
+    trace) : Celery, React Native, `mypy`/`tsc` en CI, couverture de tests
+    80%, `Bandit`, cache device 30 jours, index vectoriel Orama/Voy.
+    Nouveau contenu factuel : stack réelle (renvoi à `architecture.md`),
+    absence totale d'outillage automatisé assumée explicitement (section
+    dédiée "Ce qui n'est délibérément pas en place" plutôt que silence sur
+    le sujet), conventions Python réellement suivies (routes FastAPI
+    synchrones — vérifié par grep sur `api/routers/objectives.py`/
+    `memory.py` : aucun `async def` — Model→Repository→Service→API,
+    `llm.py` seul point d'appel SDK LLM, jamais d'exception avalée
+    silencieusement, logging `logger.info`/`logger.warning` par module,
+    migrations Alembic avec `downgrade()` symétrique), conventions
+    TypeScript (hooks personnalisés, types miroirs des schémas Pydantic,
+    ne pas inventer de classe Tailwind sans vérifier son existence dans
+    `tailwind.config.js` — référence explicite à l'erreur
+    `bg-warning-soft` corrigée en Unit 56 comme exemple concret), protocole
+    de vérification réel (scripts jetables contre une vraie base Postgres,
+    pas de mocks — renvoi vers les Units 46-57 comme exemples).
+  - Vérifié : relecture manuelle de chaque fait technique cité contre le
+    code réel (arborescence via `ls`/`find`, absence d'outillage via
+    `grep`/`find` ciblés, absence d'`async def` dans les routeurs récents
+    via `grep -n "^def \|^async def "`). Aucun changement de code, aucune
+    fonctionnalité modifiée — purement documentaire, comme Unit 44.
+  - Non vérifié : aucune vérification automatisée possible pour un
+    changement purement documentaire (même note qu'Unit 44).
+  - Point encore ouvert (recensé, pas traité) : `DraftReplyTool`
+    (délibérément non prioritaire depuis Unit 50, chantier plus lourd que
+    les autres tools — nécessite d'adapter la forme `analysis` de
+    `POST /api/draft` au modèle `ProjectSummary` persisté).
+
+- **Unit 59 — DraftReplyTool (2026-07-19)** :
+  - Contexte : dernier point sur la liste énumérée à l'utilisateur, demande
+    explicite d'implémentation. Recherche préalable :
+    `email_analyzer/templates.py::generate_response_draft` est déjà un
+    moteur de templates **déterministe** (routine/alerte/kickoff choisi par
+    heuristique sur risque/tendance/mots-clés, `format_template`
+    remplit un gabarit) — pas d'appel LLM du tout, contrairement à
+    l'hypothèse initiale. Utilisé aujourd'hui uniquement par le legacy
+    `POST /api/draft` (`api/main.py`), qui attend un dict `analysis` à
+    clés françaises (`évaluation_risque.niveau_risque`,
+    `analyse_sentiment.tendance`, `emails_critiques`, `résumé_assistant.
+    texte`) — la sortie de `EmailProcessor.generate_intelligent_summary`
+    (mode IMAP), qui n'a rien à voir avec la forme SaaS persistée
+    (`ProjectSummary`/`ProjectSummaryLLM.structured_content`, clés
+    anglaises : `risques`, `next_steps`, `sentiment_trend`,
+    `llm_risk_level`). Décision : **ne pas réécrire le moteur de
+    templates** (fonctionne, testé de longue date par le legacy) — écrire
+    uniquement l'adaptateur SaaS→legacy, une seule fois, dans le tool.
+  - `email_analyzer/tools/draft_reply_tool.py` (nouveau) : `DraftReplyTool`
+    — charge `Project`+`ProjectSummary` (404 si projet inconnu du tenant,
+    422 si aucun résumé), construit le dict `analysis` legacy :
+    `niveau_risque` = `ProjectSummary.llm_risk_level` (déjà au format
+    attendu — FAIBLE/MODÉRÉ/CRITIQUE, confirmé dans le prompt système de
+    `llm.py:366`), `recommandation` = description du premier `next_step`,
+    `facteurs_risque` = descriptions de `structured_content["risques"]`,
+    `tendance` = normalisée depuis `sentiment_trend` (contient
+    "posit"/"nég"/"neg" → Positive/Négative/Neutre) avec repli sur
+    `ProjectSummary.sentiment` (positif/under_tension/awaiting_feedback →
+    Positive/Négative/Neutre) si `sentiment_trend` absent,
+    `emails_critiques` = 3 emails les plus importants du projet (même
+    requête que `SearchEmailsTool`, Unit 50), `résumé_assistant.texte` =
+    `ProjectSummary.content`. Appelle ensuite
+    `templates.generate_response_draft(project.name, analysis)` sans
+    modification.
+  - `api/routers/projects.py` : nouvel endpoint
+    `POST /api/projects/{project_id}/draft-reply` (contrôleur HTTP fin,
+    même style que le reste du routeur) — **pas** de nouveau routeur créé,
+    ajouté à `projects_router` existant puisque l'action est scopée à un
+    projet, comme `POST /api/projects/{id}/refresh`/`/merge`. Décision
+    documentée : ce tool a été **exposé via l'API** (contrairement aux 6
+    précédents, usage interne uniquement) parce que le Planner ne peut pas
+    le déclencher automatiquement (pas de résolution de `project_id` depuis
+    le texte libre, même limite que `summarize_project`/`search_emails`) —
+    sans consommateur explicite, le tool serait du code mort, contraire à
+    "Ban Speculative Coding" (`ai-workflow-rules.md` §1.3).
+  - `email_analyzer/agent/executor.py` : `DraftReplyTool` ajouté au mapping
+    `self._tools` (cohérence avec `summarize_project`/`search_emails`,
+    déjà enregistrés bien que jamais inclus dans un plan) — mais **pas**
+    ajouté aux déclencheurs du `Planner` (même raison que ci-dessus).
+  - Vérifié : syntaxe (`ast.parse`) des 3 fichiers modifiés/créés ; import
+    réel dans le venv du projet (`myenv`) et de `api.main:app` (toujours 13
+    routers — endpoint ajouté à un routeur existant, pas de nouveau
+    routeur) ; **script de vérification réel** (scratchpad, supprimé après
+    usage, **aucun LLM nécessaire** — le moteur est déterministe) contre la
+    vraie base Postgres locale : projet avec résumé `llm_risk_level=
+    "CRITIQUE"`/risques/next_steps/email important → `template_id=
+    "alerte"`, corps citant le nom du projet et la checklist contenant le
+    facteur de risque et l'email critique ; projet avec résumé
+    `llm_risk_level="FAIBLE"`/`sentiment_trend="Positive"` → `template_id=
+    "routine"` ; projet sans résumé → 422 propre ; projet inconnu → 404.
+    Les 4 scénarios confirment que le moteur de templates existant réagit
+    correctement à des données mappées depuis la forme SaaS réelle, pas
+    seulement à la forme legacy d'origine. Données de test supprimées
+    après coup.
+  - Non vérifié : usage frontend (`POST /api/projects/{id}/draft-reply`
+    n'est appelé depuis aucune page — pas de bouton "Générer un brouillon"
+    dans `ProjectDetailPage.tsx` à ce stade, cohérent avec le choix de ne
+    pas construire d'UI spéculative pour un endpoint qui vient d'être créé).
+  - **Bilan** : les 6 tools "core" nommés explicitement par le plan de
+    pivot (SearchEmailsTool, SearchProjectsTool, SearchMemoryTool,
+    DraftReplyTool, SummarizeProjectTool, FindContactTool) plus
+    `ListMeetingsTool` (ajout justifié par une capacité agenda déjà
+    existante) sont maintenant tous implémentés et vérifiés. Plus aucun
+    point sur la liste énumérée précédemment, à l'exception de
+    l'absence d'outillage automatisé (assumée, documentée dans
+    `code-standards.md` Unit 58) et des vérifications humaines
+    recommandées (rendu navigateur, fournisseur OpenAI).
+
+- **Unit 60 — Chat rapide + analyse auto en arrière-plan avec indicateur
+  (2026-07-19)** :
+  - Contexte : trois demandes produit. Exploration préalable :
+    `EmailProcessor.fetch_last_n_emails_for_chat` (`analyzer.py`, chat
+    legacy `/api/chat`) ouvrait une connexion IMAP live à chaque message
+    (`use_email_cache=False`) alors qu'un cache JSON par tenant existe
+    déjà, rempli par `/api/analyze`/`/api/projects/{id}/refresh`
+    (`project_mail.py::load_cache`) mais jamais lu par le chat. Le chat
+    SaaS (`/api/assistant/chat` → `ConversationService`) lisait déjà
+    uniquement la DB (jamais IMAP), donc conforme à la demande 1 côté
+    source de données, mais avec un budget de latence non maîtrisé :
+    historique non borné (défaut repository 100 messages),
+    N+1 non borné dans `ContextService._build_projects_context`, et
+    **aucun timeout** sur les deux appels Gemini du chat conversationnel
+    (`project_assistant_chat_gemini` et `portfolio_assistant_chat_gemini`,
+    `chat.send_message(...)` sans `request_options`). L'analyse
+    automatique en arrière-plan existait déjà (auto-sync login 1x/24h +
+    cron `run_agenda_refresh`/`run_scheduled_sync`, file `arq`/Redis,
+    `jobs.py`) — il manquait seulement un indicateur global côté frontend.
+  - **Demande 1 (chat → données disponibles, pas de relance d'analyse)** :
+    `analyzer.py::fetch_last_n_emails_for_chat` construit maintenant
+    l'analyzer avec `use_email_cache=True` et tente d'abord
+    `_filter_cached_emails_for_project` (nouvelle méthode statique) —
+    filtre `analyzer.email_cache` via `search_project_emails_from_list`
+    (déjà existant dans `project_mail.py`, réutilisé tel quel) sans ouvrir
+    de connexion IMAP. Repli sur la connexion IMAP live **uniquement** si
+    le cache ne contient aucune correspondance (aucune analyse n'a encore
+    tourné pour ce filtre/tenant).
+  - **Demande 2 (indicateur "analyse en cours")** : `jobs.py` — nouvel
+    index Redis par tenant (`SET myconnector:active_jobs:{tenant_id}`,
+    peuplé dans `create_job`, purgé dans `set_status` au passage
+    done/error) + `list_active_jobs(tenant_id)` (auto-nettoyant : ignore/
+    retire les job_id dont l'état a expiré ou est déjà terminé). Nouvel
+    endpoint `GET /api/jobs/active` (`api/main.py`) exposant
+    `{"active": bool, "count": int}` pour le tenant authentifié. Frontend :
+    `useActiveJobIndicator.ts` (polling 15s, détection de présence
+    uniquement — pas de barre de progression) + badge discret
+    "Analyse en cours…" dans `AppShell.tsx` (mobile et desktop), visible
+    sur toutes les pages SaaS, déclenché indifféremment par une action
+    manuelle, le cron ou l'auto-sync au login.
+  - **Demande 3 (chat < 3s, best-effort + filet de sécurité)** :
+    `ConversationService.send_message` borne l'historique à 20 messages
+    (`_CHAT_HISTORY_LIMIT`, au lieu du défaut 100 du repository) ;
+    `ContextService._build_projects_context`/`_pending_action_descriptions`
+    plafonnés (15 projets les plus récemment actifs, 5 actions en attente
+    par projet — le N+1 sous-jacent n'est pas éliminé, seulement borné,
+    hors périmètre). Bug corrigé : les deux appels
+    `chat.send_message(...)` Gemini (`project_assistant_chat_gemini` et
+    `portfolio_assistant_chat_gemini`, `llm.py`) n'avaient aucun timeout
+    (contrairement aux autres appels Gemini du fichier, qui passent tous
+    `request_options={"timeout": ...}`) — corrigé. Nouvelle constante
+    dédiée `chat_llm_timeout_seconds()` (`config.py`, défaut 8s, env
+    `CHAT_LLM_TIMEOUT_SECONDS`), distincte des 60s de fond
+    (`llm_timeout_seconds()`), utilisée par `ConversationService` et
+    `agent/response_builder.py::ResponseBuilder.build` (paramètre
+    `timeout` ajouté à `portfolio_assistant_chat_openai`/`_gemini`) ;
+    `max_tokens` réduit à `CHAT_INTERACTIVE_MAX_OUTPUT_TOKENS=500` pour
+    ces deux chemins (au lieu de `CHAT_MAX_OUTPUT_TOKENS=4096`, partagé
+    avec le chat legacy, non touché). `agent/executor.py::Executor` :
+    les appels aux 2-4 outils d'un plan tournent maintenant en parallèle
+    (`ThreadPoolExecutor`) au lieu de séquentiellement — **point
+    d'attention thread-safety** : une `Session` SQLAlchemy n'étant pas
+    thread-safe, l'Executor ne partage plus une instance de tool par
+    thread ; il stocke des **classes** de tool et construit, pour chaque
+    appel parallèle, une `Session` dédiée via un `sessionmaker(bind=
+    db.get_bind())`, fermée dans un `finally`. Filet de sécurité : sur un
+    timeout détecté (mots-clés "timeout"/"timed out"/"deadline" dans le
+    message d'erreur — aucun des deux SDK n'expose un signal dédié),
+    `ConversationService` renvoie `ContextService.quick_fallback_summary`
+    (nouveau, réutilise les mêmes requêtes bornées que le system prompt,
+    formatées en texte court) et `Agent.answer` renvoie
+    `build_agent_context(tool_results)` (déjà existant) — dans les deux
+    cas, réponse "selon les données disponibles" au lieu d'un 502 brut.
+  - **Limite assumée** : le budget de 3s est garanti côté temps de réponse
+    utilisateur (timeout serré + filet), pas comme une promesse sur la
+    latence réelle des fournisseurs LLM tiers — pas de mesure de latence
+    réelle en production possible dans cette session (pas d'accès aux
+    clés API OpenAI/Gemini réelles).
+  - **Correctif frontend complémentaire (même Unit, suite à relecture
+    demandée par l'utilisateur)** : le fix backend ci-dessus ne couvrait
+    que `/api/chat` lui-même — `useLegacyHomeChat.ts::send` (câblage de
+    `ChatHome.tsx` en mode legacy) lançait encore une vraie analyse de
+    fond (`POST /api/analyze`, `launchAnalysis`) dès le **premier message
+    tapé**, avant même qu'un projet actif existe, ce qui reproduisait côté
+    frontend exactement le problème corrigé côté backend. `send()`
+    retravaillé : le texte tapé est maintenant essayé comme filtre projet
+    sur `/api/chat` (chemin cache-first) même sans projet actif ;
+    `sendChatReply` renvoie désormais `false` uniquement sur un 404
+    explicite ("aucune donnée disponible pour ce filtre") pour déclencher
+    le repli sur `launchAnalysis` — seul cas où lancer une vraie analyse
+    reste justifié (rien à répondre autrement). Les déclencheurs
+    d'analyse volontaires (`widenDays`, `selectThread`, quick actions
+    "Analyser tous mes emails"/"Choisir une période") restent inchangés.
+    Mode SaaS (`useSaasHomeChat.ts`) non touché : appelait déjà uniquement
+    `/api/assistant/chat`, jamais d'analyse depuis le chat. Vérifié :
+    `npx tsc --noEmit` sans erreur, `vite build` transforme les 72
+    modules sans erreur (même limite d'environnement `dist/` que
+    ci-dessus). Non vérifié : passage réel dans le navigateur du nouveau
+    chemin cache-first/repli 404 (même contrainte d'environnement).
+  - Vérifié (script réel contre Postgres + Redis locaux, données de test
+    nettoyées après coup) : `ast.parse` + import réel de
+    `api.main:app` (27 routes, inchangé en dehors du nouvel endpoint) sur
+    les 10 fichiers backend modifiés ; `jobs.py` — `create_job`/
+    `set_status`/`list_active_jobs` testés en séquence contre le vrai
+    Redis local (présence → retrait au fur et à mesure des `done`) ;
+    `Executor.execute` sur 3 outils en parallèle contre un vrai tenant
+    Postgres, aucune erreur de concurrence, résultats dans l'ordre du
+    plan ; `ContextService.build_portfolio_system_prompt`/
+    `quick_fallback_summary` exécutés contre un vrai tenant ; simulation
+    d'un timeout LLM (mock sur `portfolio_assistant_chat_openai`) confirmant
+    que `ConversationService.send_message` bascule bien sur le résumé de
+    secours et persiste le tour ; `_filter_cached_emails_for_project`
+    testé avec un cache synthétique (2/3 emails correctement filtrés par
+    mot-clé projet, cache vide → repli correctement signalé par une liste
+    vide). Frontend : `npx tsc --noEmit` sans erreur ; `vite build`
+    transforme les 72 modules sans erreur (échec de build limité au
+    nettoyage du dossier `dist/` pré-existant appartenant à `root`, même
+    problème d'environnement déjà documenté dans les entrées précédentes,
+    sans rapport avec ce correctif).
+  - Non vérifié : rendu navigateur réel du badge "Analyse en cours…"
+    (mêmes limites d'environnement que les entrées précédentes — pas
+    d'outil navigateur fonctionnel dans cette session) ; latence réelle
+    bout-en-bout d'un appel LLM production (OpenAI/Gemini réels) sous le
+    budget de 8s/3s — recommandé à l'utilisateur de mesurer avec `curl`
+    chronométré une fois les clés API configurées.
+
+- Fix : l'assistant portefeuille répondait "je n'ai pas d'information sur un
+  projet nommé X" pour des projets réels, avec emails, correctement nommés
+  (2026-08-01, cas concret : tenant à 112 projets, projet `teyliom.com` réel,
+  nom exact, classé 84e par `updated_at` — donc absent du contexte système
+  qui ne montre que les 15 projets les plus récemment mis à jour,
+  `_MAX_PROJECTS_IN_CONTEXT` dans `context_service.py`). Root cause : le
+  system prompt (`llm.py::build_portfolio_chat_system_prompt`) présentait
+  cette liste tronquée comme "l'état actuel de chaque projet du portefeuille"
+  sans le signaler, et demandait au LLM de déclarer l'absence d'info sans
+  jamais l'inciter à vérifier via l'outil `search_projects` avant de
+  répondre. Correctif (minimal, pas de changement de schéma) :
+  `ContextService._build_projects_context` calcule maintenant le nombre
+  total de projets du tenant et le passe à `build_portfolio_context(...,
+  total_count=...)`, qui ajoute une note explicite si la liste est tronquée ;
+  la règle du system prompt exige désormais d'appeler `search_projects` pour
+  tout projet nommé absent de la liste avant de conclure à une absence
+  d'information. Non traité (hors scope de ce correctif, à surveiller si le
+  même symptôme réapparaît avec un nom de projet qui ne correspond pas
+  exactement au domaine cherché) : `search_projects` et
+  `ToolExecutor._resolve_project_id` (`tool_executor.py`) ne matchent que sur
+  `Project.name`, jamais sur `rules_matrix.sender_domains` — si un jour un
+  projet est nommé différemment de son domaine expéditeur, la recherche par
+  domaine échouera encore malgré ce correctif. Vérifié : requêtes SQL directes
+  confirmant le rang 84/112 et le nom exact `teyliom.com` ; lecture complète
+  du chemin contexte → prompt → outils. Non vérifié : test bout-en-bout réel
+  du chat (pas de clé LLM/navigateur dans cette session) — recommandé à
+  l'utilisateur de reposer la même question en conditions réelles pour
+  confirmer que le modèle appelle bien `search_projects` en pratique.
+
+- Feature : élargissement de la recherche de l'assistant chat (suite directe
+  du correctif ci-dessus, sur demande explicite de l'utilisateur — 2026-08-01)
+  à 4 axes : résolution de projet par `rules_matrix`, recherche par mot-clé
+  dans le corps des emails, extraits de contenu des documents, historique des
+  résumés de projet. Plan complet dans le transcript (mode plan, approuvé) ;
+  décisions validées avec l'utilisateur : créer un historique des résumés
+  (nouvelle table, archive à partir de maintenant seulement — résumés déjà
+  écrasés dans le passé non récupérables) et ajouter une vraie recherche par
+  mot-clé à `search_emails`.
+  - **A. Résolution par rules_matrix** : nouvelle fonction pure
+    `rules_matrix_field_matches` (`classification.py`, après `ProjectRules`)
+    cherchant un terme dans `sender_domains`/`sender_emails`/`client_names`/
+    `company_names`/`keywords`. Branchée dans `ToolExecutor._resolve_project_id`
+    (`tool_executor.py`, nouveau palier 2 : égalité exacte sur un champ
+    rules_matrix, avant le palier substring qui matche désormais aussi
+    rules_matrix) et dans `SearchProjectsTool.run` (`search_projects_tool.py`,
+    filtrage Python quand `keyword` est fourni — JSONB n'a pas d'ILIKE natif
+    ici, coût négligeable au volume actuel ~115 projets/tenant).
+  - **B. Recherche mot-clé emails** : `SearchEmailsTool.run`
+    (`search_emails_tool.py`) accepte désormais un `keyword` optionnel (ILIKE
+    sujet+corps, tri par date, `body_snippet` ajouté) ; sans `keyword`,
+    comportement exactement inchangé (rétrocompatible). `project_id` reste
+    obligatoire — pas de recherche tous-projets (hors scope, fonctionnalité
+    distincte plus large).
+  - **C. Extraits documents** : `SearchDocumentsTool.run`
+    (`search_documents_tool.py`) ajoute une clé `snippet` (contenu autour du
+    match) quand `keyword` est fourni ; sans `keyword`, forme du dict
+    inchangée. Aucun changement dans `DocumentRepository`/`DocumentService`
+    (le filtre ILIKE existait déjà, seul le formatage de sortie change).
+  - **D. Historique des résumés** : nouveau modèle `ProjectSummaryHistory`
+    (`db/models.py`, après `ProjectSummary`) + migration
+    `019_project_summary_history.py` (`down_revision = 018_document_source`).
+    Hook d'archivage dans `analysis_tasks.py::_run_fasttrack_sync` (juste
+    avant l'écrasement en place de `ProjectSummary`, même transaction/commit,
+    condition `new_emails and (content ou structured_content existant)` pour
+    ne rien archiver sur une régénération sans changement ou un résumé tout
+    juste créé). Nouvel outil `SearchProjectSummariesTool`
+    (`tools/search_project_summaries_tool.py`, même patron que
+    `SearchEmailsTool`) branché dans `tool_executor.py`
+    (`_tool_classes`/`_PROJECT_NAME_TOOLS`/`TOOL_SPECS`/dispatch).
+  - Helper partagé `extract_snippet` (`text_snippets.py`, nouveau fichier,
+    module pur) utilisé par B/C/D pour ne jamais renvoyer un corps/contenu
+    complet au LLM (fenêtre de contexte autour du match, ou début du texte
+    sinon).
+  - `llm.py::build_portfolio_chat_system_prompt` mis à jour : mentionne que
+    l'utilisateur peut désigner un projet par domaine/client autant que par
+    nom, et ajoute `search_project_summaries` à la liste des outils
+    disponibles avec la consigne de l'utiliser pour l'état passé d'un projet.
+  - Vérifié en conditions réelles contre la base Postgres locale (tenant
+    `566b33cb-...`, 115+ projets) : migration upgrade/downgrade/upgrade
+    propre ; `_resolve_project_id("Mediasoft")` résout désormais vers
+    `Smartbanking` (`rules_matrix.client_names`, échouait avant) ;
+    `SearchProjectsTool(keyword="neurotechnology")` retourne `Biometrics
+    Service` ; `search_emails(keyword="harmonisation")` retourne des
+    résultats triés par date avec `body_snippet` pertinent, et sans mot-clé
+    la forme du dict est inchangée ; `search_documents(keyword="COPIL")`
+    retourne un `snippet` pertinent extrait d'un vrai PDF ; insertion/lecture/
+    suppression d'une ligne `ProjectSummaryHistory` de test via
+    `SearchProjectSummariesTool` round-trip complet (avec et sans mot-clé).
+  - **Non vérifié** : déclenchement réel de `_run_fasttrack_sync` en bout en
+    bout (nécessite IMAP + appel LLM réel, non fait dans cette session pour
+    éviter coût/temps — la logique du hook a été relue ligne à ligne contre
+    le code réel, mais son déclenchement en conditions de production reste à
+    confirmer par l'utilisateur après le prochain resync d'un projet, via
+    `SELECT count(*) FROM project_summary_history`) ; test bout-en-bout du
+    chat réel (pas de clé LLM/navigateur dans cette session) — recommandé de
+    reposer une question du type "où en était le projet X la semaine
+    dernière ?" une fois qu'au moins un resync aura eu lieu après ce
+    déploiement.
+
 ## In Progress
 
 - Unit 7 — Gamified Loading Experience : étape 3/8 livrée (HUD réel branché
@@ -2249,10 +4318,676 @@ Update this file after every meaningful implementation change.
   recherche hybride, chatbot source-cité, dashboard, tags Projet/Action,
   roster de participants durable) restent à prioriser séparément avec
   l'utilisateur.
-- **Doc d'implémentation en attente d'une session dédiée** : les 6 fichiers
-  `context/*.md` restent incohérents entre eux et avec le code (voir entrée
-  Unit 13 ci-dessus) — non traité par décision utilisateur explicite cette
-  session, à reprendre séparément.
+- ~~**Doc d'implémentation en attente d'une session dédiée**~~ — **Traité par
+  Unit 44** (2026-07-17) pour `project-overview.md`, `architecture.md` et
+  `ai-workflow-rules.md`. Reste ouvert : **`context/code-standards.md`**
+  référence toujours Celery et React Native (stack jamais implémentée) —
+  non traité par décision utilisateur explicite lors d'Unit 44 (hors scope
+  du pivot stratégique), à reprendre dans une session dédiée si besoin.
+
+- **Fix — taille de la chatbox (`ChatThread.tsx`) et cohérence des rayons de
+  bordure dans l'accueil chat-first** (2026-07-16) :
+  - Cause : le conteneur de `ChatThread` posait `min-h-[min(70vh,560px)]`
+    (hauteur **minimale**, pas de hauteur maximale) sur un `flex-col` sans
+    hauteur bornée — la zone interne `overflow-y-auto` n'avait donc jamais
+    de contrainte de hauteur réelle pour déclencher un scroll : la boîte de
+    chat grossissait indéfiniment avec les messages, faisant défiler toute
+    la page au lieu de rester une boîte de taille fixe avec défilement
+    interne (comportement attendu d'une chatbox).
+  - `frontend/src/components/chat/ChatThread.tsx` : `showThread = messages.length
+    > 0 || busy` — tant qu'il n'y a ni message ni chargement en cours (état
+    initial de l'accueil), seule la zone de saisie est rendue (pas de grande
+    boîte vide) ; dès qu'il y a du contenu, le conteneur passe à une
+    **hauteur fixe** `h-[min(70vh,560px)]` (au lieu de `min-h-`), qui borne
+    réellement la boîte et active le défilement interne existant.
+  - Cohérence des rayons de bordure : plusieurs éléments de l'accueil
+    chat-first utilisaient `rounded-2xl` (16px, valeur Tailwind par défaut,
+    non définie dans `tailwind.config.js::borderRadius`) au lieu du jeton
+    documenté `rounded-lg` (14px, `ui-context.md` §3 : *"Cartes de projet,
+    panneaux (sidebar, **assistant**)"* — correspond explicitement au
+    panneau de chat). Alignés sur `rounded-lg` : le panneau `ChatThread`
+    lui-même, la carte "Aucun email trouvé", `AnalysisCard.tsx`, les 3
+    cartes d'action rapide et les 3 bandeaux d'état de `ChatHome.tsx`, et le
+    panneau d'outils legacy (période/modèle). Laissés en `rounded-2xl` par
+    choix délibéré : les bulles de message texte/erreur (forme de bulle de
+    chat, pas une "carte" au sens du jeton) ; les champs de saisie et
+    boutons restent en `rounded-xl` (déjà la convention réelle utilisée
+    partout ailleurs dans le dépôt — ex. `AppShell.tsx` — pas touchés pour
+    éviter une refonte plus large hors du périmètre de cette demande).
+  - Vérifié : `tsc --noEmit` sans erreur ; `vite build` transforme les 63
+    modules sans erreur (échec de build limité au nettoyage du dossier
+    `dist/` pré-existant appartenant à `root`, problème d'environnement déjà
+    documenté ci-dessus, sans rapport avec le code).
+  - Non vérifié : rendu visuel réel dans un navigateur (même contrainte
+    d'environnement que les entrées précédentes — pas d'outil navigateur
+    fonctionnel dans cette session) ; recommandé à l'utilisateur de lancer
+    `npm run dev` localement pour confirmer visuellement la taille de la
+    boîte et le défilement interne avec une longue conversation.
+
+- **Fix — `useLegacyHomeChat.ts` : budget de polling `/api/analyze` désaligné
+  du `job_timeout` arq (récidive du bug d'Unit 26)** (2026-07-16) :
+  - Contexte : signalé par l'utilisateur (capture d'écran) — le bouton
+    "Analyser tous mes emails" de `ChatHome.tsx` (mode legacy) affiche
+    `L'analyse prend trop de temps. Réessayez plus tard.` alors que le job
+    backend tourne souvent encore sainement.
+  - Cause racine : `ANALYZE_POLL_TIMEOUT_MS` (`useLegacyHomeChat.ts`) était
+    resté à 5 min (valeur d'origine, portée depuis l'ancien `HomePage.tsx`,
+    cf. fix du 2026-07-08 ci-dessus) alors que `WorkerSettings.job_timeout`
+    (`analysis_tasks.py`) est passé à 1800 s (30 min) ce même jour-là pour
+    `run_analysis_legacy`/`run_analysis_saas` — les deux jobs derrière
+    `/api/analyze`. Le frontend abandonnait donc jusqu'à 6x plus tôt que le
+    vrai timeout backend. **C'est la même classe de bug que celle corrigée
+    pour la découverte de domaines en Unit 26** (`discoverApi.ts`,
+    `DISCOVER_POLL_TIMEOUT_MS` aligné à 126 min sur le timeout arq dédié de
+    7200 s) — la réconciliation équivalente n'avait jamais été appliquée à
+    `useLegacyHomeChat.ts`.
+  - Vérifié opérationnellement avant correctif : process `arq
+    email_analyzer.analysis_tasks.WorkerSettings` et `uvicorn api.main:app`
+    bien actifs sur la machine — écarte l'hypothèse "aucun worker ne
+    consomme les jobs", confirme que le problème est côté budget client.
+  - `services/email_analyzer/frontend/src/hooks/useLegacyHomeChat.ts` :
+    `ANALYZE_POLL_TIMEOUT_MS` relevé de 5 à 35 min (marge au-dessus des 30
+    min de `job_timeout`, même proportion de marge que
+    `DISCOVER_POLL_TIMEOUT_MS`/discovery timeout) ; commentaire mis à jour
+    pour documenter l'alignement et éviter une nouvelle récidive. Aucun
+    changement backend (`job_timeout = 1800` déjà correct) ni sur
+    `discoverApi.ts` (déjà aligné).
+  - Hors périmètre (volontairement) : reprise de job via `localStorage`
+    façon `discoverApi.ts`/Unit 26 — répond à un problème différent (survie
+    à un refresh/remount de page), pas nécessaire pour corriger le faux
+    timeout signalé ici.
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` transforme les 63
+    modules sans erreur (échec de build limité au nettoyage du dossier
+    `dist/` pré-existant appartenant à `root`, même problème d'environnement
+    déjà documenté dans l'entrée précédente, sans rapport avec ce correctif).
+  - Non vérifié : passage réel dans le navigateur avec un job d'analyse
+    dépassant effectivement 5 min (même contrainte d'environnement que les
+    entrées précédentes) — correctif vérifié par build/type-check
+    uniquement, comme l'avait été le correctif équivalent d'Unit 26 côté
+    frontend.
+
+- **Fix — `ChatHome.tsx` : personnage animé remplace l'avatar "orbe", greeting
+  évolutif (salutation + sous-titres)** (2026-07-27) :
+  - Contexte : demande utilisateur (image de référence : personne aux
+    cheveux bouclés, lunettes rondes, assise à un bureau devant un
+    ordinateur) — remplacer l'avatar "orbe" (cercle dégradé `ai-primary`→
+    `ai-secondary` avec halo pulsant, introduit en Unit 36 ci-dessus) par un
+    personnage animé façon 3D, et faire évoluer le message de greeting
+    (salutation + "dates" qui varient) plutôt qu'un "Bonjour" figé.
+  - Aucun outil de génération d'image/3D disponible dans cet environnement
+    et aucun asset image dans le repo (`public/`, `src/assets/` :
+    inexistants) — décision validée avec l'utilisateur (`AskUserQuestion`) :
+    personnage construit en SVG codé à la main + `framer-motion` (déjà en
+    dépendance `^12.42.2`, jusqu'ici inutilisé nulle part dans le code —
+    premier usage), plutôt qu'un asset externe à fournir.
+  - Nouveau `frontend/src/components/GreetingCharacter.tsx` : illustration
+    SVG (`viewBox 200x200`, bureau/chaise statiques, tête avec cheveux afro
+    + lunettes rondes + clignement des yeux, torse chemise off-white, bras
+    avec tapotement alterné sur un clavier si `active`, écran de laptop en
+    dégradé `ai-primary`→`ai-secondary` reprenant l'identité visuelle IA
+    portée par l'ancien orbe), animée via `motion.g`/`motion.svg`
+    (`useReducedMotion()` désactive les animations si
+    `prefers-reduced-motion`). Props `size` (défaut 128, vs 64 pour
+    l'orbe), `active` (pose "au repos", mains immobiles, pas de pulse écran
+    — utilisé pour l'état `!chat.loaded`).
+  - Nouveau `frontend/src/greeting.ts` (racine `src/`, pas `src/lib/` — le
+    repo garde une convention plate pour ses petits modules : `apiUtils.ts`,
+    `timelineApi.ts`, etc.) : `getTimeOfDaySalutation()` (Bonjour 5h-18h,
+    Bonsoir 18h-22h, Bonne nuit 22h-5h) et `pickVariant()` (rotation de
+    sous-titres indexée par jour-de-l'année — délibérément pas aléatoire au
+    montage, car `ChatHome` peut se remonter en naviguant vers une
+    conversation puis en revenant à `/`, ce qui rendrait un tirage aléatoire
+    instable ; l'index par jour reste stable dans la journée tout en variant
+    réellement d'un jour à l'autre, sans état/`localStorage` additionnel).
+    Pools de sous-titres séparés pour SaaS-avec-brief (le texte "depuis
+    {formatSince(...)}" existant reste branché tel quel), SaaS-sans-brief,
+    et legacy.
+  - `frontend/src/hooks/useBrief.ts` non touché : `formatSince` a un
+    consommateur indépendant (`components/chat/ConversationHistoryPanel.tsx`)
+    donc reste en place tel quel.
+  - `frontend/src/index.css` : suppression de `@keyframes orb-glow` /
+    `.animate-orb-glow` (Unit 36) — plus aucun consommateur après le
+    remplacement dans `ChatHome.tsx`.
+  - Ajustement post-vérification visuelle : le torse (blanc cassé
+    `#F7F5F1`) était quasiment invisible en thème clair (`stroke-border-default`
+    trop proche de `bg-primary`) — contour renforcé (`stroke-text-secondary`,
+    largeur 2 pour le torse ; ajout d'un contour `stroke-text-secondary/40`
+    sous les bras) pour rester lisible dans les deux thèmes.
+  - Vérifié : `npx tsc --noEmit` sans erreur ; `vite build` transforme les
+    478 modules sans erreur (échec de build limité au nettoyage du dossier
+    `dist/` pré-existant appartenant à `root`, même problème d'environnement
+    déjà documenté dans les entrées précédentes, sans rapport avec ce
+    changement). Rendu visuel réel vérifié cette fois (Playwright +
+    Chromium, disponible dans cette session contrairement aux entrées
+    précédentes) : capture d'écran de l'écran d'accueil en mode legacy,
+    thème clair et sombre — personnage bien positionné au-dessus du texte
+    de greeting, animations (bob, clignement, tapotement, pulse écran)
+    fonctionnelles sans erreur console, lisible dans les deux thèmes après
+    l'ajustement de contraste ci-dessus.
+
+- **Feature — Knowledge Layer : sync automatique + bouton chat + avatar/cartes
+  repositionnés en conversation** (2026-07-27) :
+  - Contexte : demande utilisateur — le Knowledge Layer (`knowledge_service.py`,
+    Unit 47/pivot Phase 6) restait alimenté uniquement par l'action manuelle
+    `POST /api/knowledge/projects/{id}/sync`, sans aucun lien avec le pipeline
+    d'analyse ni UI dans le chat ; l'avatar (`GreetingCharacter`, voir entrée
+    ci-dessus) et les cartes `quickActions` (Analyser/Actions/Projets à risque)
+    disparaissaient dès la première réponse du chat au lieu de rester visibles.
+  - **Sync continue** : `_run_fasttrack_sync` (`analysis_tasks.py`) appelle
+    désormais `KnowledgeService.sync_from_project_summary` juste après son
+    `db.commit()`, gaté sur `if new_emails:` (seul cas où `structured_content`
+    change) — couvre en un seul point tous les déclencheurs existants
+    (rafraîchissement manuel, `run_scheduled_sync` 2x/jour, `run_agenda_refresh`).
+    Échec isolé (try/except + log), n'invalide jamais l'analyse déjà commitée.
+  - **Filet de rattrapage horaire** : nouveau job cron arq
+    `run_knowledge_sync_scan` (`cron(..., minute=0, max_tries=1)` ajouté à
+    `WorkerSettings.cron_jobs`, aux côtés des deux jobs existants) — reprend
+    tout projet dont `ProjectSummary.updated_at` a bougé dans la dernière heure
+    (colonne déjà existante, `onupdate=datetime.utcnow`, aucune migration
+    nécessaire) sans table de suivi "dernier scan" dédiée : fenêtre = cadence
+    du job, filet de sécurité assumé comme approximatif (pas le chemin
+    principal). Aucune nouvelle infra de déploiement (même process arq unique).
+  - **Bouton "Synchroniser" dans le chat** : nouvel endpoint bulk
+    `POST /api/knowledge/sync` (sans `project_id`, scope tenant courant) →
+    `KnowledgeService.sync_all_for_tenant`, synchrone (pas de job arq/polling —
+    l'opération ne fait que relire des données déjà en base, aucun appel
+    LLM/IMAP). Client `syncAllKnowledge()` ajouté à `knowledgeApi.ts` ; bouton
+    dans la toolbar de `ChatHome.tsx` (à côté de "+ Nouvelle conversation" /
+    "Historique"), état `syncing`/`syncError`/`syncMessage` avec bannières de
+    résultat réutilisant les classes déjà en place pour `discoverSuccess`.
+  - **Avatar + cartes en colonne gauche pendant la conversation** :
+    `ChatHome.tsx` gagne un flag dérivé `showSidebar` (conversation démarrée +
+    mode saas) ; si vrai, layout `lg:grid lg:grid-cols-[280px_1fr]` avec
+    `GreetingCharacter size={64} active={false}` + `quickActions` (même markup,
+    factorisé dans un helper `renderQuickActions` pour éviter la duplication)
+    empilées verticalement à gauche, toolbar + `ChatThread` à droite. En
+    dessous de `lg:`, empilement naturel (pas de logique responsive
+    additionnelle). L'état pré-conversation (avatar 128px centré + grille
+    horizontale) reste strictement inchangé — changement additif uniquement.
+    Piège TypeScript rencontré et résolu : TS narrowe `mode` à `"saas"` à
+    l'intérieur du bloc `{showSidebar ? ... }` (narrowing d'alias sur
+    `const showSidebar = inConversation && mode === "saas"`), ce qui rendait
+    invalides les `mode === "legacy" ? ... : ...` dupliqués dans les deux
+    branches ; résolu en factorisant `ChatThread` dans une unique variable
+    `chatThreadEl` calculée avant le ternaire (mode non re-narrowé à cet
+    endroit), réutilisée telle quelle dans les deux branches.
+  - Vérifié : import direct de `analysis_tasks`/`api.routers.knowledge`
+    (aucune erreur, 3 cron jobs enregistrés, 4 routes Knowledge exposées sans
+    conflit de path) ; `npx tsc --noEmit` sans erreur ; `vite build` transforme
+    les modules sans erreur (échec limité au nettoyage de `dist/` pré-existant
+    appartenant à `root`, même problème d'environnement déjà documenté
+    ci-dessus, sans rapport avec ce changement). Non vérifié dans un navigateur
+    réel (pas de session Playwright disponible dans cette exécution) : à
+    confirmer visuellement par l'utilisateur (bouton Sync + repositionnement
+    colonne gauche en desktop/mobile).
+
+- **Feature — Contexte Personnel (Profil & Habitudes) + feuille de route des
+  25 domaines de contexte** (2026-07-30) :
+  - Contexte : l'utilisateur a fourni une vision produit en 25 domaines de
+    contexte ("second cerveau") pour transformer my-connector en assistant
+    exécutif complet. Vu l'ampleur (beaucoup de domaines nécessitent des
+    comptes/API externes non disponibles, et `ai-workflow-rules.md` interdit
+    le code spéculatif), portée clarifiée avec l'utilisateur
+    (`AskUserQuestion`, plan mode) : construire uniquement le Domaine #1
+    ("Contexte Personnel", explicitement "la base de tout" pour
+    l'utilisateur) dans cette unité, et documenter les 24 autres domaines
+    comme feuille de route (statut réel par domaine) plutôt que du code
+    spéculatif — voir `context/project-overview.md` "Feuille de route — 25
+    domaines de contexte" pour le détail domaine par domaine.
+  - **Modèle** : nouvelle table `profiles` (migration `016_profile`,
+    `db/models.py::Profile`) — un enregistrement par (tenant, user), unique
+    (contrairement à `Memory`, plusieurs lignes par pair). Colonnes typées
+    pour le profil (`display_name`, `languages: ARRAY(String)`, `timezone`,
+    `location`) et les habitudes (`wake_time`/`sleep_time`/
+    `work_start_time`/`work_end_time: Time`, `sport_days: ARRAY(String)`,
+    `focus_hours`) ; JSONB pour `preferences` et `family_members` (listes
+    ouvertes par nature, même logique que `Project.rules_matrix`/
+    `Email.tags`) ; `favorite_contact_ids: ARRAY(UUID)` référence `Contact`
+    (pas de duplication de données contact).
+  - **Backend** : `ProfileRepository` (get/upsert, get-or-create + update
+    partiel — pas de list/delete par id, c'est un singleton), `ProfileService`
+    (validation minimale, pas d'appel LLM — le profil est saisi directement
+    par l'utilisateur, contrairement à `Memory.extract_and_store`),
+    `api/routers/profile.py` (`GET`/`PATCH /api/profile`, get-or-default,
+    pas de 404), enregistré dans `api/main.py`.
+  - **Context Engine** : `llm.py::build_profile_context` (même convention que
+    `build_memory_context`/`build_knowledge_context` — chaîne vide si profil
+    absent/vide) ; `ContextService._build_profile_section` ajouté à
+    `extra_sections` de `build_portfolio_system_prompt`, aux côtés de Memory
+    et Knowledge. C'est ce qui rend le cas d'usage demandé par l'utilisateur
+    réel : un profil avec horaires de travail 8h-18h produit dans le prompt
+    système "Ne propose pas de réunion en dehors de cette plage sauf demande
+    explicite" — vérifié (voir ci-dessous), pas seulement documenté.
+  - **Frontend** : `profileApi.ts`/`hooks/useProfile.ts` (même patron que
+    `memoryApi.ts`/`useMemoryAndKnowledge.ts`), nouvelle section "Profil &
+    habitudes" (`components/ProfileSettingsForm.tsx`) insérée dans
+    `SettingsPage.tsx` entre "Compte et organisation" et "Boîte IMAP" — pas
+    de nouvelle route (le profil personnel a sa place naturelle dans
+    Paramètres, pas une page dédiée). Champs listes (langues, jours de
+    sport) en saisie CSV, famille/préférences en zone de texte ligne par
+    ligne (`Nom, relation` / `clé: valeur`) — pas d'éditeur structuré en v1.
+    Volontairement pas de sélecteur de contacts favoris (`favorite_contact_ids`
+    existe côté modèle/API sans UI — nécessiterait un multi-select croisant
+    la liste de `/memory`, hors périmètre de ce formulaire).
+  - **Feuille de route** : `AppShell.tsx::COMING_SOON_ITEMS` étendu de 2 à 8
+    entrées (Documents, Clients, + Tâches, Communication, Finance, Santé,
+    Développement, Automatisation) — regroupées par thème plutôt qu'une
+    entrée par domaine (25 entrées grisées nuirait à la lisibilité de la nav
+    sans servir la compréhension du travail de l'utilisateur). Détail complet
+    des 25 domaines (statut, prérequis) dans `project-overview.md`, pas dans
+    la nav.
+  - Vérifié (Postgres réel jetable, `initdb`/`pg_ctl` local, pas de `sudo` sur
+    l'instance système) : `alembic upgrade head` applique toute la chaîne de
+    migrations jusqu'à `016_profile` sans erreur ; round-trip
+    `downgrade -1` puis `upgrade head` confirmé symétrique (table
+    supprimée puis recréée à l'identique). Script Python jetable :
+    `ProfileService.update_profile` créé/mis à jour un profil réel en base,
+    confirmé qu'une mise à jour partielle (`{"display_name": ...}` seul) ne
+    touche pas les autres champs déjà enregistrés ; `ContextService.
+    build_portfolio_system_prompt` relu et confirmé que le bloc "Contexte
+    personnel de l'utilisateur" apparaît avec le texte attendu sur les
+    horaires de travail. Round-trip HTTP réel via `TestClient` (utilisateur/
+    tenant/token réels, pas de mock) : `GET /api/profile` sans profil
+    (200, tous champs `null`), `PATCH` avec plusieurs champs (200, valeurs
+    reflétées, heures sérialisées en `"HH:MM:SS"`), `GET` après `PATCH`
+    (persistance confirmée), `GET` sans token (401). Import direct de
+    `api.main` : route `/api/profile` (`GET`/`PATCH`) enregistrée sans
+    conflit de path, 28 routes totales dans l'app (comptage via
+    `original_router.routes`, l'introspection FastAPI 0.139 diffère des
+    versions précédentes — `app.routes` seul ne suffit plus à lister les
+    routes incluses via `include_router`). Cluster Postgres jetable arrêté
+    et supprimé après vérification (aucun état laissé).
+  - Vérifié (frontend) : `npx tsc --noEmit` sans erreur ; `vite build`
+    transforme 483 modules sans erreur (échec limité au nettoyage du dossier
+    `dist/` pré-existant appartenant à `root`, même problème d'environnement
+    déjà documenté dans les entrées précédentes, sans rapport avec ce
+    changement).
+  - Non vérifié : rendu visuel réel dans un navigateur (pas de session
+    Playwright lancée pour cette unité) — à confirmer par l'utilisateur
+    (formulaire "Profil & habitudes" dans Paramètres, thème clair/sombre,
+    nouvelles entrées "Bientôt disponible" dans la nav).
+
+- **Rattrapage documentaire — Contexte Documents (domaine #7), backend
+  construit hors-cycle sans entrée de suivi** (constaté et documenté le
+  2026-08-01, code déjà présent avec dates de modification du 2026-07-31) :
+  - Contexte : reprise du plan d'implémentation (« continue le plan
+    d'implémentation ») — avant d'ajouter du code, exploration du dépôt
+    (agent dédié) pour confirmer l'état réel plutôt que de faire confiance
+    à ce fichier seul, qui n'affirmait nulle part que le domaine #7 avait
+    une quelconque implémentation (`project-overview.md` le classait
+    encore "À construire" jusqu'à cette révision). Constat : le backend
+    complet existait déjà, non committé, jamais journalisé ici — cas
+    concret de l'écart tracker/code déjà rencontré par le passé.
+  - **Ce qui existait déjà** (aucun changement apporté par cette entrée,
+    documentation a posteriori uniquement) : `Document` (`db/models.py`,
+    une ligne par fichier — `tenant_id`, `user_id`, `project_id` nullable,
+    `filename`, `content_type`, `size_bytes`, `extracted_text`,
+    `created_at`) ; migration `017_documents.py` (chaîne `011→...→017`
+    linéaire, cohérente avec le modèle) ; `email_analyzer/
+    document_extraction.py` (extraction PDF via `pypdf` + texte brut
+    `.txt`/`.md`/`.csv`, plafonnée à 200k caractères, ne lève jamais —
+    Word/Excel/PowerPoint/images explicitement non supportés, par choix
+    documenté, pas un oubli) ; `DocumentService`/`DocumentRepository`
+    (upload avec validation taille/vide, stockage sur disque par
+    `tenant_id/document_id` — jamais le nom de fichier original, pour
+    éviter toute traversée de chemin —, liste avec filtre projet/mot-clé,
+    téléchargement, suppression DB+disque) ; config
+    `DOCUMENTS_STORAGE_DIR`/`DOCUMENT_MAX_SIZE_BYTES` (défaut 20 Mo) ;
+    `api/routers/documents.py` (`GET/POST /upload/GET {id}/download/DELETE
+    {id}`, déjà enregistré dans `api/main.py`) ; `tools/
+    search_documents_tool.py` déjà câblé dans `tool_executor.py`
+    (`TOOL_SPECS`, `_tool_classes`, projet optionnel, `_run_tool`) — donc
+    déjà appelable par le LLM à la demande. `requirements.txt` a déjà
+    `pypdf>=4,<6`.
+  - **Ce qui manquait réellement** (confirmé par grep exhaustif sur
+    `frontend/src`, pas seulement absence supposée) : aucune UI — l'entrée
+    "Documents" de `AppShell.tsx::COMING_SOON_ITEMS` restait grisée alors
+    que le backend fonctionnait ; et aucune injection dans le Context
+    Engine (`context_service.py` documente explicitement que Documents
+    n'y est pas encore ajouté, contrairement à Profile/Memory/Knowledge) —
+    un document téléversé n'influence donc le chat que si le LLM appelle
+    lui-même `search_documents`, jamais de façon ambiante. Voir l'unité
+    suivante pour le comblement de la première lacune.
+
+- **Feature — Contexte Documents (domaine #7) : UI frontend (upload, liste,
+  téléchargement, suppression)** (2026-08-01) :
+  - Contexte : suite directe de l'entrée précédente — le backend
+    fonctionnait déjà en entier, seule l'UI manquait, même situation que
+    Memory/Knowledge avant `MemoryPage.tsx` (Unit 53) ou
+    Objectives/Timeline avant `ObjectivesPage.tsx` (Unit 56). Décision
+    reprise du même patron plutôt que d'inventer une nouvelle convention :
+    page dédiée `/documents` (pas une modale, pas intégrée à
+    `ProjectDetailPage`), listée dans la nav (retirée de
+    `COMING_SOON_ITEMS`).
+  - `frontend/src/documentsApi.ts` (nouveau) : miroir de `DocumentOut`,
+    `fetchDocuments`/`uploadDocument` (`FormData`, pas de `Content-Type`
+    manuel — le navigateur fixe le boundary multipart)/`deleteDocument`,
+    `listProjectOptions` (même convention que
+    `discoverTicketsApi.ts::listProjectOptions`, dupliquée plutôt que
+    partagée entre modules — convention déjà suivie par
+    `discoverApi.ts`/`discoverTicketsApi.ts` eux-mêmes). `downloadDocument`
+    matérialise un blob (`URL.createObjectURL` + `<a download>` synthétique)
+    plutôt qu'un `<a href>` direct : la session vit dans un Bearer token
+    (`apiFetch`), pas un cookie, donc un lien direct n'enverrait pas le
+    jeton — premier consommateur de ce patron dans le repo (aucun
+    téléchargement authentifié n'existait avant).
+  - `frontend/src/hooks/useDocuments.ts` (nouveau) : même patron que
+    `useMemoryAndKnowledge.ts` (liste + `reload(filters)` + mutation
+    optimiste locale après upload/suppression, pas de re-fetch complet).
+  - `frontend/src/pages/DocumentsPage.tsx` (nouveau) : formulaire de dépôt
+    (fichier + sélecteur de projet optionnel), formulaire de filtre
+    (mot-clé + projet), liste (nom, taille formatée, projet ou "Sans
+    projet", "Texte extrait" si applicable, date, actions
+    Télécharger/Supprimer). Pas d'éditeur de métadonnées, pas de
+    prévisualisation du contenu extrait — hors périmètre de cette unité.
+  - `App.tsx` (route `/documents`) et `AppShell.tsx`
+    (`SAAS_NAV_ITEMS` gagne "Documents", retiré de `COMING_SOON_ITEMS`,
+    seul groupe restant : Clients/Tâches/Communication/Finance/Santé/
+    Développement/Automatisation).
+  - Vérifié bout-en-bout contre un cluster Postgres jetable réel
+    (`initdb`/`pg_ctl`, socket court `/tmp/pgsock_myconn`, supprimé après
+    coup) : `alembic upgrade head` rejoue toute la chaîne `001→017` sans
+    erreur (première vérification réelle des migrations 011-017, jamais
+    exercées contre une vraie base dans une entrée précédente de ce
+    fichier) ; utilisateur/tenant/token réels seedés directement via les
+    modèles SQLAlchemy + `create_access_token` (contournement identique à
+    celui documenté précédemment pour l'inscription) ; upload/liste réels
+    via `curl` multipart contre un vrai `uvicorn`. Puis vérification
+    navigateur réelle (Playwright + Chromium, backend réel + `vite` dev
+    réel, pas de mock) : upload d'un fichier via l'UI, apparition dans la
+    liste, téléchargement (nom de fichier confirmé via l'événement
+    `download` de Playwright), suppression (disparition confirmée de la
+    liste) — les trois flux rejoués en thème clair et sombre, aucune
+    erreur console dans les deux cas. `npx tsc --noEmit` sans erreur ;
+    `vite build` transforme 486 modules sans erreur (échec de build
+    limité au nettoyage du dossier `dist/` pré-existant appartenant à
+    `root`, même problème d'environnement déjà documenté dans les entrées
+    précédentes, sans rapport avec ce changement).
+  - Piège d'environnement rencontré et contourné (pas un bug du code) :
+    `frontend/.env` définit `VITE_API_BASE=https://kckvfkftbdp4.shares.zrok.io`
+    (un tunnel de développement de l'utilisateur, antérieur à cette
+    session) — sous Playwright, cela déclenchait un échec CORS silencieux
+    vers ce tunnel au lieu du backend local, faisant passer l'app entière
+    en mode legacy (santé API injoignable ⇒ `saasEnabled=false` ⇒
+    `/documents` redirige vers `/`). Contourné pour la seule durée de la
+    vérification via `VITE_API_BASE="" npx vite ...` (une variable
+    d'environnement de processus prime sur `.env` chez Vite) — fichier
+    `.env` de l'utilisateur non modifié. À garder en tête pour toute
+    future vérification Playwright dans cet environnement.
+  - Non vérifié : upload d'un PDF réel (testé uniquement avec un fichier
+    texte simple, `document_extraction.py` pour le chemin PDF n'a été
+    revérifié que par lecture de code, pas par un upload réel de PDF dans
+    cette unité) ; comportement au-delà de la limite de 20 Mo ; upload
+    rattaché à un projet réel (testé sans projet uniquement, le sélecteur
+    de projet n'a pas été exercé avec une vraie sélection).
+
+- **Feature — Ingestion automatique des pièces jointes d'email en Documents,
+  enrichissement de l'analyse et des réponses** (2026-08-01) :
+  - Contexte : demande utilisateur explicite (« télécharger les documents
+    des emails, les extraire pour enrichir l'analyse et les réponses »),
+    suite directe de la mise en place du Contexte Documents (domaine #7,
+    entrées précédentes du même jour). Périmètre choisi (décision
+    documentée plutôt que question à l'utilisateur, cf. discipline
+    "défaut minimal honnête") : brancher sur le pipeline Fast-Track déjà
+    existant (seul chemin qui traite réellement les emails aujourd'hui
+    pour un projet) plutôt qu'ajouter un scan rétroactif de tout
+    l'historique — voir limites assumées ci-dessous.
+  - **Portée volontairement restreinte à IMAP** : `process_delta`
+    (Fast-Track, `analyzer.py`) reste IMAP-only (limite déjà documentée à
+    l'Unit 15/17 — les tenants Gmail/Outlook-only sans IMAP configuré
+    n'ont aujourd'hui aucun Fast-Track fonctionnel, pas seulement pas de
+    pièces jointes). Cette unité n'élargit pas ce périmètre : elle branche
+    l'extraction de pièces jointes exactement là où des emails sont déjà
+    effectivement traités.
+  - **Extraction** (`project_mail.py::extract_email_content`) : parcourt
+    désormais aussi les parties du message pour capturer les pièces
+    jointes nommées (`part.get_filename()`), filtrées via la nouvelle
+    fonction partagée `document_extraction.is_supported_attachment`
+    (réutilise exactement la même logique PDF/texte que `extract_text` —
+    extraite en `_is_pdf`/`_is_plain_text` pour éviter la duplication du
+    prédicat entre les deux modules). Décision : ne capturer que ce qui
+    est réellement extractible/recherchable (PDF, `.txt`/`.md`/`.csv`) —
+    les images/logos de signature (`image/png` etc.) ne sont jamais
+    capturés, pour ne pas polluer `/documents` de pièces jointes inline
+    sans valeur pour l'analyse (vérifié : un email de test avec un
+    `.txt`, un `.csv` et un `.png` ne capture que les deux premiers).
+    Stockées dans une clé `_attachments` (préfixe `_`, signale
+    explicitement "éphémère, pas une métadonnée stable") **retirée avant
+    toute écriture dans le cache JSON partagé** (`_process_one_email_id`)
+    — les octets bruts ne sont ni sérialisables tels quels, ni
+    souhaitables à dupliquer sur disque à chaque scan ; seule la copie en
+    mémoire de l'exécution courante les porte. Conséquence assumée :
+    seuls les emails traités pour la première fois par le Fast-Track
+    (donc jamais présents dans le cache) auront leurs pièces jointes
+    capturées — un email déjà en cache (rescan dans la même fenêtre) n'en
+    aura pas, sans que cela soit un problème pratique puisque l'ingestion
+    en base est de toute façon restreinte aux emails nouveaux (point
+    suivant).
+  - **Persistance** (`email_analyzer/services/document_service.py`) :
+    nouvelle méthode `ingest_email_attachment` (à côté de `upload`,
+    factorisées via un `_persist` commun) — jamais d'exception
+    (contrairement à `upload`, pensé pour une requête HTTP) : fichier
+    trop volumineux (`DOCUMENT_MAX_SIZE_BYTES`, 20 Mo) ou vide simplement
+    ignoré. Dédoublonnée sur (tenant, projet, nom, taille) via la nouvelle
+    `DocumentRepository.find_existing` — pas un identifiant stable par
+    pièce jointe (hors périmètre v1, limite documentée dans le code) :
+    suffisant pour éviter de recréer le même document à chaque re-scan
+    (ex. bouton "chercher sur plus de jours") sans nouvelle table de
+    suivi. Nouvelle colonne `Document.source` (migration
+    `018_document_source`, nullable — même discipline que 004/005 sur
+    `emails` : les lignes antérieures ne sont pas rétro-devinées) :
+    `"upload"` (dépôt manuel) vs `"email"` (cette unité), exposée dans
+    `DocumentOut`/`documentsApi.ts` et affichée en badge "Email" sur
+    `/documents`.
+  - **Câblage Fast-Track** (`analysis_tasks.py::_run_fasttrack_sync`) :
+    nouvelle fonction `_ingest_new_email_attachments`, appelée juste après
+    le hook `KnowledgeService.sync_from_project_summary` déjà existant
+    (même bloc `if new_emails:`, même discipline best-effort — un échec
+    n'invalide jamais l'analyse déjà commitée). Restreinte aux emails
+    réellement nouveaux dans cette exécution via `seen_external_ids` (le
+    même ensemble déjà utilisé pour dédupliquer l'insertion des `Email` —
+    pas un recalcul indépendant) : aucun rattrapage rétroactif des emails
+    déjà en base avant l'introduction de cette fonctionnalité. Utilisateur
+    attribué au document (`Document.user_id`) : la première `Membership`
+    "owner" du tenant (repli sur la première membership tout court) — un
+    job Fast-Track (cron ou déclenchement manuel) n'a pas d'utilisateur
+    acteur unique à qui attribuer l'ingestion, décision minimale assumée
+    plutôt qu'une nouvelle notion de "compte système".
+  - **Enrichissement de l'analyse et des réponses** — deux mécanismes
+    distincts, décision explicite de ne pas aller au-delà :
+    1. *Réponses* : un document ingéré devient immédiatement trouvable
+       par l'outil agent `search_documents` (déjà câblé dans
+       `tool_executor.py` depuis l'unité précédente) — donc par le chat
+       portefeuille et, via lui, par `draft_reply`. Aucun changement de
+       code nécessaire ici, c'est la conséquence directe de le stocker
+       comme `Document`.
+    2. *Analyse* : signal ambiant `document_count` par projet
+       (`context_service.py::_document_counts`, une requête groupée —
+       même principe que `_open_ticket_counts`), rendu dans
+       `llm.py::build_portfolio_context` ("Documents disponibles : N").
+       Décision explicite **contre** l'injection du texte extrait
+       lui-même dans le prompt système (contrairement à Profile/Memory/
+       Knowledge) : un document peut porter jusqu'à 200k caractères de
+       texte extrait (`document_extraction._MAX_EXTRACTED_CHARS`), et il
+       n'existe aujourd'hui aucune politique de troncature/sélection
+       raisonnée à appliquer sans un nouvel arbitrage produit — documenté
+       comme limite explicite dans le docstring de `context_service.py`
+       plutôt que d'improviser une politique arbitraire. Génération LLM
+       structurée du résumé de projet (`ProjectSummaryLLM`) non modifiée
+       non plus, pour la même raison (pas de nouvel appel LLM ajouté par
+       cette unité, cohérent avec la discipline de coût déjà suivie
+       partout ailleurs dans ce fichier).
+  - Vérifié bout-en-bout contre un second cluster Postgres jetable réel
+    (`initdb`/`pg_ctl`, port/socket distincts du premier, supprimé après
+    coup) : `alembic upgrade head` rejoue `001→018` sans erreur (première
+    vérification réelle de la migration 018). Script Python jetable :
+    email synthétique multipart (`email.message.EmailMessage`, 1 corps +
+    3 pièces jointes `.txt`/`.png`/`.csv`) → `extract_email_content`
+    capture bien exactement les 2 pièces supportées (le `.png` est
+    correctement écarté) → `_ingest_new_email_attachments` appelée deux
+    fois de suite (simulant un re-scan) ne crée que 2 `Document` (pas 4 —
+    dédoublonnage confirmé), tous deux `source="email"` avec
+    `extracted_text` non vide → `ContextService._project_rows` /
+    `build_portfolio_context` affichent bien "Documents disponibles : 2"
+    pour le projet. Vérifié séparément (script isolé) que le contenu mis
+    en cache après extraction reste bien JSON-sérialisable (pas de
+    `TypeError` sur des `bytes`) une fois `_attachments` retiré, alors que
+    l'objet `email_content` en mémoire les conserve. `python -m
+    py_compile` sur tous les fichiers modifiés + `import api.main` (29
+    routes, aucune erreur) + `WorkerSettings.functions` inchangé (aucun
+    nouveau job arq ajouté — cette unité s'exécute dans le job Fast-Track
+    existant). `npx tsc --noEmit` sans erreur ; `vite build` transforme
+    486 modules sans erreur (échec de build limité au nettoyage du
+    dossier `dist/` pré-existant appartenant à `root`, même problème
+    d'environnement déjà documenté dans les entrées précédentes).
+  - Non vérifié : passage réel contre un vrai serveur IMAP (le test
+    ci-dessus construit un message synthétique en mémoire, jamais fetché
+    via `imaplib`) ; upload d'une pièce jointe PDF réelle par ce chemin
+    (testé uniquement avec `.txt`/`.csv`, `document_extraction.py` pour
+    le chemin PDF n'a été revérifié que par lecture de code) ; effet réel
+    du signal "Documents disponibles" sur une vraie réponse d'un LLM
+    (vérifié uniquement que le texte apparaît dans le contexte assemblé,
+    pas qu'un modèle Gemini/OpenAI réel choisit d'appeler
+    `search_documents` en conséquence) ; comportement sous forte
+    volumétrie de pièces jointes (un email avec des dizaines de pièces
+    jointes volumineuses dans un même delta Fast-Track).
+
+- **Feature — Rattrapage rétroactif des pièces jointes d'email, en
+  arrière-plan avec indication de progression** (2026-08-01) :
+  - Contexte : demande utilisateur explicite (« faire un rattrapage
+    rétroactif en background sans blocage du frontend avec une indication »)
+    — l'ingestion automatique des pièces jointes (entrée précédente du même
+    jour) ne couvre que les emails traités par le Fast-Track *à partir de
+    maintenant* ; les emails déjà persistés avant cette fonctionnalité (des
+    mois/années d'historique selon le tenant) n'ont jamais eu leurs pièces
+    jointes capturées. Portée confirmée explicitement avec l'utilisateur
+    (`AskUserQuestion`, en plan mode) : tout l'historique déjà en base, pas
+    seulement une fenêtre récente. Plan conçu via un agent Plan après
+    exploration dédiée (patterns de jobs arq + IMAP), approuvé avant
+    implémentation.
+  - **Trois contraintes structurantes découvertes en explorant le code**
+    (pas supposées a priori) : (1) aucun moyen de relire un email par
+    Message-ID en IMAP dans ce code — tout est basé sur un scan par fenêtre
+    `SINCE`, comme `discover_sender_domains`/`discover_subject_ticket_keys` ;
+    (2) le cache email JSON partagé ne porte jamais `_attachments` (retiré
+    avant écriture, voir l'entrée précédente) — un re-scan avec cache activé
+    sur des emails déjà connus renverrait donc silencieusement zéro pièce
+    jointe, d'où `use_email_cache=False` obligatoire pour ce scan ; (3)
+    réutiliser `search_project_emails` tel quel pour scanner tout
+    l'historique accumulerait chaque corps + les octets bruts de chaque
+    pièce jointe en mémoire simultanément avant de retourner — risque réel
+    d'OOM sur une boîte multi-années, d'où un scan **streaming** dédié
+    (callback par email, jamais d'accumulation).
+  - `project_mail.py::EmailProjectAnalyzer.scan_attachments_by_message_id`
+    (nouveau) : même squelette IMAP que `search_project_emails` (`select` +
+    `SINCE`, sans `_uid_search_narrow_ids` puisqu'aucun filtre projet ici),
+    mais appelle `on_email(message_id, attachments)` immédiatement pour
+    chaque message puis abandonne la référence — jamais de liste accumulée.
+    Toujours un fetch `RFC822` complet (jamais `headers_only`, il faut le
+    corps pour les pièces jointes). Ne touche jamais `self.email_cache` (ni
+    lecture ni écriture), quel que soit `use_email_cache` — documenté
+    explicitement pourquoi (point 2 ci-dessus). `try/except` par email (log
+    + continue), même arithmétique de chunking de progression que
+    `search_project_emails` (`batch_threshold()`/`large_scan_threshold()`).
+  - `analyzer.py::EmailProcessor.backfill_email_attachments` (nouveau) :
+    façade IMAP-only (garde `email_address`/`password` en premier, comme
+    `process_delta`) — **volontairement sans repli Gmail/Outlook**
+    (contrairement à `_fetch_project_data`) : ces chemins renvoient des
+    dicts déjà normalisés sans parties MIME, donc sans jamais
+    `_attachments` — même limite préexistante que le Fast-Track
+    (`process_delta` déjà IMAP-only, Open Question #1 / Units 15-17), non
+    étendue par cette unité. Construit son propre `EmailProjectAnalyzer`
+    avec `use_email_cache=False`.
+  - `analysis_tasks.py` : `_attachment_backfill_days_back` (calcule la
+    fenêtre depuis `MIN(Email.received_at)` des emails déjà rattachés à un
+    projet du tenant — un email sans projet ne peut produire aucun
+    `Document`, donc n'élargit pas la fenêtre ; gère un `received_at` naïf ;
+    repli 30 jours si aucun email daté ; clamp à 3650 jours) ;
+    `_run_email_attachment_backfill_sync` (précharge
+    `{external_id: project_id}` pour tous les `Email` du tenant déjà
+    rattachés à un projet, lance un seul scan IMAP complet via
+    `backfill_email_attachments`, matche chaque email retrouvé contre cette
+    map, ingère via `DocumentService.ingest_email_attachment` déjà
+    idempotent — compteur avant/après sur `Document(source="email")` pour
+    distinguer "créées" de "déjà présentes", le retour de
+    `ingest_email_attachment` ne le permettant pas directement). Pas de
+    `try/except: db.rollback(); raise` global comme `_run_fasttrack_sync` :
+    chaque `Document` est commité individuellement par
+    `DocumentRepository.create`, donc `db.rollback()` explicite dans le
+    `except` par pièce jointe (sinon un insert en échec casse la session
+    pour les pièces suivantes) — et un job interrompu (timeout, worker
+    redémarré) a déjà persisté durablement tout ce qu'il a ingéré, un
+    nouveau lancement reprend sans créer de doublon. Tenant sans IMAP
+    configuré (Gmail/Outlook-only) : retourne `{"_error": ...}` (ne lève
+    pas), même discipline que les jobs `discover_*`. `run_email_attachment_
+    backfill` (wrapper arq, copié verbatim du patron `run_domain_discovery`,
+    capture `CancelledError` explicitement) enregistré dans
+    `WorkerSettings.functions` (`max_tries=1, timeout=7200` — limite
+    assumée : une très grosse boîte peut ne pas finir dans ce délai, sans
+    risque de corruption grâce aux commits par-document + dédoublonnage ;
+    découpage multi-jobs hors périmètre de cette itération).
+  - `api/routers/documents.py::POST /api/documents/backfill-from-emails`
+    (nouveau, même squelette que `discover_projects`/`discover_tickets` de
+    `brief.py` : `create_job`/`enqueue`) — placé ici plutôt que dans
+    `brief.py` puisque le déclencheur vit sur la page Documents et que ce
+    router porte déjà `_require_saas()`/`authenticate_bearer`. Aucune
+    nouvelle route de polling : `GET /api/analyze/{job_id}` (générique,
+    déjà existant) suffit. Aucune migration, aucun changement de modèle.
+  - **Indication de progression sans blocage** : `frontend/src/
+    attachmentBackfillApi.ts` (nouveau, clone structurel de
+    `discoverApi.ts` — reprise via localStorage, polling 2.5s, budget aligné
+    sur le timeout 7200s du worker) + `BackfillAttachmentsModal.tsx`
+    (nouveau, version simplifiée de `DiscoverProjectsModal.tsx` : pas
+    d'étape de sélection/confirmation puisque le rattrapage est entièrement
+    automatique — juste démarrer, barre de progression, résumé final).
+    Bouton "Rattraper depuis les emails" ajouté dans la section de dépôt de
+    `DocumentsPage.tsx` (pas de changement à `useDocuments.ts`,
+    `documentsApi.ts`, `App.tsx`, `AppShell.tsx`). L'indicateur ambiant
+    "Analyse en cours…" (`useActiveJobIndicator`/`AppShell.tsx`) couvre déjà
+    ce job gratuitement — `create_job(tenant_id=...)` l'enregistre
+    automatiquement dans les jobs actifs du tenant, aucun code
+    supplémentaire nécessaire pour ce signal ambiant.
+  - Vérifié bout-en-bout contre un troisième cluster Postgres jetable réel
+    (`initdb`/`pg_ctl`, port/socket dédiés, supprimé après coup) :
+    `alembic upgrade head` rejoue `001→018` sans erreur (aucune nouvelle
+    migration dans cette unité). Script Python jetable, `saas_logic.
+    processor_from_tenant` monkeypatché avec un stub construisant des
+    `email.message.EmailMessage` synthétiques passés par le **vrai**
+    `extract_email_content` : (1) bornage de fenêtre — exclusion correcte
+    d'un email sans projet même très ancien, repli 30 jours si aucun email
+    daté, clamp à 3650 jours, `received_at` naïf géré sans lever ; (2)
+    matching + ingestion — sur 3 emails synthétiques (1 rattaché à un
+    projet avec `.txt`+`.csv`+`.png`, 1 sans projet, 1 inconnu en base),
+    seul le premier compte "matched", seules les 2 pièces supportées sont
+    ingérées (le `.png` correctement écarté), `Document.source == "email"`,
+    `project_id`/`extracted_text` corrects, callback de progression appelé
+    avec des paires `(processed, total)` croissantes jusqu'à `(3, 3)` ; (3)
+    relance immédiate du même scénario → `attachments_created == 0`, aucun
+    nouveau `Document` (idempotence confirmée) ; (4) tenant sans IMAP
+    configuré → `_error` retourné (pas d'exception), aucun `Document` créé,
+    vérifié à la fois au niveau du job et directement sur
+    `EmailProcessor.backfill_email_attachments`. `python -m py_compile` sur
+    tous les fichiers modifiés ; `import api.main` (61 chemins d'API dans le
+    schéma OpenAPI, `POST /api/documents/backfill-from-emails` bien présent
+    — le comptage brut de `app.routes` ne convient plus depuis FastAPI
+    0.139, déjà noté dans une entrée antérieure) ; `run_email_attachment_
+    backfill` confirmé dans `WorkerSettings.functions` avec `max_tries=1,
+    timeout=7200`. `npx tsc --noEmit` sans erreur ; `vite build` transforme
+    740 modules sans erreur (bond par rapport aux 486 précédents dû à des
+    changements externes concurrents dans le dépôt pendant cette session,
+    sans rapport avec cette unité — échec de build toujours limité au même
+    problème d'environnement `dist/`/`root` déjà documenté).
+  - Non vérifié : le vrai chemin IMAP (`scan_attachments_by_message_id`
+    n'est jamais exercé contre un serveur réel, seul un stub simulant son
+    contrat a été testé) ; le temps réel et la mémoire crête sur une boîte
+    multi-années (le design streaming est *raisonné* à mémoire plate, pas
+    mesuré en conditions réelles) ; le comportement d'un job réellement tué
+    à 7200s en plein scan (durabilité déduite du commit par-document, pas
+    observée sur un vrai kill) ; l'upload d'un PDF réel par ce chemin (même
+    limite que l'entrée précédente, testé avec `.txt`/`.csv` uniquement) ;
+    rendu visuel réel du modal dans un navigateur (pas de session Playwright
+    lancée pour cette unité, contrairement à l'unité UI Documents du même
+    jour).
 
 ## Open Questions
 

@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, time
+from typing import List, Optional
 
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
     Text,
+    Time,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -293,6 +295,13 @@ class Email(Base):
     # renforcement "participants connus" propre au balayage IMAP (voir
     # migration 005). NULL pour les emails persistés avant cette colonne.
     classification_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Clé de ticket détectée dans le sujet ([Banque_Plateforme_Numéro], voir
+    # email_analyzer.subject_tickets.parse_subject_ticket_key) et son numéro ;
+    # NULL si le sujet ne porte pas ce motif. Colonnes dédiées (pas JSONB) :
+    # l'énumération/comptage par projet (migration 015) a besoin d'un GROUP BY
+    # SQL bon marché.
+    ticket_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ticket_number: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     project: Mapped[Optional["Project"]] = relationship(back_populates="emails")
@@ -353,6 +362,35 @@ class ProjectSummary(Base):
     project: Mapped["Project"] = relationship(back_populates="summary")
 
 
+class ProjectSummaryHistory(Base):
+    """Archive d'un ProjectSummary tel qu'il était juste avant d'être écrasé
+    par une resynchronisation Fast-Track (analysis_tasks.py) — ProjectSummary
+    reste une ligne unique régénérée en place (voir son docstring), ceci est
+    l'historique qui en manquait jusqu'ici. Une ligne par régénération
+    effective (new_emails non vide), pas par tick de sync sans changement.
+    Pas de tenant_id (comme ProjectSummary) : l'isolation tenant repose sur la
+    vérification Project.tenant_id == tenant_id faite avant toute requête
+    sur cette table, jamais sur une colonne locale."""
+
+    __tablename__ = "project_summary_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), index=True
+    )
+    content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    structured_content: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    sentiment: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    llm_risk_level: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, index=True
+    )
+
+    project: Mapped["Project"] = relationship()
+
+
 class SuggestedAction(Base):
     """Action recommandée par l'IA pour un projet (jamais exécutée automatiquement —
     ai-workflow-rules.md §8)."""
@@ -404,14 +442,34 @@ class Appointment(Base):
     project: Mapped["Project"] = relationship(back_populates="appointments")
 
 
+class Conversation(Base):
+    """Un fil de discussion avec l'assistant portefeuille. Un tenant+utilisateur
+    peut avoir plusieurs conversations (bouton "nouvelle conversation" +
+    panneau d'historique) ; chaque AssistantMessage appartient à exactement
+    une conversation. `title` par défaut au premier message utilisateur
+    (tronqué), voir ConversationService — pas de renommage manuel en v1."""
+
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class AssistantMessage(Base):
     """Tour de conversation avec l'assistant portefeuille (voir
     llm.build_portfolio_chat_system_prompt, api/routers/assistant.py).
 
-    Persisté par tenant+utilisateur — contrairement au chat par projet
-    (`/api/chat`, éphémère côté frontend), l'assistant permanent garde sa
-    mémoire entre les sessions (une session = tout l'historique du couple
-    tenant/utilisateur, pas de notion de "conversation" séparée pour l'instant)."""
+    Persisté par conversation (Conversation ci-dessus) — contrairement au
+    chat par projet (`/api/chat`, éphémère côté frontend), l'assistant
+    permanent garde sa mémoire entre les sessions."""
 
     __tablename__ = "assistant_messages"
 
@@ -420,6 +478,269 @@ class AssistantMessage(Base):
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id"), index=True
+    )
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class MemoryCategory(str, enum.Enum):
+    preference = "preference"
+    fact = "fact"
+    context = "context"
+
+
+class MemorySource(str, enum.Enum):
+    conversation = "conversation"
+
+
+class Memory(Base):
+    """Fait durable retenu sur un utilisateur/tenant (préférence, fait,
+    contexte projet) — pilier "Mémoire persistante" du pivot Personal
+    Executive AI Assistant (context/project-overview.md).
+
+    v1 volontairement simple (voir progress-tracker.md Unit 46) : pas de
+    recherche vectorielle, pas de notion de "conversation" source distincte
+    (source = "conversation", cf. AssistantMessage ci-dessus tant qu'il n'y
+    a pas de session séparée). Extrait par
+    email_analyzer.services.memory_service.MemoryService, jamais écrit
+    directement par un routeur."""
+
+    __tablename__ = "memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(16), default=MemoryCategory.fact.value)
+    source: Mapped[str] = mapped_column(String(16), default=MemorySource.conversation.value)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class Profile(Base):
+    """Contexte personnel de l'utilisateur — profil et habitudes, domaine
+    #1 ("la base de tout") de la vision Personal Executive AI Assistant
+    (context/project-overview.md). Unique par (tenant, user) : contrairement
+    à Memory (plusieurs faits extraits), un profil est un objet de
+    configuration unique que l'utilisateur édite directement dans les
+    Paramètres — pas d'extraction LLM.
+
+    Habitudes en colonnes typées (forme fixe et connue) ; préférences et
+    membres de la famille en JSONB (listes ouvertes par nature, même
+    logique que Project.rules_matrix/Email.tags)."""
+
+    __tablename__ = "profiles"
+    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_profiles_tenant_user"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    languages: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
+    timezone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    preferences: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    family_members: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    favorite_contact_ids: Mapped[Optional[List[uuid.UUID]]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)), nullable=True
+    )
+    wake_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    sleep_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    work_start_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    work_end_time: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
+    sport_days: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
+    focus_hours: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class Organization(Base):
+    """Entreprise/organisation mentionnée dans un ou plusieurs projets —
+    pilier "Knowledge Layer" du pivot (context/project-overview.md).
+
+    v1 volontairement simple : pas de graphe, une organisation = un nom
+    unique par tenant, dédupliqué à l'exact (comme Memory). Alimentée par
+    email_analyzer.services.knowledge_service.KnowledgeService à partir de
+    `ProjectSummary.structured_content["companies"]` (déjà extrait par le
+    LLM existant, cf. llm.ProjectSummaryLLM) — pas de nouvel appel LLM."""
+
+    __tablename__ = "organizations"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_organization_tenant_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    contacts: Mapped[list["Contact"]] = relationship(back_populates="organization")
+
+
+class Contact(Base):
+    """Personne mentionnée dans un ou plusieurs projets (participant email).
+
+    Alimentée depuis `ProjectSummary.structured_content["participants"]`
+    (voir Organization ci-dessus pour le raisonnement) — un nom, pas encore
+    une adresse email normalisée (Email.body_encrypted n'expose pas
+    l'expéditeur en colonne dédiée aujourd'hui ; à revoir si ce besoin
+    devient bloquant)."""
+
+    __tablename__ = "contacts"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_contact_tenant_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    organization: Mapped[Optional["Organization"]] = relationship(back_populates="contacts")
+    project_links: Mapped[list["ProjectContactLink"]] = relationship(back_populates="contact")
+
+
+class ProjectContactLink(Base):
+    """Relation "ce contact est lié à ce projet" — la brique "Project Links"
+    du pivot. Table d'association simple (pas de graphe), une ligne par
+    couple (project, contact)."""
+
+    __tablename__ = "project_contact_links"
+    __table_args__ = (
+        UniqueConstraint("project_id", "contact_id", name="uq_project_contact_link"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), index=True)
+    contact_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("contacts.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    project: Mapped["Project"] = relationship()
+    contact: Mapped["Contact"] = relationship(back_populates="project_links")
+
+
+class ObjectiveStatus(str, enum.Enum):
+    on_track = "on_track"
+    at_risk = "at_risk"
+    blocked = "blocked"
+    done = "done"
+
+
+class MilestoneStatus(str, enum.Enum):
+    pending = "pending"
+    done = "done"
+
+
+class Objective(Base):
+    """Objectif de haut niveau (pilier "Objectives" du pivot,
+    context/project-overview.md) — optionnellement rattaché à un `Project`
+    existant ("use existing projects whenever possible", plan de pivot),
+    sinon un objectif personnel du tenant sans projet associé.
+
+    Pas de table "Progress" séparée : la progression est calculée à la
+    volée (milestones terminés / total, voir
+    ObjectiveService.compute_progress) plutôt que stockée et à
+    resynchroniser. Pas de table "Blocking Issue" séparée non plus :
+    `status=blocked` + `blocking_reason` suffisent en v1 — une raison de
+    blocage n'est pas un objet indépendant tant qu'il n'y a qu'un blocage
+    actif possible par objectif."""
+
+    __tablename__ = "objectives"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(300))
+    target_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=ObjectiveStatus.on_track.value)
+    blocking_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    project: Mapped[Optional["Project"]] = relationship()
+    milestones: Mapped[list["Milestone"]] = relationship(
+        back_populates="objective", order_by="Milestone.due_date"
+    )
+
+
+class Milestone(Base):
+    """Étape concrète d'un `Objective`. Une ligne = un jalon ; l'ensemble
+    des jalons d'un objectif donne sa progression (voir Objective.__doc__)."""
+
+    __tablename__ = "milestones"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    objective_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("objectives.id"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(300))
+    due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=MilestoneStatus.pending.value)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    objective: Mapped["Objective"] = relationship(back_populates="milestones")
+
+
+class Document(Base):
+    """Document local téléversé par l'utilisateur — domaine "Contexte
+    Documents" (context/project-overview.md, domaine #7 : "la base de
+    tout" #1 exceptée). v1 volontairement scopé aux fichiers locaux :
+    Drive/OneDrive/Dropbox/NAS restent hors périmètre (bloqués sur choix de
+    fournisseur + identifiants OAuth, voir project-overview.md).
+
+    Le fichier lui-même vit sur disque (`document_service.storage_path_for`,
+    nommé par `id` pour éviter tout risque de traversée de chemin depuis un
+    nom de fichier utilisateur) ; cette ligne n'en est que les métadonnées +
+    le texte extrait pour la recherche. `extracted_text` reste `NULL` pour
+    les formats non pris en charge en v1 (Word/Excel/PowerPoint/images) —
+    ces documents restent stockés et listés, seulement pas recherchables par
+    contenu (voir `email_analyzer/document_extraction.py`)."""
+
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(500))
+    content_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    extracted_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # "upload" (dépôt manuel, /documents) ou "email" (pièce jointe ingérée
+    # automatiquement par le Fast-Track, voir analysis_tasks.py). Nullable
+    # (migration 018) : les lignes antérieures à cette colonne sont toutes
+    # des dépôts manuels, traitées comme "upload" par l'UI sans backfill
+    # (même discipline que 004/005 sur emails — pas de deviner une valeur).
+    source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    project: Mapped[Optional["Project"]] = relationship()

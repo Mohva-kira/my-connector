@@ -29,6 +29,7 @@ from email_analyzer.db.models import (
 )
 from email_analyzer.db.session import get_db
 from email_analyzer.saas_logic import authenticate_bearer, saas_enabled
+from email_analyzer.tools.draft_reply_tool import DraftReplyTool
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -67,6 +68,10 @@ class EmailOut(BaseModel):
     # les emails persistés avant cette colonne.
     tags: Optional[List[str]]
     classification_score: Optional[int]
+    # Clé/numéro de ticket extraits du sujet (migration 015, voir
+    # email_analyzer.subject_tickets) ; None si le sujet ne porte pas ce motif.
+    ticket_label: Optional[str]
+    ticket_number: Optional[str]
 
 
 class ProjectOut(BaseModel):
@@ -120,6 +125,14 @@ class MergeProjectsBody(BaseModel):
     source_ids: List[uuid.UUID] = Field(..., min_length=1)
 
 
+class AttachSubjectKeyBody(BaseModel):
+    # Libellé normalisé d'une clé de ticket détectée dans un sujet (voir
+    # email_analyzer.subject_tickets.SubjectTicketKey.normalized_label) —
+    # rattachement manuel choisi par l'utilisateur (découverte de tickets,
+    # DiscoverTicketsModal) plutôt qu'auto-attaché.
+    subject_key: str = Field(..., min_length=1)
+
+
 _RULES_MATRIX_LIST_KEYS = (
     "keywords",
     "sender_domains",
@@ -127,6 +140,7 @@ _RULES_MATRIX_LIST_KEYS = (
     "client_names",
     "company_names",
     "reference_numbers",
+    "subject_keys",
 )
 
 
@@ -351,6 +365,8 @@ def get_project(
                 importance_score=e.importance_score,
                 tags=e.tags,
                 classification_score=e.classification_score,
+                ticket_label=e.ticket_label,
+                ticket_number=e.ticket_number,
             )
             for e in top_emails
         ],
@@ -426,6 +442,38 @@ def merge_projects(
     return get_project(project_id, db=db, authorization=authorization)
 
 
+@router.post("/{project_id}/attach-subject-key", response_model=ProjectOut)
+def attach_subject_key(
+    project_id: uuid.UUID,
+    body: AttachSubjectKeyBody,
+    db: Session = Depends(get_db),
+    authorization: Optional[str] = Header(None),
+) -> ProjectOut:
+    """Rattache manuellement une clé de sujet découverte (DiscoverTicketsModal,
+    choix "rattacher à un projet existant") à ``project_id`` : lecture-fusion-
+    écriture sur ``rules_matrix`` (même union dédupliquée que ``/merge``, via
+    ``_merge_rules_matrix``), pour que les futurs emails portant cette clé
+    soient automatiquement rattachés (``classification.score_project_relevance``,
+    signal ``subject_ticket_key``). N'entraîne pas de rafraîchissement Fast-Track
+    automatique — même discipline que ``/merge`` ci-dessus."""
+    _require_saas()
+    _, tenant, _ = authenticate_bearer(db, authorization)
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.tenant_id == tenant.id)
+        .first()
+    )
+    if project is None:
+        raise HTTPException(status_code=404, detail="Projet introuvable")
+
+    project.rules_matrix = _merge_rules_matrix(
+        [project.rules_matrix, {"subject_keys": [body.subject_key]}]
+    )
+    db.commit()
+    db.refresh(project)
+    return _project_out(db, project, project.summary)
+
+
 @router.patch("/{project_id}", response_model=ProjectOut)
 def update_project(
     project_id: uuid.UUID,
@@ -449,3 +497,26 @@ def update_project(
     db.commit()
     db.refresh(project)
     return _project_out(db, project, project.summary)
+
+
+class DraftReplyOut(BaseModel):
+    template_id: str
+    project_name: str
+    body: str
+    checklist_tasks: List[str]
+    next_meeting_hint: str
+
+
+@router.post("/{project_id}/draft-reply", response_model=DraftReplyOut)
+def draft_reply(
+    project_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    authorization: Optional[str] = Header(None),
+) -> DraftReplyOut:
+    """Génère un brouillon de réponse (routine/alerte/kickoff) à partir du
+    résumé persisté du projet — voir `DraftReplyTool`. Jamais envoyé
+    automatiquement (`ai-workflow-rules.md` §8), toujours à relire."""
+    _require_saas()
+    _, tenant, _ = authenticate_bearer(db, authorization)
+    draft = DraftReplyTool(db).run(tenant.id, project_id)
+    return DraftReplyOut(**draft)

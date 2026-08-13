@@ -9,8 +9,8 @@ from time import perf_counter
 from dotenv import load_dotenv
 
 from .config import (
+    ASSISTANT_PROVIDER_GEMINI,
     ASSISTANT_PROVIDER_NONE,
-    ASSISTANT_PROVIDER_OPENAI,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OPENAI_BODY_CHARS,
     DEFAULT_OPENAI_MAX_INPUT_CHARS,
@@ -51,7 +51,7 @@ def main() -> None:
     parser.add_argument(
         "--assistant-provider",
         choices=sorted(VALID_ASSISTANT_PROVIDERS),
-        default=ASSISTANT_PROVIDER_OPENAI,
+        default=ASSISTANT_PROVIDER_GEMINI,
         help=(
             "Résumé assistant : openai (OPENAI_API_KEY), gemini (GEMINI_API_KEY ou GOOGLE_API_KEY, "
             "https://aistudio.google.com), none pour désactivé. Ignoré si --no-openai."

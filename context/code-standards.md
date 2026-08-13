@@ -1,53 +1,158 @@
 # Code Standards & Engineering Guidelines
 
-Ce document définit les standards de développement, les règles de formatage et les exigences de qualité logicielle pour l'écosystème de l'application. L'objectif est de garantir la maintenabilité d'une architecture hybride impliquant un backend Python asynchrone (FastAPI/Celery) et des interfaces clients en JavaScript/TypeScript (React et React Native), tout en assurant une étanchéité absolue lors du traitement et du chiffrement des données sensibles (emails et pièces jointes).
+> **Réécrit le 2026-07-19** (avec les corrections de `architecture.md`
+> du même jour). Remplace le texte précédent, qui décrivait des outils et
+> une pile jamais mis en place dans ce dépôt (Celery, React Native, mypy à
+> 100%, couverture de tests à 80%, `Bandit`, cache device 30 jours, index
+> vectoriel Orama/Voy). Ce document décrit les conventions réellement
+> suivies dans le code depuis le pivot exécutif (Units 45-57, voir
+> `context/progress-tracker.md`) — pas un objectif aspirationnel.
+>
+> Il n'y a **aucun outillage automatisé** dans ce dépôt aujourd'hui :
+> ni CI, ni pre-commit hook, ni configuration `mypy`/`ruff`/`eslint`, ni
+> suite de tests unitaires (confirmé : aucun `pyproject.toml`,
+> `.pre-commit-config.yaml`, `mypy.ini`, `.eslintrc*` dans le repo). Les
+> règles ci-dessous sont donc des conventions de code appliquées
+> manuellement — un futur ajout d'outillage réel doit d'abord être
+> installé/configuré avant d'être cité ici comme "en place".
 
-## 1. Objectifs de Qualité du Code (Engineering Goals)
+## 1. Stack réelle
 
-1. **Typage Stricte Obligatoire :** Maximiser la détection d'erreurs à la compilation et à l'analyse statique en imposant un typage à 100% sur le backend (Type Hints Python avec MyPy) et le frontend (TypeScript en mode strict).
-2. **Découplage des Effets de Bord :** Isoler systématiquement la logique métier pure des accès à la base de données PostgreSQL ou des appels d'API (LLM, Google), en appliquant les principes de la Clean Architecture.
-3. **Sécurité par Défaut (Chiffrement) :** Garantir qu'aucune fonction de manipulation de texte ou d'indexation ne puisse manipuler des données d'emails sans passer explicitement par la couche de déchiffrement temporaire en mémoire vive (RAM).
-4. **Performance du Thread Principal :** Interdire toute opération d'I/O bloquante ou synchrone dans les contrôleurs d'API et les composants UI afin de maintenir un temps de réponse inférieur à 200ms.
+Backend Python (FastAPI, SQLAlchemy/PostgreSQL, Redis + `arq`), frontend
+web React + Vite + Tailwind (pas d'application mobile). Détail complet :
+`context/architecture.md` §1-2. Pas de Celery, pas de React Native, pas de
+base vectorielle côté client.
 
-## 2. Flux de Développement de Bout en Bout (Core Development Workflow)
+## 2. Flux de développement réel
 
-1. **Création de Branche :** Le développeur crée une branche issue de `main` en respectant la nomenclature stricte : `feat/nom-fonctionnalite`, `fix/nom-bug`, ou `chore/nom-tâche`.
-2. **Écriture du Code et Tests :** Développement de la fonctionnalité accompagnée obligatoirement de ses tests unitaires. Pour le backend Python, chaque nouveau worker Celery ou service doit atteindre une couverture minimale de 80%.
-3. **Analyse Statique Locale :** Exécution des outils de peluchage (Linting) et de formatage avant chaque commit via des hooks de pré-engagement (Pre-commit hooks) : Black/Ruff pour Python, ESLint/Prettier pour React.
-4. **Soumission de Pull Request (PR) :** Ouverture d'une PR vers `main`. Le modèle de PR doit obligatoirement lier l'ID de la tâche et décrire l'impact sur les performances ou la sécurité des données.
-5. **Intégration Continue (CI) :** Les tests automatisés, la vérification du typage (`mypy` et `tsc`), et l'audit des vulnérabilités des dépendances s'exécutent dans la pipeline de CI.
-6. **Relecture Technique & Fusion :** Validation obligatoire par au moins un pair (Peer Review). La fusion dans `main` se fait exclusivement par *Squash and Merge* pour garder un historique de commit propre.
+Pas de nomenclature de branche imposée, pas de pipeline CI, pas de revue
+par pair obligatoire outillée — ce dépôt est développé en session assistée
+par IA, une unité de travail à la fois, chaque unité documentée dans
+`context/progress-tracker.md` (contexte, décision, ce qui a été vérifié et
+comment, ce qui ne l'a pas été). C'est ce journal, pas un pipeline CI, qui
+tient lieu d'historique de revue.
 
-## 3. Standards Spécifiques par Catégorie Technique
+## 3. Standards Python (FastAPI)
 
-### Python Backend (FastAPI / Celery)
-* **Formatage :** Strict respect de la PEP 8 via l'outil `Ruff` ou `Black`. Longueur maximale des lignes fixée à 88 caractères.
-* **Asynchronisme :** Utilisation préférentielle de `async/await` pour les routes de l'API. Les fonctions effectuant des calculs lourds (ex: parsing PDF) doivent être définies comme des tâches Celery synchrones s'exécutant dans des workers isolés.
-* **Gestion des Exceptions :** Interdiction d'utiliser des blocs `try/except Exception: pass` génériques. Chaque exception doit être capturée explicitement, loggée de manière anonymisée (sans données d'emails), et retourner un code d'erreur standardisé.
+* **Formatage :** PEP 8 de fait (pas de `black`/`ruff` configuré à ce
+  jour) — cohérence avec le style déjà présent dans le fichier édité, pas
+  de réindentation globale à l'occasion d'un patch ciblé.
+* **Type hints :** systématiques sur les signatures de fonctions
+  publiques (paramètres + retour). Aucune vérification `mypy` automatisée
+  aujourd'hui — les types sont un contrat de lecture, pas un gate de CI.
+* **Routes FastAPI synchrones par défaut :** la quasi-totalité des
+  endpoints sont des `def` classiques (pas `async def`) — SQLAlchemy est
+  utilisé en mode synchrone (`Session`), FastAPI les exécute dans un
+  threadpool. N'utiliser `async def` que si un appel réellement
+  asynchrone le justifie (aucun cas de ce type actuellement dans
+  `api/routers/`).
+* **Model → Repository → Service → API :** pour toute nouvelle
+  fonctionnalité, la requête SQL vit dans `email_analyzer/repositories/
+  *_repository.py`, l'orchestration/validation dans
+  `email_analyzer/services/*_service.py`, le routeur (`api/routers/*.py`)
+  reste un contrôleur HTTP fin (auth, parsing du body, appel du service,
+  mapping vers le schéma Pydantic de réponse). Voir
+  `architecture.md` §8 invariant 5. Les routeurs plus anciens
+  (`projects.py`, `agenda.py`) gardent encore des requêtes inline — à
+  migrer seulement à l'occasion d'un changement réel de leur logique.
+* **Services indépendants de FastAPI :** un `*_service.py` ne doit pas
+  dépendre de types Pydantic/FastAPI dans sa signature publique (utiliser
+  des dataclasses simples, voir `BriefService`/`ObjectiveService`) — il
+  doit rester appelable/testable sans lever un serveur HTTP.
+* **`llm.py` reste le seul point d'appel SDK LLM :** aucun import direct
+  `openai`/`google.generativeai` ailleurs dans le code — confirmé par
+  grep à chaque nouvelle unité touchant l'IA (Units 46, 50-51, 57).
+  Chaque fonction d'appel LLM retourne `{"data"|"erreur"}` ou
+  `{"message"|"erreur"}`, jamais une exception qui remonte à l'appelant.
+* **Gestion des exceptions :** pas de `try/except Exception: pass`
+  silencieux. Un tool (`email_analyzer/tools/`) ou l'`Executor` de
+  l'agent peuvent capturer une exception, mais toujours pour la logger et
+  la renvoyer explicitement dans le résultat (`{"error": str(ex)}`),
+  jamais pour l'avaler.
+* **Logging :** `logging.getLogger(__name__)` par module, jamais
+  `print`. Chemins d'exécution notables (services métier, `ToolExecutor`,
+  `ConversationService`) loggent au moins un `start`/`done`/`error` — voir
+  `conversation_service.py`/`tool_executor.py` pour le format
+  (`logger.info("module.action start/done tenant=%s ...")`). Ne jamais
+  logger un corps d'email, un token ou un mot de passe en clair.
+* **Migrations :** toute modification de schéma passe par Alembic
+  (`alembic/versions/`), jamais de DDL manuel. Une migration a toujours
+  un `downgrade()` symétrique. Voir les migrations `011`-`013` pour le
+  gabarit à suivre (docstring expliquant le "pourquoi", index sur les
+  clés étrangères, contraintes uniques nommées explicitement).
+* **Streaming SSE (depuis 2026-07-27, `POST /api/assistant/conversations/{id}/chat`,
+  première route de streaming du repo) :** `StreamingResponse` +
+  générateur Python synchrone (pas `async def` — cohérent avec la
+  convention "routes synchrones" ci-dessus), `media_type="text/event-stream"`,
+  formaté par `api/sse.py::format_sse_event`. Chaque événement est un dict
+  `{"type": ..., ...}` ; les générateurs de `llm.py`
+  (`stream_portfolio_assistant_chat_openai/_gemini`) et de
+  `ConversationService.stream_message` ne lèvent jamais d'exception —
+  toute erreur devient un événement terminal `{"type": "error", ...}`
+  (même discipline que le reste de `llm.py`, reformulée en flux). Toute
+  validation de pré-requête (message vide, ressource introuvable,
+  fournisseur non configuré) doit lever une vraie `HTTPException` *avant*
+  le premier `yield` — le routeur amorce donc le générateur (un premier
+  `next()` explicite) avant de le passer à `StreamingResponse`, sinon
+  l'exception surviendrait après l'envoi des entêtes HTTP 200, trop tard
+  pour renvoyer le bon status code (voir `api/routers/assistant.py::chat`
+  pour le patron à suivre pour une future 2e route de streaming).
 
-### Frontend TypeScript (ReactJS / React Native)
-* **Composants :** Utilisation exclusive de composants fonctionnels avec des Hooks personnalisés (`custom hooks`) pour séparer la logique d'état et de requêtage de la couche graphique.
-* **Gestion d'État Local (Device) :** Toute interaction avec la base SQLite locale ou l'index vectoriel (Orama/Voy) doit être encapsulée dans un *Provider* ou un *Context* React dédié, avec gestion explicite des états de chargement (`loading`) et d'erreur.
-* **Typage des API :** Interdiction d'utiliser le type `any`. Tous les payloads retournés par le backend Python doivent avoir une interface TypeScript correspondante générée ou partagée.
+## 4. Standards TypeScript (React web)
 
-### Sécurité et Cryptographie
-* **Variables d'Environnement :** Aucune clé secrète ne doit être écrite en dur dans le code. Les clés de chiffrement et tokens d'API doivent être lus via un gestionnaire de configuration (`Pydantic Settings` pour Python, `process.env` pour React).
-* **Isolation Temporelle :** Les variables contenant du texte d'email déchiffré en RAM doivent être nettoyées ou écrasées dès que le traitement par le LLM ou l'affichage est terminé.
+* **Composants fonctionnels + hooks personnalisés :** logique de
+  chargement de données extraite dans `frontend/src/hooks/*.ts` (ex.
+  `useMemoryAndKnowledge.ts`, `useObjectivesAndTimeline.ts`), pas inline
+  dans le composant de page.
+* **Typage strict des payloads API :** chaque module `*Api.ts`
+  (`memoryApi.ts`, `objectivesApi.ts`, `timelineApi.ts`, ...) définit un
+  type miroir exact du schéma Pydantic du routeur correspondant — à
+  vérifier en lisant le routeur, pas en supposant la forme. Pas de type
+  `any`.
+* **Classes Tailwind :** réutiliser les tokens déjà définis dans
+  `tailwind.config.js` (`bg-surface`, `border-border-default`,
+  `text-text-primary/secondary/muted`, `bg-accent-soft`/
+  `text-accent-primary`, et les modificateurs d'opacité natifs
+  `bg-danger/10`/`bg-warning/10` pour les teintes sans variante "soft"
+  dédiée) — ne jamais inventer un nom de classe sans vérifier son
+  existence dans la config (erreur commise et corrigée en Unit 56 :
+  `bg-warning-soft` n'existe pas).
+* **Vérification :** `npx tsc --noEmit` doit passer sans erreur avant de
+  considérer une unité frontend terminée. `npx vite build` est informatif
+  (le nombre de modules transformés doit rester cohérent avec les fichiers
+  ajoutés) mais échoue systématiquement dans cet environnement de
+  développement sur le nettoyage du dossier `dist/` préexistant
+  (appartient à `root`, EACCES) — échec connu, sans rapport avec le code,
+  ne pas le traiter comme un signal de régression.
 
-## 4. Pratiques Incluses (In-Scope Verification)
-* Validation automatique du code à chaque commit via des scripts de peluchage (Linter) locaux.
-* Écriture systématique de mocks pour les API externes (Gmail, OpenAI, Anthropic) dans l'environnement de test.
-* Utilisation d'outils de migration de base de données (Alembic pour PostgreSQL) pour toute modification de schéma.
-* Documentation des fonctions complexes et des points d'accès API directement dans le code via des Docstrings au format Google.
+## 5. Sécurité
 
-## 5. Pratiques Exclues (Out-of-Scope Practices)
-* **Pas de micro-optimisation prématurée :** Ne pas réécrire de modules de parsing en C/Rust tant que les performances du worker Python actuel respectent les SLAs établis.
-* **Pas de stockage de données sensibles en clair dans les logs :** L'affichage des variables contenant des tokens, des adresses emails, ou des contenus de messages dans la console (`print` ou `logger.info`) est strictement banni.
-* **Pas de manipulation directe de la DB sans ORM :** Interdiction d'exécuter des requêtes SQL brutes sous forme de chaînes de caractères sans passer par l'ORM (SQLAlchemy/SQLModel) afin de prévenir les injections SQL.
+* **Secrets :** aucune clé en dur dans le code, lues via variables
+  d'environnement (`os.environ`, jamais de valeur par défaut secrète).
+* **Isolation multi-tenant :** toute requête sur une table liée à un
+  tenant filtre explicitement sur `tenant_id` (et `user_id` quand
+  pertinent) — voir `architecture.md` §8 invariant 3.
+* **Chiffrement au repos :** `Email.body_encrypted` n'est **pas**
+  chiffré aujourd'hui malgré son nom de colonne — ne pas prétendre le
+  contraire dans le code ou la documentation (voir
+  `architecture.md` §4/§6 pour le statut réel et le plan).
 
-## 6. Critères de Validation du Code (Definition of Done)
+## 6. Ce qui n'est délibérément pas en place
 
-* **Zéro Erreur de Typage :** Les vérifications `mypy` (backend) et `tsc` (frontend) s'exécutent sans aucun avertissement ni contournement (`# type: ignore` ou `ts-ignore` interdits).
-* **Couverture de Tests Minimale :** La suite de tests unitaires et d'intégration affiche un taux de couverture minimal de 80% sur l'ensemble de la logique métier (dossier `core/` et `workers/`).
-* **Zéro Fuite de Données en Cache :** Les tests d'intégration du frontend valident que le script de nettoyage supprime effectivement les données de plus de 30 jours du simulateur de stockage local.
-* **Validation de Sécurité :** L'analyseur de code statique de sécurité (comme `Bandit` pour Python) est exécuté et ne remonte aucune faille de sévérité "Moyenne" ou "Haute".
+Cette section remplace l'ancienne "Definition of Done" (couverture 80%,
+`mypy`/`tsc` en CI, `Bandit`, nettoyage cache 30 jours) qui décrivait un
+outillage inexistant. Statut réel :
+
+* **Pas de suite de tests automatisée.** La vérification d'une unité de
+  travail se fait par un script Python jetable (créé dans le scratchpad,
+  supprimé après usage) qui exerce le code réel contre une vraie base
+  Postgres locale (voire un vrai appel LLM quand pertinent), pas par des
+  mocks — voir `context/progress-tracker.md`, n'importe quelle unité
+  récente (46 à 57) pour des exemples concrets de ce protocole.
+* **Pas de CI/CD.** Aucun pipeline GitHub Actions ou équivalent.
+* **Pas de linter/formatter configuré.** Ni `ruff`/`black` côté Python,
+  ni `eslint`/`prettier` côté frontend (`package.json` ne les liste pas).
+* **Pas de scanner de sécurité statique.** Pas de `Bandit` ni équivalent.
+
+Si l'un de ces outils est mis en place un jour, ce document doit être mis
+à jour dans la même unité de travail que son installation — pas avant.

@@ -40,7 +40,7 @@ from email_analyzer.config import (
     VALID_PERIODS,
 )
 from email_analyzer.db.session import get_db_optional
-from email_analyzer.jobs import create_job, enqueue, get_job
+from email_analyzer.jobs import create_job, enqueue, get_job, list_active_jobs
 from email_analyzer.llm import (
     get_gemini_api_key,
     get_openai_api_key,
@@ -67,7 +67,12 @@ from api.routers import assistant as assistant_router
 from api.routers import auth as auth_router
 from api.routers import billing as billing_router
 from api.routers import brief as brief_router
+from api.routers import documents as documents_router
+from api.routers import knowledge as knowledge_router
+from api.routers import memory as memory_router
 from api.routers import oauth as oauth_router
+from api.routers import objectives as objectives_router
+from api.routers import profile as profile_router
 from api.routers import projects as projects_router
 from api.routers import tenants as tenants_router
 
@@ -116,7 +121,12 @@ app.include_router(projects_router.router)
 app.include_router(actions_router.router)
 app.include_router(agenda_router.router)
 app.include_router(brief_router.router)
+app.include_router(documents_router.router)
 app.include_router(assistant_router.router)
+app.include_router(memory_router.router)
+app.include_router(knowledge_router.router)
+app.include_router(objectives_router.router)
+app.include_router(profile_router.router)
 
 
 class AnalyzeRequest(BaseModel):
@@ -130,7 +140,7 @@ class AnalyzeRequest(BaseModel):
         description="today | yesterday | 3 | 7 | 11 | 90 | 120 | 240",
     )
     days: int = Field(30, ge=1, le=365, description="Fenêtre IMAP si period absent")
-    assistant_provider: Literal["openai", "gemini", "none"] = "openai"
+    assistant_provider: Literal["openai", "gemini", "none"] = "gemini"
     openai_model: str = "gpt-4o-mini"
     gemini_model: str = DEFAULT_GEMINI_MODEL
 
@@ -243,6 +253,10 @@ def refresh_project(
         le=365,
         description="Ignore last_processed_email_timestamp et force un rescan sur N jours (bouton 'chercher sur plus de jours').",
     ),
+    period: Optional[str] = Query(
+        None,
+        description="Jeton de période prédéfini (today/3/7/30/90/180/365...) — alternative à force_days, prioritaire si les deux sont fournis.",
+    ),
     authorization: Optional[str] = Header(None),
     db: Optional[Session] = Depends(get_db_optional),
 ) -> Dict[str, Any]:
@@ -257,6 +271,15 @@ def refresh_project(
         raise HTTPException(
             status_code=400, detail="Fast-Track nécessite le mode SaaS (DATABASE_URL)"
         )
+    if period is not None and period not in VALID_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Période invalide: {period}. Valeurs: {sorted(VALID_PERIODS)}",
+        )
+    if period is not None:
+        from email_analyzer.period import force_days_for_period
+
+        force_days = force_days_for_period(period)
 
     _, tenant, _ = authenticate_bearer(db, authorization)
 
@@ -299,6 +322,45 @@ def analyze_status(
         "progress": {"processed": job.get("processed", 0), "total": job.get("total", 0)},
         "partial": job.get("partial"),
     }
+
+
+@app.get("/api/jobs/active")
+def jobs_active(
+    authorization: Optional[str] = Header(None),
+    db: Optional[Session] = Depends(get_db_optional),
+) -> Dict[str, Any]:
+    """Indicateur léger pour le frontend (badge "Analyse en cours…") : y a-t-il
+    un job pending/running pour ce tenant, tous déclencheurs confondus
+    (bouton manuel, cron, auto-sync au login) ? Simple présence, pas de
+    détail de progression (voir ``/api/analyze/{job_id}`` pour ça)."""
+    if db is None:
+        return {"active": False, "count": 0}
+    _, tenant, _ = authenticate_bearer(db, authorization)
+    active_ids = list_active_jobs(str(tenant.id))
+    return {"active": len(active_ids) > 0, "count": len(active_ids)}
+
+
+@app.post("/api/recent-emails", status_code=202)
+def recent_emails(
+    days: int = Query(14, ge=1, le=90),
+    limit: int = Query(5, ge=1, le=20),
+    db: Optional[Session] = Depends(get_db_optional),
+) -> Dict[str, Any]:
+    """Alimente les bulles de suggestion du chat en mode legacy (pas de DB,
+    donc pas de ``/api/timeline`` — voir ``ChatHome.tsx``). Mode SaaS : utiliser
+    ``/api/timeline`` à la place (déjà persisté, pas besoin de rescanner IMAP).
+    """
+    if db is not None:
+        raise HTTPException(
+            status_code=400, detail="Mode SaaS : utiliser /api/timeline"
+        )
+
+    load_dotenv(_REPO_ROOT / ".env")
+    load_dotenv(_SERVICE_ROOT / ".env")
+
+    job_id = create_job(tenant_id=None)
+    enqueue(job_id, "run_recent_emails_legacy", days, limit)
+    return {"job_id": job_id, "status": "pending"}
 
 
 @app.post("/api/draft")

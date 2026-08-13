@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { getAccessToken, setAccessToken } from "../apiClient";
 import AppShell from "../components/AppShell";
+import ProfileSettingsForm from "../components/ProfileSettingsForm";
 import ConnectedAccounts from "../ConnectedAccounts";
 import { BillingModal, ImapSettingsForm, useSaasSession } from "../SaasPanels";
 
@@ -99,6 +100,8 @@ export default function SettingsPage({
             </div>
           </dl>
         </section>
+
+        <ProfileSettingsForm />
 
         <section className="rounded-2xl border border-border-default bg-surface p-6 shadow-sm">
           <h2 className="text-lg font-semibold text-text-primary">Boîte IMAP</h2>

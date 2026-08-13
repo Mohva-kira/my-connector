@@ -32,6 +32,16 @@ export type RulesMatrix = {
 export type StructuredContent = {
   decisions?: Array<{ description: string }>;
   risques?: Array<{ description: string; niveau: string | null }>;
+  activite_recente?: {
+    periode_couverte: string;
+    synthese_courte: string;
+    evenements: Array<{
+      date_iso: string | null;
+      resume: string;
+      provenance: string | null;
+      importance: string | null;
+    }>;
+  } | null;
 };
 
 export type ProjectListItem = {
@@ -304,15 +314,64 @@ export function DecisionsAndRisks({
   );
 }
 
-// Presets "mois" pour le bouton "Analyser" — traduits en jours pour
-// réutiliser tel quel le paramètre backend existant `force_days` (borne
-// 1-365, voir api/main.py::refresh_project). Pas d'abstraction "mois" côté
-// backend : la conversion se fait uniquement ici.
-const ANALYZE_RANGE_PRESETS: Array<{ label: string; days: number }> = [
-  { label: "1 mois", days: 30 },
-  { label: "3 mois", days: 90 },
-  { label: "6 mois", days: 180 },
-  { label: "1 an", days: 365 },
+// Rappel "activité des 7 derniers jours" (llm.ProjectSummaryLLM.activite_recente,
+// bornage calendaire fixe côté serveur — voir project_mail.py::
+// _generate_project_summary) — même style repliable que DecisionsAndRisks.
+export function RecentActivity({
+  structured,
+  defaultOpen = false,
+}: {
+  structured: StructuredContent | null;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const activite = structured?.activite_recente;
+  if (!activite || activite.evenements.length === 0) return null;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 text-xs font-medium text-text-secondary hover:text-text-primary"
+      >
+        {open ? "▾" : "▸"} Activité récente ({activite.periode_couverte})
+        <span className="rounded-full bg-info/10 px-1.5 py-0.5 text-[11px] font-semibold text-info">
+          {activite.evenements.length}
+        </span>
+      </button>
+      {open ? (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-text-secondary">{activite.synthese_courte}</p>
+          {activite.evenements.map((ev, i) => (
+            <div key={`recent-${i}`} className="flex items-start gap-2 text-xs">
+              <span className="mt-0.5 shrink-0 text-text-muted">{ev.date_iso ?? "—"}</span>
+              <span className="text-text-secondary">
+                {ev.resume}
+                {ev.provenance ? <span className="text-text-muted"> ({ev.provenance})</span> : null}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Presets pour le bouton "Analyser" — chaque preset porte un jeton `period`
+// (VALID_PERIODS côté backend, voir email_analyzer/config.py) envoyé tel quel
+// à l'API, qui le traduit elle-même en `force_days` (period.py::
+// force_days_for_period). `days` ne sert plus qu'à l'affichage/validation
+// client ; le mode "Autre" (jours personnalisés) continue d'envoyer
+// `force_days` brut, faute de jeton de période sensé pour une valeur arbitraire.
+const ANALYZE_RANGE_PRESETS: Array<{ label: string; days: number; period: string }> = [
+  { label: "Aujourd'hui", days: 1, period: "today" },
+  { label: "3 jours", days: 3, period: "3" },
+  { label: "7 jours", days: 7, period: "7" },
+  { label: "1 mois", days: 30, period: "30" },
+  { label: "3 mois", days: 90, period: "90" },
+  { label: "6 mois", days: 180, period: "180" },
+  { label: "1 an", days: 365, period: "365" },
 ];
 
 function AnalyzeRangeModal({
@@ -320,15 +379,15 @@ function AnalyzeRangeModal({
   onClose,
   busy,
 }: {
-  onConfirm: (days: number) => void;
+  onConfirm: (selection: { days: number; period?: string }) => void;
   onClose: () => void;
   busy: boolean;
 }) {
-  const [selectedDays, setSelectedDays] = useState<number>(ANALYZE_RANGE_PRESETS[0].days);
+  const [selectedPreset, setSelectedPreset] = useState(ANALYZE_RANGE_PRESETS[0]);
   const [customMode, setCustomMode] = useState(false);
   const [customValue, setCustomValue] = useState("");
 
-  const effectiveDays = customMode ? Number(customValue) : selectedDays;
+  const effectiveDays = customMode ? Number(customValue) : selectedPreset.days;
   const isValid = Number.isInteger(effectiveDays) && effectiveDays >= 1 && effectiveDays <= 365;
 
   return (
@@ -349,14 +408,14 @@ function AnalyzeRangeModal({
 
         <div className="mt-4 flex flex-wrap gap-2">
           {ANALYZE_RANGE_PRESETS.map((preset) => {
-            const active = !customMode && selectedDays === preset.days;
+            const active = !customMode && selectedPreset.period === preset.period;
             return (
               <button
                 key={preset.label}
                 type="button"
                 onClick={() => {
                   setCustomMode(false);
-                  setSelectedDays(preset.days);
+                  setSelectedPreset(preset);
                 }}
                 className={`rounded-full px-3 py-1.5 text-sm font-medium transition ${
                   active
@@ -404,7 +463,14 @@ function AnalyzeRangeModal({
         <div className="mt-6 flex gap-2">
           <button
             type="button"
-            onClick={() => isValid && onConfirm(effectiveDays)}
+            onClick={() =>
+              isValid &&
+              onConfirm(
+                customMode
+                  ? { days: effectiveDays }
+                  : { days: effectiveDays, period: selectedPreset.period }
+              )
+            }
             disabled={!isValid || busy}
             className="rounded-xl bg-accent-primary px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
@@ -460,12 +526,12 @@ function ProjectCard({
     setShowWidenPrompt(wasFirstSync && (result.new_emails as number | undefined) === 0);
   }
 
-  async function handleRefresh(forceDays?: number): Promise<boolean> {
+  async function handleRefresh(forceDays?: number, period?: string): Promise<boolean> {
     const wasFirstSync = !project.last_processed_email_timestamp;
     setRefreshError(null);
     setRefreshing(true);
     try {
-      const qs = forceDays ? `?force_days=${forceDays}` : "";
+      const qs = period ? `?period=${period}` : forceDays ? `?force_days=${forceDays}` : "";
       const startRes = await apiFetch(`/api/projects/${project.id}/refresh${qs}`, { method: "POST" });
       const startData = (await parseResponseJson(startRes)) as Record<string, unknown>;
       if (!startRes.ok) throw new Error(parseApiError(startData));
@@ -482,8 +548,8 @@ function ProjectCard({
     }
   }
 
-  async function handleAnalyzeConfirm(days: number) {
-    const success = await handleRefresh(days);
+  async function handleAnalyzeConfirm(selection: { days: number; period?: string }) {
+    const success = await handleRefresh(selection.days, selection.period);
     if (success) setShowAnalyzeModal(false);
   }
 
@@ -570,6 +636,7 @@ function ProjectCard({
       ) : null}
 
       <DecisionsAndRisks structured={project.structured_content} />
+      <RecentActivity structured={project.structured_content} />
 
       {refreshError ? <p className="text-xs text-danger">{refreshError}</p> : null}
 
@@ -618,7 +685,7 @@ function ProjectCard({
       {showAnalyzeModal ? (
         <AnalyzeRangeModal
           busy={refreshing}
-          onConfirm={(days) => void handleAnalyzeConfirm(days)}
+          onConfirm={(selection) => void handleAnalyzeConfirm(selection)}
           onClose={() => setShowAnalyzeModal(false)}
         />
       ) : null}

@@ -6,10 +6,11 @@ You are an automated coding agent tasked with implementing and refactoring this 
 
 ## 1. Overall Approach & Scoping Rules
 
-1. **Read and Follow Specifications:** You must read `architecture.md`, `project-overview.md`, and `code-standards.md` before writing any code. Every implementation must align with the defined stack (Python/Celery backend, React/React Native frontend, tiered hybrid storage).
+1. **Read and Follow Specifications:** You must read `architecture.md`, `project-overview.md`, and `code-standards.md` before writing any code. Every implementation must align with the real stack (FastAPI backend, Redis + `arq` for background jobs, PostgreSQL, React/Vite web frontend — no Celery, no React Native).
 2. **Execute Single-Unit Changes Only:** Implement exactly one logical unit of work at a time (e.g., one database migration, one API route, one React hook). Never batch multiple unrelated changes into a single file modification.
 3. **Ban Speculative Coding:** Do not write boilerplate code, placeholders, or "future-use" parameters for features that are out of scope or slated for later phases. If code is not needed for the current task, do not write it.
-4. **Enforce Invariants Continuously:** You must never write code that violates the four system invariants specified in `architecture.md` (Strict 1:1 Email-Project mapping, Zero Clear-Text Cloud Storage, Hard 30-Day Device Cache Limit, No Heavy I/O in the API Main Thread).
+4. **Enforce Invariants Continuously:** You must never write code that violates the system invariants specified in `architecture.md` §8 (Strict 1:1 Email-Project mapping, no raw SQL, tenant isolation, No Heavy I/O in the API Main Thread — delegate to `arq` jobs).
+5. **Conversation-First Scoping (pivot, 2026-07-17):** Per `project-overview.md`'s Executive Assistant vision, any new feature should satisfy at least one of: improves understanding of the user's work, improves memory, improves reasoning, improves available context, or improves conversation. Do not add UI complexity that serves none of these. Do not implement Memory Engine / Knowledge Graph / Agent-Tools primitives speculatively — only when a task explicitly asks for that phase of work (see `project-overview.md` roadmap).
 
 ---
 
@@ -19,9 +20,9 @@ You are an automated coding agent tasked with implementing and refactoring this 
 2. **Sequential Dependecy Chain:** Build from the data layer outward. When implementing a new feature, follow this exact sequence across separate step iterations:
    * Step A: Database schemas and migrations.
    * Step B: Core business logic, encryption utilities, and unit tests.
-   * Step C: Celery tasks, background polling engines, and event brokers.
+   * Step C: `arq` background tasks (`email_analyzer/analysis_tasks.py`), polling engines, and Redis job-state.
    * Step D: FastAPI endpoints and API routing.
-   * Step E: Frontend state management, SQLite client cache queries, and UI components.
+   * Step E: Frontend state management, hooks, and UI components.
 
 ---
 
@@ -54,6 +55,6 @@ You must run and pass this verification checklist before announcing that a unit 
 
 - [ ] **Type Check:** `mypy .` (Backend) and `tsc --noEmit` (Frontend) execute with zero errors.
 - [ ] **Linter Check:** `ruff check .` (or Black) and `eslint` return zero style or syntax warnings.
-- [ ] **Data Encryption:** The code guarantees that raw email or attachment strings are never written to standard logs or unencrypted database fields.
+- [ ] **Log Masking:** The code guarantees that raw email or attachment strings are never written to standard logs, tokens, or credentials (note: at-rest encryption of email bodies is not yet implemented — see `architecture.md` §4/§6 — do not claim it is unless you implemented it).
 - [ ] **No Bloat:** Every line of code added directly serves the immediate unit task; all temporary debugging blocks have been deleted.
-- [ ] **Task Isolation:** No synchronous internet connection calls (IMAP, Gmail, LLMs) or heavy file parsing loops occur inside FastAPI endpoints. They are successfully routed through Celery tasks.
+- [ ] **Task Isolation:** No synchronous internet connection calls (IMAP, Gmail, LLMs) or heavy file parsing loops occur inside FastAPI endpoints. They are successfully routed through `arq` tasks.

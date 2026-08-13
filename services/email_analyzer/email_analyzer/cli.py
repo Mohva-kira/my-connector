@@ -6,8 +6,8 @@ import sys
 
 from .analyzer import EmailProcessor
 from .config import (
+    ASSISTANT_PROVIDER_GEMINI,
     ASSISTANT_PROVIDER_NONE,
-    ASSISTANT_PROVIDER_OPENAI,
     DEFAULT_GEMINI_MODEL,
     VALID_ASSISTANT_PROVIDERS,
 )
@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument(
         "--assistant-provider",
         choices=sorted(VALID_ASSISTANT_PROVIDERS),
-        default=ASSISTANT_PROVIDER_OPENAI,
+        default=ASSISTANT_PROVIDER_GEMINI,
     )
     parser.add_argument("--openai-model", default="gpt-4o-mini")
     parser.add_argument("--gemini-model", default=DEFAULT_GEMINI_MODEL)

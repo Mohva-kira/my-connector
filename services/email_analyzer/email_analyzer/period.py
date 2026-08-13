@@ -57,6 +57,20 @@ def imap_days_back_for_period(period: str) -> int:
     return max(0, n - 1)
 
 
+def force_days_for_period(period: str) -> int:
+    """Traduit un jeton VALID_PERIODS en nombre de jours pour ``force_days``
+    (analysis_tasks._run_fasttrack_sync) — sémantique différente de
+    ``imap_days_back_for_period`` : ici on veut un nombre de jours brut à
+    rescanner en entier (borné ``ge=1`` côté API), pas une approximation
+    N-1 de date IMAP SINCE. "today"/"yesterday" valent 1 jour (0 ne
+    remonterait aucun email, voir EmailProcessor.process_delta)."""
+    if period not in VALID_PERIODS:
+        raise ValueError(f"Période invalide: {period}. Valeurs: {sorted(VALID_PERIODS)}")
+    if period in ("today", "yesterday"):
+        return 1
+    return int(period)
+
+
 def filter_emails_by_period(emails: List[Dict], period: str) -> List[Dict]:
     """Filtre les emails dont la date parsée tombe dans la fenêtre de période."""
     start, end = get_period_bounds(period)
