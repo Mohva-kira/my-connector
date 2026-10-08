@@ -1,0 +1,362 @@
+# Base de Données, Modélisation & Migrations
+
+> Tout ce document est `[CIBLE]` sauf mention `[ACTUEL]`. Le schéma de référence est
+> `schemas-architecture/03-database-erd.md` (tables, colonnes, contraintes, rétention, correspondance des
+> fichiers). Ce document fixe **comment** l'implémenter.
+
+## 1. Stack Base de Données
+
+| Composant | Version | Notes |
+| :--- | :--- | :--- |
+| SGBD | **PostgreSQL 18** | Paquet système ou `docker compose up -d db` (`compose.yaml` du lot 1, publié sur `127.0.0.1:5432` uniquement). `uuidv7()` est natif depuis la 18. |
+| ORM | **SQLAlchemy 2.1.x** (stable 2.1.4 au 2026-10-07), style déclaratif typé `Mapped[]` / `mapped_column()` | Borne `sqlalchemy>=2.0,<2.2` (lot 1). API 2.0 uniquement (`select()`, `Session.execute`), jamais `Query`. |
+| Driver | **psycopg 3** (`psycopg[binary]`, stable 3.3.6) | URL `postgresql+psycopg://…` (`DATABASE_URL`). |
+| Migrations | **Alembic** (stable 1.20.0) | Borne `alembic>=1.18,<2`. |
+| Chiffrement applicatif | `cryptography` (Fernet) | Colonne `platform_sessions.cookies_encrypted` (cf. `04`). |
+| Existant `[ACTUEL]` | Fichiers JSON/JSONL dans `linkedin_market_data/` | Remplacés par l'import JSON (`db/import_json.py`, au démarrage). |
+
+Moteur et sessions (`linkedin_market/db/session.py`) :
+
+```python
+engine = create_engine(config.database_url(), pool_pre_ping=True, pool_size=5, max_overflow=2)
+# Nom de la variable : en arbitrage (P-1, brief vague 1) — `DATABASE_URL` entre en collision avec
+# email_analyzer, qui lit le même .env racine ; recommandé : `LM_DATABASE_URL`.
+SessionLocal = sessionmaker(engine, expire_on_commit=False)
+```
+
+- `pool_size=5` ≥ `TaskManager(max_workers=4)` + requêtes HTTP : une session **par requête** (dépendance FastAPI
+  `get_db`) et **par tâche** (ouverte dans la fonction de tâche) ; une `Session` n'est jamais partagée entre
+  threads.
+- Le CLI ouvre ses propres sessions via les mêmes services.
+- Au démarrage (`db/bootstrap.py::prepare_database()`, appelé par le CLI et par `python -m linkedin_market.web`) :
+  `alembic upgrade head` (programmatique), puis l'import JSON s'il reste des fichiers non suffixés `.migrated`,
+  puis les tâches non finales de `tasks` passent à `échec` (« Tâche interrompue par l'arrêt de l'application. »).
+  Base injoignable ⇒ arrêt avec un message français actionnable, mot de passe masqué ; **aucun repli sur les
+  fichiers** (PostgreSQL est obligatoire après la vague 1).
+
+### 1.1 Transition de la vague 1 (décision d'architecte, 2026-10-08)
+Pour ne pas réécrire tous les appelants en une vague, les modules de persistance actuels (`storage.py`,
+`application.py` (suivi), `activity.py`, `settings.py`, `session.py`, `report.py` (écriture), le chargement/
+sauvegarde de `matching.MatchingModel`, `TaskManager`) **gardent leurs signatures publiques** et deviennent des
+façades : chaque fonction ouvre une transaction courte (`with db.session.transaction() as s:`), résout
+`user_id` (`db.users.current_user_id(s)`) et délègue à `db/repositories/*`. Aucune `Session` ne traverse un
+thread ni une navigation Selenium. La dépendance FastAPI `get_db` et les transactions par cas d'usage du § 5
+(réservation de message, E-11) arrivent en vague 2 ; seule exception dès la vague 1 : `advance_status()` lit et
+écrit le statut dans **une** transaction avec `SELECT … FOR UPDATE` (I-03).
+
+## 2. Conventions de Schéma
+
+| Règle | Convention retenue | Écart avec le modèle générique |
+| :--- | :--- | :--- |
+| Noms de tables | snake_case, **noms de l'ERD du lot 1** (pluriel en général : `applications`, `tasks`, `collected_items` ; singulier assumé pour `user_settings` et `suppression_list`, termes du glossaire). | Le glossaire prime sur la règle « tout au pluriel ». |
+| Clés primaires | `uuid` `DEFAULT uuidv7()` (ordonné dans le temps, index B-tree compact) ; `bigint GENERATED ALWAYS AS IDENTITY` pour les journaux volumineux (`activity_events`, `application_events`) ; clés naturelles composites pour les tables de liaison (`profile_skill_overrides`, `memorized_answers`, `platform_sessions`) et `sources.code`. | Pas d'UUIDv4. |
+| Propriété | `user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE` sur chaque table métier (I-01), en **première** colonne des index composites. | Pas de RLS : une seule personne par base, l'isolation est la machine ; RLS ajouterait un rôle par connexion sans gain. |
+| Dates | `timestamptz` UTC ; `created_at` / `updated_at` `NOT NULL DEFAULT now()` là où l'ERD les prévoit ; `updated_at` mis à jour par l'ORM (`onupdate=func.now()`), pas par trigger. Dates métier sans heure en `date` (`posted_at`). | Les tables append-only (`activity_events`, `reports`, `application_events`) n'ont pas d'`updated_at`. |
+| Énumérations | `text` + `CHECK (col IN (…))`, valeurs françaises identiques au code. | Pas de type `ENUM` PostgreSQL (ajout de valeur sans `ALTER TYPE`). |
+| JSON | `jsonb` pour les données sans contrainte relationnelle (paramètres de tâche, agrégats de rapport, poids). Jamais pour une donnée filtrée ou jointe. | — |
+| Listes simples | `text[]` (`skills`). | — |
+| Suppression | **Pas de soft-delete** (`deleted_at`) : la rétention RGPD exige une suppression physique (art. 5(1)(e)) ; l'opposition est conservée sous forme d'empreinte dans `suppression_list`. Seul `source_consents` garde l'historique via `revoked_at`. | Écart volontaire. |
+| Nommage des contraintes | `MetaData(naming_convention=…)` (ci-dessous) : noms stables pour Alembic. | — |
+
+```python
+# linkedin_market/db/models.py
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import (TIMESTAMP, CheckConstraint, ForeignKey, Index, MetaData, Numeric, String, Text,
+                        UniqueConstraint, func, text)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+NAMING = {
+    "ix": "ix_%(table_name)s_%(column_0_N_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING)
+    type_annotation_map = {datetime: TIMESTAMP(timezone=True)}  # tout datetime = timestamptz
+
+
+def uuid_pk() -> Mapped[UUID]:
+    return mapped_column(primary_key=True, server_default=text("uuidv7()"))
+
+
+def owner() -> Mapped[UUID]:
+    return mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=False)
+
+
+APPLICATION_STATUSES = ("préparée", "contactée", "postulée", "entretien", "refusée", "abandonnée", "externe", "échec")
+
+
+class Application(Base):
+    __tablename__ = "applications"
+    __table_args__ = (
+        UniqueConstraint("user_id", "item_id"),
+        CheckConstraint(f"status IN {APPLICATION_STATUSES!r}", name="status"),
+        CheckConstraint("apply_state IN ('', 'en_cours', 'postulée', 'déjà_postulée', 'incertaine', 'échec')",
+                        name="apply_state"),
+        CheckConstraint("generator IN ('claude', 'local')", name="generator"),
+    )
+
+    id: Mapped[UUID] = uuid_pk()
+    user_id: Mapped[UUID] = owner()
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("collected_items.id", ondelete="RESTRICT"))
+    status: Mapped[str] = mapped_column(Text, server_default="préparée")
+    apply_state: Mapped[str] = mapped_column(Text, server_default="")
+    score: Mapped[float] = mapped_column(Numeric(4, 1))
+    generator: Mapped[str] = mapped_column(Text)
+    folder_path: Mapped[str] = mapped_column(Text)
+    prepared_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+
+    events: Mapped[list["ApplicationEvent"]] = relationship(back_populates="application", cascade="all, delete-orphan",
+                                                            order_by="ApplicationEvent.id")
+
+
+class OutreachMessage(Base):
+    __tablename__ = "outreach_messages"
+    __table_args__ = (
+        CheckConstraint("channel IN ('email', 'linkedin')", name="channel"),
+        CheckConstraint("status IN ('confirmé', 'envoyé', 'échec')", name="status"),
+        CheckConstraint("status <> 'envoyé' OR sent_at IS NOT NULL", name="sent_has_date"),
+        Index(None, "user_id", "sent_at"),            # plafond message_daily_max
+    )
+
+    id: Mapped[UUID] = uuid_pk()
+    user_id: Mapped[UUID] = owner()
+    application_id: Mapped[UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    contact_id: Mapped[UUID | None] = mapped_column(ForeignKey("company_contacts.id", ondelete="SET NULL"))
+    channel: Mapped[str] = mapped_column(Text)
+    recipient: Mapped[str] = mapped_column(Text)
+    subject: Mapped[str] = mapped_column(Text, server_default="")
+    body: Mapped[str] = mapped_column(Text)
+    cv_attached: Mapped[bool] = mapped_column(server_default=text("false"))
+    status: Mapped[str] = mapped_column(Text, server_default="confirmé")
+    smtp_message_id: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    confirmed_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    sent_at: Mapped[datetime | None]
+
+
+class SourceConsent(Base):
+    __tablename__ = "source_consents"
+    __table_args__ = (
+        # Un seul consentement actif par source (I-16).
+        Index(None, "user_id", "source_code", unique=True, postgresql_where=text("revoked_at IS NULL")),
+    )
+
+    id: Mapped[UUID] = uuid_pk()
+    user_id: Mapped[UUID] = owner()
+    source_code: Mapped[str] = mapped_column(String(32), ForeignKey("sources.code"))
+    risk_version: Mapped[str] = mapped_column(Text)
+    accepted_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    revoked_at: Mapped[datetime | None]
+```
+
+Les autres tables suivent le même gabarit ; les colonnes, `CHECK` et
+index sont ceux de l'ERD § 1–2.
+
+## 3. Politique des Migrations
+
+### 3.1 Organisation
+```
+linkedin_market/migrations/
+├── env.py                     # target_metadata = Base.metadata, compare_type=True, URL depuis DATABASE_URL
+├── script.py.mako
+└── versions/
+    ├── 0001_initial.py        # schéma complet + données de référence sources + trigger d'immuabilité
+    └── 0002_<objet>.py        # évolutions de schéma suivantes
+linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_market_data/ (pas une révision Alembic)
+```
+- Identifiants de révision **séquentiels sur 4 chiffres** (`alembic revision --rev-id 0002 -m "…"`,
+  `file_template = %%(rev)s_%%(slug)s`) : lisibles, triés, sans conflit puisqu'un seul flux de développement.
+- `alembic revision --autogenerate` sert de **brouillon** : toute migration est relue (les index partiels, `CHECK`
+  et triggers ne sont pas tous détectés). La CI exécute `alembic upgrade head` puis `alembic check` (aucun écart
+  modèles ↔ migrations).
+- Les migrations sont appliquées **automatiquement au lancement** de l'application et du CLI. Elles doivent donc
+  être sûres sans intervention : pas de question, pas de suppression de données sans sauvegarde préalable.
+
+### 3.2 Compatibilité
+- Les utilisateurs mettent à jour par `git pull` et peuvent revenir à la version précédente : chaque migration
+  suit le principe **expansion puis contraction** sur deux versions mineures (ajouter la colonne nullable et
+  l'écrire, puis rendre `NOT NULL` / supprimer l'ancienne dans la version suivante).
+- `downgrade()` est implémenté pour les migrations de schéma. L'import JSON n'a pas de retour arrière : les
+  fichiers d'origine sont conservés en `*.migrated` (§ 3.4).
+- Avant toute migration qui supprime ou réécrit des données, l'application exécute un `pg_dump` automatique dans
+  `linkedin_market_data/backups/avant-<rev>.dump` (§ 7).
+
+### 3.3 `0001_initial`
+- Crée toutes les tables de l'ERD, contraintes et index (§ 2 de l'ERD).
+- Insère les sources :
+
+| `code` | `label` | `access_mode` | `risk_version` |
+| :--- | :--- | :--- | :--- |
+| `linkedin` | LinkedIn | `navigateur` | `2026-10` |
+| `malt` | Malt | `navigateur` | `2026-10` |
+| `wttj` | Welcome to the Jungle | `navigateur` | `2026-10` |
+| `france_travail` | France Travail | `api_officielle` | `NULL` |
+| `indeed` | Indeed | `import_manuel` | `NULL` |
+
+  Un changement de texte de risques = une migration `UPDATE sources SET risk_version = '…'` (I-16).
+- Crée le trigger d'immuabilité (I-02) :
+
+```python
+op.execute("""
+CREATE FUNCTION reports_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'Un rapport est immuable (I-02).';
+END $$;
+CREATE TRIGGER trg_reports_immutable BEFORE UPDATE ON reports
+  FOR EACH ROW EXECUTE FUNCTION reports_immutable();
+""")
+```
+
+### 3.4 Import JSON (`db/import_json.py`, idempotent)
+Ce n'est **pas** une révision Alembic (décision d'architecte, vague 1) : une révision ne s'exécute qu'une fois et
+tourne dans la transaction d'Alembic, ce qui empêche le renommage après `COMMIT` et la reprise de fichiers
+ajoutés plus tard. `import_legacy_files(data_dir) -> dict[str, int]` (nombre de lignes importées par table) est
+appelé par `prepare_database()` après `upgrade head`. Règles de l'ERD § 4, précisées :
+1. Crée l'utilisateur unique (`users`, email = `LINKEDIN_EMAIL` en minuscules, sinon `local@localhost`) s'il
+   n'existe pas, et sa ligne `user_settings`.
+2. Lit chaque fichier présent **et non suffixé** `.migrated` ; tout est inséré dans **une seule transaction** ;
+   chaque `INSERT` utilise `ON CONFLICT DO NOTHING` sur la contrainte d'unicité de la table, ce qui rend la
+   relance sans effet.
+3. Conversions :
+
+| Source | Transformation |
+| :--- | :--- |
+| `settings.json` | `interpreter = 'none'` → `local` ; `max_items` > plafond de la prudence → `NULL` (E-3) ; `answers` → `memorized_answers`. |
+| `history.jsonl` | `Item.source` → `kind` ; `id` `job:123` / `post:…` / `person:<slug>` → `external_id` sans préfixe ; `source_code = 'linkedin'` ; `scraped_at` → `collected_at` ; `person` : `text = NULL`, compétences extraites par `nlp` ; dernière version d'un `id` gagnante ; `purge_after` calculé (§ 6) et lignes déjà expirées ignorées. |
+| `labels.json` | jointure sur `external_id` ; libellé orphelin ignoré. |
+| `applications.json` | `item_id` par `external_id` (offre absente de l'historique : création d'un `collected_items` minimal `job` avec titre/entreprise/url) ; `history` → `application_events` avec `statut`→`status`, `candidature`→`apply` ; `contacts` → `company_contacts` (`name`→`full_name`, `source` `linkedin`→`linkedin_equipe_recrutement`, `legal_basis = 'interet_legitime'`). |
+| `session.json` | chiffré Fernet → `platform_sessions('linkedin')` ; ignoré si `logged_in_at` > 72 h. |
+| `activity.jsonl`, `tasks.jsonl` | dates locales naïves → `timestamptz` avec le fuseau de la machine (`datetime.astimezone()`) ; tâches : 100 dernières. |
+| `reports/*.json` | slug = nom de fichier ; `interpreter_used = 'none'` → `local` sans texte (rapport historique conservé tel quel). |
+
+4. Après `COMMIT` seulement : renommage de chaque fichier importé en `<nom>.migrated` (jamais supprimé). Les
+   dossiers `reports/` (HTML) et `applications/` restent en place ; leurs chemins sont stockés.
+
+### 3.5 Index
+Ceux de l'ERD § 2. Règle : toute colonne de `WHERE`/`JOIN` fréquente a un index dont `user_id` est la première
+colonne ; les index partiels servent aux requêtes de purge et aux tâches actives. Pas d'index sur `jsonb` tant
+qu'aucune requête ne filtre dedans.
+
+## 4. Requêtes de Référence
+
+```sql
+-- Plafond quotidien de messages (jour local de l'utilisateur, fuseau Europe/Paris par exemple)
+SELECT count(*) FROM outreach_messages
+WHERE user_id = :uid AND status IN ('confirmé', 'envoyé')
+  AND confirmed_at >= (date_trunc('day', now() AT TIME ZONE :tz) AT TIME ZONE :tz);
+
+-- Blocage en cours (I-06) : dernier blocked non suivi d'un unblocked, de moins de 6 h
+SELECT at, data FROM activity_events
+WHERE user_id = :uid AND kind IN ('blocked', 'unblocked')
+ORDER BY at DESC LIMIT 1;          -- en cours si kind = 'blocked' AND at > now() - interval '6 hours'
+
+-- Fenêtre de 30 jours des tendances
+SELECT * FROM collected_items
+WHERE user_id = :uid AND keyword ILIKE :kw AND coalesce(posted_at, collected_at::date) >= current_date - 30;
+```
+
+Les messages `confirmé` comptent dans le plafond : un envoi réservé puis échoué libère sa place
+(`status = 'échec'`), un envoi en cours ne la libère pas.
+
+## 5. Transactions Critiques
+
+### 5.1 Réservation d'un message (`EnvoyerMessage`)
+```sql
+BEGIN;
+SELECT id FROM applications WHERE id = :app AND user_id = :uid FOR UPDATE;          -- un envoi à la fois par candidature
+SELECT message_daily_max FROM user_settings WHERE user_id = :uid FOR UPDATE;         -- sérialise le plafond (E-11)
+SELECT 1 FROM suppression_list WHERE user_id = :uid AND recipient_hash = :h;         -- trouvé ⇒ ROLLBACK + 409 (I-13)
+SELECT count(*) FROM outreach_messages WHERE …;                                      -- ≥ plafond ⇒ ROLLBACK + 429
+INSERT INTO outreach_messages (…, status) VALUES (…, 'confirmé') RETURNING id;
+COMMIT;
+-- envoi SMTP / LinkedIn hors transaction, puis :
+BEGIN;
+UPDATE outreach_messages SET status = 'envoyé', sent_at = now(), smtp_message_id = :mid WHERE id = :id;
+UPDATE applications SET status = 'contactée', updated_at = now()
+  WHERE id = :app AND status IN ('préparée', 'externe', 'échec');                    -- advance_status (I-03)
+UPDATE company_contacts SET last_contacted_at = now(), purge_after = now() + interval '3 years' WHERE id = :contact;
+INSERT INTO application_events (application_id, kind, details) VALUES (:app, 'message', :details);
+INSERT INTO activity_events (user_id, kind, data) VALUES (:uid, 'message_email', :data);
+COMMIT;
+```
+`recipient_hash` = `sha256(lower(trim(email)))` ou `sha256(url de profil normalisée sans paramètres ni « / » final)`.
+
+### 5.2 Autres transactions
+| Cas | Contenu de la transaction |
+| :--- | :--- |
+| Changement de statut manuel | `FOR UPDATE` sur `applications` + `UPDATE` + `INSERT application_events(kind='status')`. |
+| Candidature soumise | `FOR UPDATE` sur `user_settings` + contrôle `count(apply du jour)` au **démarrage** de la tâche ; à la fin : statut + `apply_state` + `labels` (valeur 1) + `activity_events('apply')`. |
+| Consentement | `UPDATE source_consents SET revoked_at = now() WHERE … AND revoked_at IS NULL` + `INSERT`. |
+| Activation d'un modèle | `UPDATE matching_models SET is_active = false WHERE user_id = :uid AND is_active` + `INSERT … (version = max+1, is_active = true)`. |
+| Collecte | insertion par lots de 100 (`ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE SET title, text, skills, collected_at`) — une transaction par lot pour ne pas perdre une collecte interrompue. |
+
+Niveau d'isolation : `READ COMMITTED` (défaut) ; les verrous explicites ci-dessus suffisent.
+
+## 6. Purge de Rétention (I-10, I-14)
+
+`RetentionService.purge()` s'exécute au démarrage puis toutes les 24 h (minuterie du `TaskManager`, tâche
+`kind="purge"` non navigateur `[CIBLE]`, à ajouter au glossaire). `purge_after` est calculé à l'insertion :
+
+| Table | `purge_after` | Remise à `NULL` |
+| :--- | :--- | :--- |
+| `collected_items` `post` / `person` | `collected_at + 30 days` | jamais |
+| `collected_items` `job` | `collected_at + 90 days` | quand une candidature la référence ou qu'elle est annotée |
+| `company_contacts` | `coalesce(last_contacted_at, collected_at) + 3 years` | recalculé à chaque contact |
+
+```sql
+BEGIN;
+DELETE FROM collected_items ci
+WHERE ci.user_id = :uid AND ci.purge_after < now()
+  AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.item_id = ci.id);
+DELETE FROM company_contacts WHERE user_id = :uid AND purge_after < now();
+DELETE FROM platform_sessions WHERE user_id = :uid AND expires_at < now();
+DELETE FROM activity_events WHERE user_id = :uid AND at < now() - interval '12 months';
+DELETE FROM tasks WHERE user_id = :uid AND created_at < now() - interval '12 months'
+  AND status IN ('terminée', 'échec', 'annulée');
+COMMIT;
+```
+`labels` suit `collected_items` (`ON DELETE CASCADE`). `suppression_list` n'est jamais purgée (empreinte seule).
+Le nombre de lignes supprimées par table est journalisé (sans contenu).
+
+## 7. Sauvegarde & Restauration
+
+- **Sauvegarde** (documentée dans le README) :
+  ```bash
+  pg_dump -Fc -d linkedin_market -f sauvegarde-$(date +%F).dump
+  # avec compose.yaml :
+  docker compose exec -T db pg_dump -Fc -U linkedin_market linkedin_market > sauvegarde-$(date +%F).dump
+  ```
+  À sauvegarder **avec** : `linkedin_market_data/reports/`, `linkedin_market_data/applications/` et `.env`
+  (contient `LM_SECRET_KEY` ; sans elle les cookies chiffrés sont illisibles — conséquence limitée : une nouvelle
+  connexion LinkedIn).
+- **Restauration** : `pg_restore --clean --if-exists -d linkedin_market sauvegarde.dump`, puis lancement normal
+  (`alembic upgrade head` rattrape le schéma si la sauvegarde est plus ancienne).
+- **Sauvegarde automatique** avant une migration destructive : `linkedin_market_data/backups/avant-<rev>.dump`,
+  5 dernières conservées.
+- Les sauvegardes contiennent des données personnelles de tiers : même niveau de protection que la base
+  (disque de l'utilisateur, jamais dans le dépôt Git — `linkedin_market_data/` est dans `.gitignore`).
+
+## 8. Tests
+
+- `pytest` utilise une base PostgreSQL 18 jetable (`LM_TEST_DATABASE_URL`, service `postgres:18` en CI,
+  lot 1 `04` § 6) ; le nom de la base **doit finir par `_test`**, sinon la session pytest s'arrête (protection
+  de la vraie base). Schéma : `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` puis `alembic upgrade head`
+  une fois par session (teste aussi `0001`). Isolation : avant chaque test marqué `db`, `TRUNCATE` de toutes les
+  tables sauf `sources` et `alembic_version` (`RESTART IDENTITY CASCADE`) puis création de l'utilisateur de test.
+  Pas de transaction annulée : les tâches tournent dans des threads du `TaskManager`, qui ouvrent leurs propres
+  connexions (une connexion psycopg ne se partage pas entre threads).
+- Marqueur `db` : sans `LM_TEST_DATABASE_URL`, les tests marqués sont **ignorés** avec le message « Tests
+  PostgreSQL ignorés : définis LM_TEST_DATABASE_URL (base dont le nom finit par _test). » ; la porte qualité de
+  l'architecte exige la variable et **0 test ignoré**.
+- Tests obligatoires de l'import : `import_legacy_files` sur les fixtures JSON de `tests/fixtures/data/`, puis
+  seconde exécution sans effet (idempotence), puis vérification des conversions (E-3, E-7, E-15).
+- `[ACTUEL]` la fixture `conftest.data_dir` redirige tous les chemins de `config` vers `tmp_path` ; elle reste
+  utile pour les fichiers (rapports HTML, dossiers de candidature).

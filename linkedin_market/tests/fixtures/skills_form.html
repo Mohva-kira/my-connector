@@ -1,0 +1,27 @@
+<!doctype html><html><head><title>Ajouter une compétence | LinkedIn</title></head><body><main></main>
+<div role="dialog" id="dlg">
+  <label for="sk">Compétence*</label>
+  <input id="sk" role="combobox" placeholder="Compétence (ex. : gestion de projet)" oninput="suggest(this.value)">
+  <div role="listbox" id="lb"></div>
+  <button aria-label="Fermer">✕</button>
+  <button onclick="save()">Enregistrer</button>
+</div>
+<script>
+const known = ["Kubernetes", "Kubernetes Operators", "Terraform"];
+function suggest(v) {
+  const lb = document.getElementById('lb'); lb.innerHTML = '';
+  for (const k of known.filter(k => k.toLowerCase().startsWith(v.toLowerCase().slice(0, 4)))) {
+    const o = document.createElement('div'); o.setAttribute('role', 'option'); o.textContent = k;
+    o.onclick = () => { document.getElementById('sk').value = k; lb.innerHTML = ''; };
+    lb.appendChild(o);
+  }
+}
+function save() {
+  const v = document.getElementById('sk').value;
+  if (location.hash === '#full') {
+    const a = document.createElement('div'); a.setAttribute('role', 'alert');
+    a.textContent = 'Vous avez atteint le nombre maximum de compétences (100).'; document.body.appendChild(a); return;
+  }
+  window.__saved = v; document.getElementById('dlg').remove();
+}
+</script></body></html>

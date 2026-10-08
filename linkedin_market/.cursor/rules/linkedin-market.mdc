@@ -1,0 +1,78 @@
+---
+description: Règles IA de linkedin_market (invariants, conventions, interdictions, routage vers docs/context)
+globs:
+alwaysApply: true
+---
+
+# Règles IA — linkedin_market (outil auto-hébergé, 1 instance = 1 utilisateur, API 127.0.0.1:8765)
+
+La documentation de contexte est dans `docs/context/`. Elle prime sur toute supposition.
+Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `services/email_analyzer` : ignore-les ici.
+
+## Règles de priorité
+1. Toujours : lis `docs/context/schemas-architecture/00-domain-architecture-context.md` (glossaire, invariants
+   I-01…I-16, risques R-1…R-8). C'est la source de vérité ; les lots backend et frontend la précisent.
+2. Frontend :
+   - intention métier et parcours : `docs/context/frontend/00-frontend-business-context.md` ;
+   - jetons et règles UI : `docs/context/frontend/01-ui-design-system.md`, composants `02`, état/requêtes `03`,
+     routes `04`, formulaires `05`.
+3. Backend :
+   - invariants et cas d'usage : `docs/context/backend/00-backend-business-context.md` ;
+   - contrats d'API (codes, `detail` exacts) : `docs/context/backend/01-api-contracts.md` ;
+   - services, transactions, écarts E-1…E-22 : `docs/context/backend/02-business-logic-services.md` § 4 ;
+   - sécurité et plafonds : `04` ; tâches et intégrations : `05`.
+4. Architecture et données : consulte `docs/context/schemas-architecture/01` à `04` et
+   `docs/context/backend/03-database-and-migrations.md` avant toute modification de structure, d'entité, de
+   table ou d'événement.
+5. `[ACTUEL]` = dans le code ; `[CIBLE]` = décidé, non implémenté. Vérifie l'existant avant d'implémenter un
+   `[CIBLE]`, puis mets la doc à jour quand il devient `[ACTUEL]`.
+
+## Invariants à ne jamais violer (détail dans schemas-architecture/00 § 2)
+- I-04 : aucun envoi (candidature, email, message LinkedIn) sans confirmation explicite au moment de l'envoi
+  (`confirm_submit` = « Soumettre », `confirm: true`). Ne jamais mémoriser ni pré-remplir une confirmation.
+- I-05 : ne jamais inventer une réponse de formulaire ; hors email, téléphone et réponses mémorisées → `ctx.ask()`.
+- I-06 : sur checkpoint, authwall, CAPTCHA ou perte de session → arrêter, enregistrer `blocked`, repos 6 h.
+  Aucune tentative de contournement ; seule la vérification manuelle de l'utilisateur est attendue.
+- I-07 : ne jamais dépasser les plafonds de prudence (15/30/60) ni les plafonds quotidiens ; contrôler à l'API
+  et au début de la tâche. `max_items` ≤ plafond de la prudence choisie ; prudence par défaut `prudent` (E-3).
+- I-08 : uniquement le compte personnel de l'utilisateur.
+- I-09, I-10 : pour un profil tiers, garder titre + compétences seulement ; purge 30 j (posts/profils), 90 j (offres).
+- I-11 : aucune donnée de tiers identifiable envoyée à Claude ; l'interprète local produit toujours un texte.
+- I-12, I-13, I-14 : prospection B2B conforme CPCE L.34-5 / CNIL (objet lié à l'offre, origine de l'adresse,
+  désinscription) ; `suppression_list` bloque tout envoi ; contacts purgés à 3 ans.
+- I-15 : aucun secret, cookie ou jeton versionné ou journalisé.
+- I-16 : aucune action sur une source `navigateur` sans consentement à la version courante de la popup de risques.
+- I-01, I-02, I-03 : `user_id` partout (cible) ; rapports immuables ; pas de régression automatique de statut.
+
+## Ne pas trancher seul (en arbitrage, voir les docs)
+Issue d'un `run` bloqué (E-4), mécanisme de désinscription (STOP / List-Unsubscribe),
+formulation d'I-11 pour les CV (E-6). Demande la décision si la tâche en dépend.
+
+## Interdictions
+- Aucune technique de dissimulation ou de contournement : pas de résolution de CAPTCHA, pas de maquillage
+  d'empreinte, pas d'option `AutomationControlled` / `enable-automation` (retirées de `browser.py`, ne jamais les remettre), pas de
+  proxies ni rotation d'IP, pas de faux comptes, pas de relance automatique après blocage ou échec d'envoi.
+- Sélecteurs par texte visible et `aria-label` FR + EN ; jamais par classes CSS générées.
+- Aucun appel réseau vers Indeed (import manuel uniquement).
+- Aucune écoute hors `127.0.0.1`, aucun mode multi-utilisateur.
+
+## Conventions
+- Python 3.14, typage complet, ruff (py314, 120 colonnes), `pathlib`, portable Linux / Windows / macOS.
+- Docstrings, commentaires, logs et `detail` HTTP en français, tutoiement, messages actionnables.
+- Couches : Entrées → Orchestration → Domaine / Intégrations → Persistance. Le domaine n'importe ni FastAPI ni
+  Selenium ; aucun routeur n'importe Selenium ni ne porte de règle métier.
+- Noms du glossaire uniquement (`job`, `application`, `source_code`, `caution`…) ; jamais `offer`, `candidate`.
+- Nouvelles dates en UTC avec fuseau (cible `timestamptz`).
+- Front : TypeScript strict sans `any`, TanStack Query pour l'état serveur, jetons Tailwind existants (aucune
+  couleur brute), interface en français, relecture avant tout envoi.
+
+## Tests et vérifications (depuis la racine du dépôt)
+- Tout changement de comportement : test pytest, hors ligne (fixtures HTML, aucun appel réel à LinkedIn,
+  France Travail, Claude ou SMTP). `.venv/bin/python -m pytest linkedin_market/tests`
+- Front : `npx tsc --noEmit` ou `npm run build` dans `linkedin_market/web/frontend`. `npm run lint` (ESLint 9, 0 erreur exigée ; 9 avertissements de dette, frontend/04 § 4.3).
+
+## Maintenance
+Si un changement modifie l'architecture, un contrat, un schéma, un invariant ou une convention, mets à jour le
+fichier de `docs/context/` concerné dans le même changement, et garde `CLAUDE.md` cohérent avec ces règles.
+
+> Chemins relatifs au dossier `linkedin_market/`. Les autres règles de ce dossier `.cursor/rules/` peuvent préciser un sous-ensemble (globs) ; celle-ci s'applique toujours.

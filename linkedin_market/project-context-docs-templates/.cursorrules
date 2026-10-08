@@ -1,0 +1,13 @@
+# Instructions IA - Contexte Projet & Bonnes Pratiques
+
+Tu disposes d'une documentation complète de contexte dans le dossier `docs/context/`.
+
+## Règles de Priorité
+1. **Frontend** :
+   - Consulte `docs/context/frontend/00-frontend-business-context.md` pour comprendre l'intention métier, les personas et les résultats attendus.
+   - Respecte scrupuleusement les tokens et règles UI décrits dans `docs/context/frontend/`.
+2. **Backend** :
+   - Consulte `docs/context/backend/00-backend-business-context.md` pour respecter les invariants métier et les règles transactionnelles.
+   - Respecte les contrats d'API définis dans `docs/context/backend/01-api-contracts.md`.
+3. **Architecture & Données** :
+   - Consulte `docs/context/schemas-architecture/` avant toute modification structurelle, d'entité ou d'événement.

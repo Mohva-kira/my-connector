@@ -1,0 +1,21 @@
+# Dépendances d'exécution de linkedin_market (Python 3.14).
+# .venv/bin/pip install -r linkedin_market/requirements.txt
+
+# Navigateur piloté (collecte, candidature, prospection confirmée)
+selenium>=4.50,<5
+# Interface web locale (API FastAPI servie sur 127.0.0.1 uniquement)
+fastapi>=0.115,<1
+uvicorn[standard]>=0.32,<1
+anthropic>=1.9,<2          # optionnel en mode local, import à la demande
+# Calcul (matching, tendances)
+numpy>=1.26,<3
+# Lecture du CV PDF et génération des dossiers PDF
+pypdf>=4,<6
+fpdf2>=2.8,<3
+# Lecture du fichier .env
+python-dotenv>=1,<2
+# [CIBLE] PostgreSQL 18 (vague 1)
+sqlalchemy>=2.0,<2.2
+psycopg[binary]>=3.2,<4
+alembic>=1.18,<2
+cryptography>=44,<51       # Fernet (I-15)

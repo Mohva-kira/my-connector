@@ -1,0 +1,6 @@
+<!doctype html><html><head><title>Jane Doe | LinkedIn</title></head><body>
+<nav><button aria-label="Messaging">Messaging</button></nav>
+<main><h1>Jane Doe</h1><button aria-label="Message Jane" onclick="document.getElementById('box').style.display='block'">Message</button></main>
+<div id="box" role="dialog" style="display:none"><div id="composer" contenteditable="true" role="textbox"></div>
+<button type="submit" aria-label="Send" onclick="window.__sent=document.getElementById('composer').innerText; document.getElementById('composer').innerText='';">Send</button></div>
+</body></html>

@@ -1,0 +1,11 @@
+# Configuration ruff propre à linkedin_market (email_analyzer n'est pas concerné).
+target-version = "py314"
+line-length = 120
+extend-exclude = ["web/frontend", "tests/fixtures"]
+
+[lint]
+# pycodestyle, pyflakes, isort, pyupgrade, bugbear
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[format]
+quote-style = "double"

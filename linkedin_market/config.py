@@ -1,0 +1,119 @@
+"""Configuration : chemins, identifiants, niveaux de prudence.
+
+Tout est piloté par variables d'environnement (fichier ``.env`` à la racine
+du projet) pour fonctionner à l'identique sous Linux et Windows.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # python-dotenv est optionnel
+    load_dotenv = None
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if load_dotenv is not None:
+    load_dotenv(PROJECT_ROOT / ".env")
+
+# Données personnelles (cookies, scraping, labels) : jamais versionnées.
+DATA_DIR = Path(os.environ.get("LINKEDIN_MARKET_DATA_DIR", PROJECT_ROOT / "linkedin_market_data"))
+SESSION_FILE = DATA_DIR / "session.json"
+HISTORY_FILE = DATA_DIR / "history.jsonl"
+LABELS_FILE = DATA_DIR / "labels.json"
+MODEL_FILE = DATA_DIR / "matching_model.json"
+REPORTS_DIR = DATA_DIR / "reports"
+APPLICATIONS_DIR = DATA_DIR / "applications"
+APPLICATIONS_FILE = DATA_DIR / "applications.json"
+# Dernier profil lu sur LinkedIn : réutilisé quand on relance avec --no-scrape.
+LINKEDIN_PROFILE_CACHE = DATA_DIR / "linkedin_profile.txt"
+# Interface web : réglages, surcharges de compétences, journal d'activité, tâches.
+SETTINGS_FILE = DATA_DIR / "settings.json"
+PROFILE_SETTINGS_FILE = DATA_DIR / "profile_settings.json"
+ACTIVITY_FILE = DATA_DIR / "activity.jsonl"
+TASKS_FILE = DATA_DIR / "tasks.jsonl"
+CV_PDF_NAME = "cv.pdf"
+
+# Score à partir duquel une offre non annotée est proposée pour candidater.
+APPLY_MIN_SCORE = 70.0
+# Nombre maximal d'offres affichées à l'étape candidature (les annotées d'abord).
+APPLY_MAX_LIST = 10
+
+SESSION_TTL_HOURS = 72
+TREND_WINDOW_DAYS = 30
+
+# Fichiers de profil recherchés à la racine du projet, par ordre de priorité.
+PROFILE_FILE_CANDIDATES = (
+    "profil.json", "profile.json", "profil.md", "profile.md",
+    "profil.txt", "profile.txt", "cv.pdf", "CV.pdf", "profil.pdf",
+)
+
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
+
+
+@dataclass(frozen=True)
+class Caution:
+    """Volume et rythme du scraping, à ajuster selon les signes de blocage."""
+
+    name: str
+    max_items: int          # par source (offres, posts, profils)
+    min_delay: float        # pause aléatoire entre deux pages (secondes)
+    max_delay: float
+
+
+CAUTION_LEVELS = {
+    "prudent": Caution("prudent", 15, 6.0, 14.0),
+    "normal": Caution("normal", 30, 4.0, 9.0),
+    "agressif": Caution("agressif", 60, 2.5, 6.0),
+}
+DEFAULT_CAUTION = "normal"
+
+
+def linkedin_credentials() -> tuple[str | None, str | None]:
+    return os.environ.get("LINKEDIN_EMAIL"), os.environ.get("LINKEDIN_PASSWORD")
+
+
+def browser_name() -> str:
+    """``auto`` (Chrome puis Firefox), ``chrome`` ou ``firefox``."""
+    return (os.environ.get("LINKEDIN_BROWSER") or "auto").strip().lower()
+
+
+def browser_binary() -> str | None:
+    return os.environ.get("LINKEDIN_BROWSER_BINARY") or None
+
+
+def headless() -> bool:
+    return os.environ.get("LINKEDIN_HEADLESS", "0").strip() in ("1", "true", "yes")
+
+
+def interpreter_name() -> str:
+    """``claude`` (défaut), ``local`` (modèle entraîné) ou ``none``."""
+    return (os.environ.get("LINKEDIN_INTERPRETER") or "claude").strip().lower()
+
+
+def anthropic_model() -> str:
+    return (os.environ.get("ANTHROPIC_MODEL") or "").strip() or DEFAULT_ANTHROPIC_MODEL
+
+
+def smtp_config() -> dict | None:
+    """Réglages SMTP depuis l'environnement (mêmes noms que email_analyzer) ; None si incomplets."""
+    host = (os.environ.get("SMTP_HOST") or "").strip()
+    sender = (os.environ.get("SMTP_FROM") or os.environ.get("SMTP_USER") or "").strip()
+    if not host or not sender:
+        return None
+    security = (os.environ.get("SMTP_SECURITY") or "starttls").strip().lower()
+    default_port = {"ssl": 465, "starttls": 587}.get(security, 25)
+    return {
+        "host": host, "port": int(os.environ.get("SMTP_PORT") or default_port), "security": security,
+        "user": os.environ.get("SMTP_USER") or "", "password": os.environ.get("SMTP_PASSWORD") or "",
+        "from": sender,
+    }
+
+
+def ensure_data_dirs() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    APPLICATIONS_DIR.mkdir(parents=True, exist_ok=True)
