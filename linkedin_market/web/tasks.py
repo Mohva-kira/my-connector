@@ -20,9 +20,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .. import logmask
 from ..db import utc_iso, utcnow
 from ..db.repositories import tasks as tasks_repo
 from ..db.repositories import user_transaction
+from ..pipeline import Cancelled as CollectCancelled
 
 log = logging.getLogger(__name__)
 
@@ -172,7 +174,10 @@ class TaskManager:
         *,
         browser: bool = False,
         meta: dict | None = None,
+        on_abort: Callable[[], None] | None = None,
     ) -> Task:
+        """Crée et lance la tâche. ``on_abort`` est appelé si elle se termine sans que ``fn`` ait démarré (annulée
+        pendant l'attente du verrou navigateur) : sert à rendre une ressource réservée par la route (plafond)."""
         task = Task(
             id=str(uuid.uuid7()), kind=kind, title=title, browser=browser, meta=meta or {}, created_at=utc_iso(utcnow())
         )
@@ -181,11 +186,17 @@ class TaskManager:
         with self._lock:
             self._tasks[task.id] = task
             self._contexts[task.id] = ctx
-        self._pool.submit(self._run, task, ctx, fn)
+        self._pool.submit(self._run, task, ctx, fn, on_abort)
         return task
 
-    def _run(self, task: Task, ctx: TaskContext, fn: Callable[[TaskContext], Any]) -> None:
-        acquired = False
+    def _run(
+        self,
+        task: Task,
+        ctx: TaskContext,
+        fn: Callable[[TaskContext], Any],
+        on_abort: Callable[[], None] | None = None,
+    ) -> None:
+        acquired = started = False
         try:
             if task.browser:
                 while not self._browser_lock.acquire(timeout=0.5):
@@ -197,20 +208,27 @@ class TaskManager:
                 task.started_at = utc_iso(utcnow())
             self._save(task)
             self._threads[threading.get_ident()] = ctx
+            started = True
             result = fn(ctx)
             with self._lock:
                 task.result, task.status = result, DONE
-        except TaskCancelled:
+        except TaskCancelled, CollectCancelled:
+            # Annulation demandée par l'utilisateur, y compris pendant une collecte (E-22).
             with self._lock:
                 task.status, task.error = CANCELLED, "Tâche annulée."
         except Exception as exc:  # noqa: BLE001 - toute erreur doit finir dans l'état de la tâche
             self._append_log(task, traceback.format_exc(limit=3))
             with self._lock:
-                task.status, task.error = FAILED, str(exc) or exc.__class__.__name__
+                task.status, task.error = FAILED, logmask.mask_text(str(exc)) or exc.__class__.__name__
         finally:
             self._threads.pop(threading.get_ident(), None)
             if acquired:
                 self._browser_lock.release()
+            if not started and on_abort is not None:
+                try:
+                    on_abort()
+                except Exception as exc:  # noqa: BLE001 - l'état final de la tâche doit être enregistré
+                    log.warning("Libération après abandon impossible : %s", exc.__class__.__name__)
             with self._lock:
                 task.needs_input = None
                 task.finished_at = utc_iso(utcnow())
@@ -226,11 +244,22 @@ class TaskManager:
         return True
 
     def answer(self, task_id: str, value: str) -> bool:
+        """Transmet la réponse ; la question est retirée **avant** le retour (une seule réponse par question).
+
+        Sans cela, un client qui interroge la tâche juste après sa réponse revoit l'ancienne question tant que le
+        thread de la tâche n'a pas repris la main, et peut y répondre une seconde fois : cette réponse en trop
+        serait alors prise pour celle de la question suivante.
+        """
         ctx, task = self._contexts.get(task_id), self._tasks.get(task_id)
-        if ctx is None or task is None or task.status != INPUT:
+        if ctx is None or task is None:
             return False
-        ctx._answer = value
-        ctx._answered.set()
+        with self._lock:
+            if task.status != INPUT or task.needs_input is None or ctx._answered.is_set():
+                return False
+            ctx._answer = value
+            task.needs_input = None
+            task.status = RUNNING
+            ctx._answered.set()
         return True
 
     # ----------------------------------------------------------- lecture
@@ -250,9 +279,11 @@ class TaskManager:
 
     # ------------------------------------------------------- persistance
     def _append_log(self, task: Task, message: str) -> None:
+        """Ligne horodatée ; adresses email et URL de profils masquées en dernier recours (E-12)."""
         stamp = datetime.now().strftime("%H:%M:%S")
+        line = f"{stamp} {logmask.mask_text(message)}"
         with self._lock:
-            task.logs.append(f"{stamp} {message}")
+            task.logs.append(line)
             del task.logs[:-MAX_LOG_LINES]
 
     @staticmethod

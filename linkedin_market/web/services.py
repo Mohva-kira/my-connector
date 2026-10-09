@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from uuid import UUID
 
 from .. import (
     activity,
@@ -12,6 +13,7 @@ from .. import (
     config,
     cv_pdf,
     interpreter,
+    logmask,
     matching,
     outreach,
     pipeline,
@@ -25,6 +27,10 @@ from .. import (
     contacts as contacts_mod,
 )
 from ..db import utc_iso, utcnow
+from ..db.repositories import applications as applications_repo
+from ..db.repositories import outreach as outreach_repo
+from ..db.repositories import settings as settings_repo
+from ..db.repositories import user_transaction
 from ..models import SearchRequest
 from .tasks import RUNNING, TaskContext
 
@@ -40,12 +46,14 @@ def build_request(overrides: dict | None = None) -> SearchRequest:
     if not keyword:
         raise ValueError("Renseigne le mot-clé du poste visé (Paramètres ou lancement d'analyse).")
     caution = values["caution"]
+    cap = config.CAUTION_LEVELS[caution].max_items
     return SearchRequest(
         keyword=keyword,
         location=values["location"],
         remote_only=values["remote_only"],
         caution=caution,
-        max_items=values["max_items"] or config.CAUTION_LEVELS[caution].max_items,
+        # Un max_items enregistré pour une prudence plus large est ramené au plafond de la prudence demandée (I-07).
+        max_items=min(values["max_items"] or cap, cap),
         profile_source=values["profile_source"],
     )
 
@@ -142,12 +150,17 @@ def jobs_overview(results: dict) -> list[dict]:
 
 # ------------------------------------------------------------- exécution
 def run_analysis(ctx: TaskContext, request: SearchRequest, *, scrape: bool, interpreter_name: str) -> dict:
-    linkedin_text = ""
+    """Collecte (facultative) puis analyse et rapport.
+
+    Blocage pendant la collecte (E-4, option A) : la navigation s'arrête net (I-06), la tâche finit ``terminée``
+    avec un rapport établi sur les données déjà collectées et ``result.blocked = true``.
+    """
+    linkedin_text, blocked = "", False
     if scrape:
         want_profile = request.profile_source == "linkedin" or (
             request.profile_source == "auto" and pipeline.profile_mod.find_profile_file() is None
         )
-        linkedin_text = pipeline.scrape(
+        outcome = pipeline.scrape(
             request,
             want_profile,
             interactive=False,
@@ -155,6 +168,9 @@ def run_analysis(ctx: TaskContext, request: SearchRequest, *, scrape: bool, inte
             should_stop=ctx.should_stop,
             on_ready=lambda: ctx.set_status(RUNNING),
         )
+        linkedin_text, blocked = outcome.profile_text, outcome.blocked
+        if blocked:
+            ctx.log("Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées.")
     ctx.check()
     prof = pipeline.build_profile(request, linkedin_text)
     ctx.log(f"Profil ({prof.origin}) : {len(prof.skills)} compétences.")
@@ -167,7 +183,10 @@ def run_analysis(ctx: TaskContext, request: SearchRequest, *, scrape: bool, inte
     _, json_path = report.write(results)
     activity.record("run", keyword=request.keyword, scrape=scrape, jobs=len(scored))
     ctx.log(f"Rapport enregistré : {json_path.name}")
-    return {"report": json_path.stem, "jobs": len(scored), "counts": results["counts"]}
+    result = {"report": json_path.stem, "jobs": len(scored), "counts": results["counts"], "blocked": blocked}
+    if blocked:
+        result["blocked_where"] = "collecte"
+    return result
 
 
 def rescore(ctx: TaskContext) -> dict:
@@ -217,9 +236,10 @@ def apply_job(ctx: TaskContext, job_id: str) -> dict:
     from ..browser import create_driver
 
     entry = application.get_application(job_id)
-    cfg = settings.load_settings()
-    activity.check_quota(("apply",), cfg["apply_daily_max"], "candidatures")
+    # Plafond relu sous verrou au début de la tâche (I-07) : l'API a pu accepter d'autres candidatures entre-temps.
+    activity.check_quota_locked(("apply",), "apply_daily_max", "candidatures")
     activity.guard_not_blocked()
+    cfg = settings.load_settings()
     folder = application.folder_of(entry)
     files = application.read_files(entry)
     pdf = cv_pdf.ensure_cv_pdf(folder, files["cv"], entry.get("title") or "CV", config.CV_PDF_NAME)
@@ -294,44 +314,130 @@ def message_draft(job_id: str) -> dict:
     return {"subject": f"Candidature — {tidy(entry.get('title', ''), 100)}", "body": body}
 
 
-def send_message(
-    ctx: TaskContext, job_id: str, *, channel: str, to: str, subject: str, body: str, attach_cv: bool
-) -> dict:
-    """Envoie un message (email ou LinkedIn) déjà confirmé par l'utilisateur, puis le journalise."""
-    entry = application.get_application(job_id)
-    cfg = settings.load_settings()
-    activity.check_quota(("message_email", "message_linkedin"), cfg["message_daily_max"], "messages")
-    if channel == "email":
-        attachments = []
-        if attach_cv:
-            files = application.read_files(entry)
-            attachments = [
-                cv_pdf.ensure_cv_pdf(
-                    application.folder_of(entry), files["cv"], entry.get("title") or "CV", config.CV_PDF_NAME
-                )
-            ]
-        ctx.log(f"Envoi de l'email à {to}…")
-        sent = outreach.send_email(to, subject, body, attachments)
-    else:
-        from ..browser import create_driver
+def reserve_message(job_id: str, *, channel: str, to: str, subject: str, body: str, attach_cv: bool) -> UUID:
+    """Réserve une place du plafond de messages (``backend/03`` § 5.1, E-11) ; ``429`` décidé dans la transaction.
 
-        activity.guard_not_blocked()
-        driver = create_driver()
-        try:
-            session.login(driver, interactive=False, on_manual_check=ctx.manual_check)
-            ctx.set_status(RUNNING)
-            ctx.log(f"Envoi du message LinkedIn à {to}…")
-            sent = outreach.send_linkedin_message(
-                driver, to, body, config.CAUTION_LEVELS[cfg["caution"]], check=ctx.check
-            )
-        except PermissionError as exc:
-            activity.record("blocked", where="message LinkedIn", job=job_id)
-            raise RuntimeError(str(exc)) from exc
-        finally:
-            driver.quit()
-        if sent.get("truncated"):
-            ctx.log("La note de connexion dépassait 300 caractères : elle a été tronquée.")
-    activity.record(f"message_{channel}", job=job_id, to=to, title=entry.get("title", ""))
+    ``FOR UPDATE`` sur la candidature puis sur ``user_settings`` : deux envois simultanés (même vers des
+    candidatures différentes) ne peuvent pas compter la même place. Lève ``ApplicationNotFound`` ou
+    ``QuotaExceeded`` (transaction annulée).
+    """
+    start, end = activity.day_bounds()
+    with user_transaction() as (s, uid):
+        found = applications_repo.get(s, uid, job_id, lock=True)
+        if found is None:
+            raise application.ApplicationNotFound(job_id)
+        application_id = found[0].id
+        limit = settings_repo.get_settings(s, uid, lock=True)["message_daily_max"]
+        if outreach_repo.count_day(s, uid, start, end) >= limit:
+            raise activity.QuotaExceeded("messages", limit)
+        return outreach_repo.insert_confirmed(
+            s,
+            uid,
+            application_id,
+            {
+                "channel": channel,
+                "recipient": to,
+                "subject": subject.strip() if channel == "email" else "",
+                "body": body,
+                "cv_attached": attach_cv and channel == "email",
+                "contact_id": outreach_repo.find_contact(s, uid, application_id, to),
+            },
+        )
+
+
+def release_message(message_id: UUID) -> None:
+    """Rend la place réservée quand la tâche d'envoi n'a finalement pas été créée (conflit, blocage)."""
+    with user_transaction() as (s, uid):
+        outreach_repo.release(s, uid, message_id)
+
+
+def abort_message(message_id: UUID) -> None:
+    """Tâche d'envoi terminée avant d'avoir démarré (annulée pendant l'attente du navigateur) : place rendue."""
+    _message_outcome(message_id, error="Tâche annulée avant l'envoi.")
+
+
+def message_count_today() -> int:
+    """Messages du jour qui occupent le plafond (réservés ou envoyés)."""
+    start, end = activity.day_bounds()
+    with user_transaction() as (s, uid):
+        return outreach_repo.count_day(s, uid, start, end)
+
+
+def _confirm_reservation(message_id: UUID) -> None:
+    """Début de tâche : la réservation existe toujours et le plafond (relu sous verrou) n'est pas dépassé (I-07)."""
+    start, end = activity.day_bounds()
+    with user_transaction() as (s, uid):
+        limit = settings_repo.get_settings(s, uid, lock=True)["message_daily_max"]
+        row = outreach_repo.get(s, uid, message_id, lock=True)
+        if row is None or row.status != "confirmé" or row.sent_at is not None:
+            raise RuntimeError("Réservation d'envoi introuvable : relance l'envoi depuis la candidature.")
+        used = outreach_repo.count_day(s, uid, start, end)
+    if used > limit:
+        raise activity.QuotaExceeded("messages", limit)
+
+
+def _message_outcome(message_id: UUID, *, sent_id: str | None = None, error: str = "", uncertain: bool = False) -> None:
+    with user_transaction() as (s, uid):
+        if uncertain:
+            outreach_repo.note_uncertain(s, uid, message_id, error)
+        elif error:
+            outreach_repo.mark_failed(s, uid, message_id, error)
+        else:
+            outreach_repo.mark_sent(s, uid, message_id, sent_id)
+
+
+def send_message(
+    ctx: TaskContext,
+    job_id: str,
+    *,
+    message_id: UUID,
+    channel: str,
+    to: str,
+    subject: str,
+    body: str,
+    attach_cv: bool,
+) -> dict:
+    """Envoie un message (email ou LinkedIn) déjà confirmé par l'utilisateur et réservé, puis le journalise.
+
+    Préconditions revérifiées ici (l'API les a déjà contrôlées) : réservation et plafond, SMTP chiffré ou local
+    (E-20), absence de blocage (LinkedIn). Un échec libère la place (``échec``) ; aucun renvoi automatique.
+    """
+    try:
+        entry = application.get_application(job_id)
+        _confirm_reservation(message_id)
+        cfg = settings.load_settings()
+        sent_id: str | None = None
+        if channel == "email":
+            smtp = config.smtp_config()
+            if smtp is None:
+                raise outreach.OutreachError(
+                    "SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env."
+                )
+            insecure = config.smtp_security_error(smtp)
+            if insecure:
+                raise outreach.OutreachError(insecure)
+            attachments = []
+            if attach_cv:
+                files = application.read_files(entry)
+                attachments = [
+                    cv_pdf.ensure_cv_pdf(
+                        application.folder_of(entry), files["cv"], entry.get("title") or "CV", config.CV_PDF_NAME
+                    )
+                ]
+            ctx.check()
+            ctx.log(f"Envoi de l'email à {logmask.mask_email(to)}…")
+            sent, sent_id = outreach.deliver_email(to, subject, body, attachments, smtp)
+        else:
+            sent = _send_linkedin(ctx, job_id, to, body, cfg)
+    except outreach.UncertainDelivery as exc:
+        _message_outcome(message_id, error=str(exc), uncertain=True)
+        raise
+    except Exception as exc:
+        _message_outcome(message_id, error=logmask.mask_text(str(exc)) or exc.__class__.__name__)
+        raise
+    _message_outcome(message_id, sent_id=sent_id)
+    # Journal d'activité exposé par /api/monitor : destinataire masqué (E-12) ; complet dans l'historique.
+    activity.record(f"message_{channel}", job=job_id, to=logmask.mask_recipient(to), title=entry.get("title", ""))
     application.add_history(
         job_id,
         "message",
@@ -341,6 +447,26 @@ def send_message(
         **({"mode": sent["mode"]} if "mode" in sent else {}),
     )
     application.advance_status(job_id, "contactée")
+    return sent
+
+
+def _send_linkedin(ctx: TaskContext, job_id: str, to: str, body: str, cfg: dict) -> dict:
+    from ..browser import create_driver
+
+    activity.guard_not_blocked()
+    driver = create_driver()
+    try:
+        session.login(driver, interactive=False, on_manual_check=ctx.manual_check)
+        ctx.set_status(RUNNING)
+        ctx.log(f"Envoi du message LinkedIn à {logmask.mask_profile_url(to)}…")
+        sent = outreach.send_linkedin_message(driver, to, body, config.CAUTION_LEVELS[cfg["caution"]], check=ctx.check)
+    except PermissionError as exc:
+        activity.record("blocked", where="message LinkedIn", job=job_id)
+        raise RuntimeError(str(exc)) from exc
+    finally:
+        driver.quit()
+    if sent.get("truncated"):
+        ctx.log("La note de connexion dépassait 300 caractères : elle a été tronquée.")
     return sent
 
 
@@ -441,7 +567,7 @@ def skill_suggestions(results: dict | None, owned: list[str]) -> dict:
 def quotas() -> dict:
     values = settings.load_settings()
     applied = activity.count_today("apply")
-    messages = activity.count_today("message_email", "message_linkedin")
+    messages = message_count_today()
     return {
         "apply": {"used": applied, "limit": values["apply_daily_max"]},
         "messages": {"used": messages, "limit": values["message_daily_max"]},

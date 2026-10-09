@@ -41,10 +41,14 @@ def client(monkeypatch, workdir):
     manager = TaskManager(persist=False)
     with TestClient(create_app(tasks=manager, token=None), base_url="http://127.0.0.1:8765") as c:
         yield c
-    manager.shutdown()
+    # Isolation : aucune tâche d'un test ne doit survivre au TRUNCATE du suivant (annulation puis attente de fin).
+    for task in manager.active():
+        manager.cancel(task.id)
+    manager.shutdown(wait=True)
 
 
-def wait_done(client, task_id, timeout=60):
+def wait_done(client, task_id, timeout=180):
+    """Délai large : sous forte charge, la fermeture de Firefox (``driver.quit``) peut dépasser une minute."""
     end = time.time() + timeout
     while time.time() < end:
         task = client.get(f"/api/tasks/{task_id}").json()
@@ -180,5 +184,7 @@ def test_contact_lookup_end_to_end(client, monkeypatch):
     done = wait_done(client, task["id"])
     assert done["status"] == "terminée", done
     assert done["result"] == {"found": 2, "emails": 1}
+    logs = "\n".join(done["logs"])  # G-9 : ni nom complet ni adresse de tiers dans le journal persisté
+    assert "J. D. : j***@acme.com" in logs and not any(x in logs for x in ("Jane Doe", "John Roe", "jane@acme.com"))
     saved = {c["full_name"]: c for c in application.get_application("job:1")["contacts"]}
     assert saved["Jane Doe"]["email"] == "j.manual@acme.com" and saved["John Roe"]["email"] is None

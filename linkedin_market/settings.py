@@ -8,7 +8,7 @@ construction du profil (``profile.finalize``). Façade de persistance (D-1) : ta
 
 from __future__ import annotations
 
-from . import config, nlp
+from . import config, logmask, nlp
 from .db.repositories import profile as profile_repo
 from .db.repositories import settings as settings_repo
 from .db.repositories import user_transaction
@@ -79,6 +79,19 @@ def _int(value, name: str, low: int, high: int) -> int:
     return number
 
 
+def _max_items(value) -> int:
+    """Entier ≥ 1 (G-11) ; le plafond dépend de la prudence (``_check_max_items``)."""
+    if isinstance(value, bool):
+        raise SettingsError("max_items doit être un entier.")
+    try:
+        number = int(value)
+    except TypeError, ValueError:
+        raise SettingsError("max_items doit être un entier.") from None
+    if number < 1:
+        raise SettingsError("max_items doit être au moins 1.")
+    return number
+
+
 def _check_max_items(max_items: int | None, caution: str) -> None:
     """``max_items`` ≤ plafond de la prudence choisie (I-07, E-3)."""
     cap = max_items_cap(caution)
@@ -104,7 +117,7 @@ def validate_settings(update: dict, current: dict | None = None) -> dict:
         elif key == "interpreter" and value not in _INTERPRETERS:
             raise SettingsError(f"interpreter doit être l'un de : {', '.join(_INTERPRETERS)}.")
         elif key == "max_items":
-            value = None if value in (None, "") else _int(value, key, 1, 200)
+            value = None if value in (None, "") else _max_items(value)
         elif key == "apply_min_score":
             try:
                 value = float(value)
@@ -116,6 +129,10 @@ def validate_settings(update: dict, current: dict | None = None) -> dict:
             value = _int(value, key, 0, 200)
         elif key in ("remote_only", "linkedin_skill_sync"):
             value = bool(value)
+        elif key == "contact_email":
+            value = str(value or "").strip()
+            if value and not logmask.EMAIL_ADDRESS.match(value):
+                raise SettingsError("contact_email doit être une adresse email valide.")
         elif key == "answers":
             if not isinstance(value, dict):
                 raise SettingsError("answers doit être un objet question -> réponse.")

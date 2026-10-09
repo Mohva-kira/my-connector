@@ -48,16 +48,35 @@ stateDiagram-v2
 
 Règles d'implémentation (`TaskManager._run`) :
 - `started_at` est posé quand la tâche passe `en_cours` ; `finished_at` et `needs_input = None` dans le `finally`.
-- Toute exception autre que `TaskCancelled` ⇒ `échec`, `error = str(exc) or exc.__class__.__name__`, 3 lignes de
-  traceback ajoutées aux logs. Une exception métier doit donc porter un **message français lisible**.
+- Toute exception autre que `TaskCancelled` ou `pipeline.Cancelled` ⇒ `échec`, `error =
+  logmask.mask_text(str(exc)) or exc.__class__.__name__` (masquage E-12, `01` § 1.2 G-9), 3 lignes de traceback
+  ajoutées aux logs (elles aussi passées par `logmask.mask_text`). Une exception métier doit donc porter un
+  **message français lisible**.
+- `except TaskCancelled, CollectCancelled:` (syntaxe Python 3.14, PEP 758, sans parenthèses) ⇒ `annulée`, `error =
+  "Tâche annulée."` ; couvre l'annulation coopérative (§ 1.5) **et** l'annulation pendant une collecte (E-22,
+  `pipeline.Cancelled`, résolu en vague 2 : auparavant cette dernière finissait en `échec`).
 - Le verrou navigateur est libéré dans le `finally` ; chaque fonction de tâche navigateur ferme son driver
   (`driver.quit()` en `finally`).
+- `[ACTUEL]` (vague 2) `TaskManager.submit(..., on_abort=...)` : si la fonction de la tâche n'a **jamais démarré**
+  (`started = False`, ex. annulation pendant l'attente du verrou navigateur, ou arrêt du processus), `on_abort()`
+  est appelé dans le `finally`, après la libération du verrou. Sert à rendre une ressource réservée par la route
+  avant la soumission (ex. plafond de messages, § 2.4) : la route `POST …/messages`
+  (`web/routers/applications.py::send_message`) passe `on_abort=lambda: services.abort_message(message_id)`, qui
+  marque la réservation `échec` plutôt que de la
+  laisser `confirmé` sans suite. Une exception dans `on_abort` est journalisée (`log.warning`) et n'empêche pas la
+  tâche de se terminer normalement.
+- `[ACTUEL]` (vague 2) `TaskManager.answer()` consomme la question de façon **atomique** sous `self._lock` :
+  `task.needs_input` est mis à `None` et `task.status` repasse à `en_cours` **avant** le retour de `answer()`, pas
+  seulement à la reprise du thread de la tâche. Sans cela, un client qui relit la tâche juste après avoir répondu
+  pouvait encore voir l'ancienne question et y répondre une seconde fois ; cette réponse en trop aurait alors été
+  prise pour celle de la question suivante. `answer()` renvoie `False` si `ctx._answered` est déjà posé (réponse
+  déjà reçue) en plus des cas existants (tâche/question absente).
 
 ### 1.3 Types de tâches
 
 | `kind` | `browser` | `meta.key` (unicité) | Fonction (`web/services.py`) | Titre | `result` en `terminée` |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `run` | `= scrape` | — (une seule) | `run_analysis` | `Collecte et analyse — <mot-clé>` / `Analyse de l'historique — <mot-clé>` | `{"report", "jobs", "counts"}` |
+| `run` | `= scrape` | — (une seule) | `run_analysis` | `Collecte et analyse — <mot-clé>` / `Analyse de l'historique — <mot-clé>` | `{"report", "jobs", "counts", "blocked", "blocked_where"?}` (G-10, E-4 ; `blocked_where` absent si `blocked = false`) |
 | `rescore` | non | — | `rescore` | `Recalcul des scores` | `{"report", "jobs"}` |
 | `train` | non | — | `train_model` | `Entraînement du modèle de matching` | `{"report", "jobs", "n_labels", "accuracy"}` |
 | `prepare` | non | `job_id` | `prepare_application` | `Préparer : <titre>` | `{"job_id", "folder", "generator"}` |
@@ -101,10 +120,13 @@ sequenceDiagram
 - `POST /api/tasks/{id}/cancel` positionne un `Event` et débloque une attente de saisie ; l'annulation est
   **coopérative** : prise en compte à l'attente du verrou, dans `ask()`, et à chaque `ctx.check()` (entre deux
   champs ou deux étapes d'Easy Apply, dans les attentes de `outreach`, `contacts`, `profile_sync`).
-- Pendant `pipeline.scrape`, l'annulation n'est testée qu'**entre deux types** (offres, posts, profils) via
-  `should_stop` ; elle lève `pipeline.Cancelled` (`RuntimeError`), qui n'est pas `TaskCancelled` : la tâche finit
-  en **`échec`** avec « Collecte annulée. » au lieu de `annulée` (écart E-22, à corriger en levant
-  `TaskCancelled` ou en l'interceptant dans `_run`).
+- `[ACTUEL]` (vague 2, G-8/E-22) Pendant `pipeline.scrape`, l'annulation est testée **avant chaque page**
+  (`LinkedInScraper._get`, via la fonction `check` passée au constructeur), pas seulement entre deux types
+  d'éléments (offres, posts, profils) ; elle lève toujours `pipeline.Cancelled` (`RuntimeError`), désormais
+  interceptée par `TaskManager._run` au même titre que `TaskCancelled` (§ 1.2) : la tâche finit en **`annulée`**
+  avec « Tâche annulée. » (auparavant `échec` avec « Collecte annulée. »). Les éléments déjà lus par la méthode
+  de collecte en cours (`scraper.partial`) sont enregistrés avant que l'exception ne remonte, en plus de ceux des
+  types déjà terminés.
 - Une page Selenium en cours de chargement n'est pas interrompue (jusqu'à 60 s).
 
 ### 1.6 Relances et échecs définitifs
@@ -154,11 +176,11 @@ supprimé et connexion par identifiants (`/login`, attente du champ email 30 s, 
 
 | Module | Détection | Effet `[ACTUEL]` | Cible |
 | :--- | :--- | :--- | :--- |
-| `session.login` | URL ≠ `/feed` après 20 s | `attente_verification_manuelle` ; échec après 180 s **sans** événement `blocked` (E-5) | `blocked(where="connexion")` sur délai dépassé |
-| `scraper` (collecte) | `_blocked()` après chaque page | arrêt de la collecte, `blocked(where="collecte")`, **analyse poursuivie** sur les données obtenues (E-4) | décision à prendre (cf. `02` E-4) |
+| `session.login` | URL ≠ `/feed` après `FEED_TIMEOUT` = 20 s, puis vérification manuelle (`MANUAL_CHECK_TIMEOUT` = 180 s) ; reprise par cookies (`_restore`) : `/checkpoint` après la pause de restauration (`RESTORE_PAUSE` = 4 s) | `[ACTUEL]` (vague 2, G-7/E-5) `attente_verification_manuelle` puis, si les 180 s sont dépassées (ou checkpoint après restauration par cookies), événement `blocked(where="connexion")` **puis** `VerificationNotDoneError` (`session._blocked_at_login()`) ⇒ tâche `échec` avec le message de G-7 (`01` § 1.2) | livré |
+| `scraper` (collecte) | `_blocked()` **avant chaque page** (`LinkedInScraper._get`, § 1.5) | `[ACTUEL]` (vague 2, G-10/E-4, option A) arrêt immédiat de la navigation, `blocked(where="collecte")`, **analyse poursuivie** sur les données déjà obtenues, `result.blocked = true` (`01` § 1.2 G-10) | livré |
 | `apply_bot` | avant d'ouvrir l'offre et à chaque étape | `BlockedError` ⇒ `blocked(where="candidature", job)`, `apply_state="échec"`, tâche `échec`, fenêtre de candidature fermée sans envoi | inchangé |
 | `contacts` | après chaque page | `PermissionError` ⇒ `blocked(where="recherche de contacts")` ⇒ tâche `échec` | `BlockedError` unique |
-| `outreach` (LinkedIn) | après ouverture du profil | `PermissionError` ⇒ `blocked(where="message LinkedIn")` | idem |
+| `outreach` (LinkedIn) | après ouverture du profil | `PermissionError` ⇒ `blocked(where="message LinkedIn")` ; après le clic sur « Envoyer » sans confirmation visible (page qui ne se vide pas, exception pendant l'attente) : `outreach.UncertainDelivery` plutôt que `PermissionError`, cf. § 2.4 | idem |
 | `profile_sync` | après chaque ouverture | `PermissionError` ⇒ `blocked(where="profil LinkedIn (compétence)")` | idem |
 
 Après un blocage : **repos de 6 h** pour **toutes** les actions navigateur (`guard_not_blocked`, HTTP 409 avec
@@ -175,6 +197,10 @@ un navigateur normal. Aucune nouvelle tentative automatique. `[CIBLE]` : le repo
 | Appel | `client.beta.messages.stream(model, max_tokens=16000, system, thinking={"type": "adaptive"}, output_config={"effort": "high"}, betas=["server-side-fallback-2026-07-01"], fallbacks="default", messages=[…])` puis `get_final_message()` |
 | Fin anormale | `stop_reason == "refusal"` ⇒ `RuntimeError("Claude a refusé la requête.")` ; `max_tokens` ⇒ texte suffixé « _(Réponse tronquée : limite de longueur atteinte.)_ » |
 
+`[ACTUEL]` (vague 2, G-4/E-7) : la branche `interpreter="none"` de `interpreter.get_interpreter()` / `interpret()`
+a été retirée — ces fonctions ne renvoient plus jamais `None` / `("", "none")`. Toute valeur autre que `claude`
+(dont l'ancienne valeur `none`) donne l'interprète **local**, qui produit toujours un texte (I-11).
+
 Usages et données transmises :
 | Usage | Données envoyées | Repli |
 | :--- | :--- | :--- |
@@ -188,11 +214,24 @@ mention dans la popup Claude/Réglages de ce qui est envoyé.
 ### 2.4 SMTP (serveur de l'utilisateur) — `outreach.py`
 | Paramètre | Valeur |
 | :--- | :--- |
-| Configuration | `SMTP_HOST`, `SMTP_FROM` (sinon `SMTP_USER`) obligatoires ; `SMTP_SECURITY` `starttls` (défaut, port 587) ou `ssl` (465) ; autre valeur ⇒ port 25 sans chiffrement (E-20) ; `SMTP_USER`/`SMTP_PASSWORD` si le serveur exige l'authentification |
+| Configuration | `SMTP_HOST`, `SMTP_FROM` (sinon `SMTP_USER`) obligatoires ; `SMTP_SECURITY` `starttls` (défaut, port 587) ou `ssl` (465) ; `SMTP_USER`/`SMTP_PASSWORD` si le serveur exige l'authentification |
+| `[ACTUEL]` (vague 2, G-5/E-20) | `SMTP_SECURITY=none` (sans chiffrement) admis **uniquement** vers un hôte local (`127.0.0.1`, `localhost`, `::1` — relais local, tests), via `config.smtp_security_error()` ; sinon `OutreachError` (503 à l'API). **Toute autre valeur** (ni `ssl`, `starttls`, ni `none`) est **refusée même vers un hôte local** : « SMTP_SECURITY=<valeur> n'est pas reconnu : choisis starttls ou ssl dans le fichier .env (none seulement pour un serveur SMTP local, 127.0.0.1). » — remplace l'ancien comportement qui retombait silencieusement sur le port 25 sans chiffrement. Contrôlé à l'API (`applications._require_smtp()`) **et** au début de la tâche (`services.send_message`, avant `outreach.deliver_email`). |
 | Délai | `SMTP_TIMEOUT = 25` s, contexte TLS `ssl.create_default_context()` (vérification du certificat) |
 | Message | `EmailMessage` : `From`, `To` validé, `Subject` sur une ligne, `Message-ID` (`make_msgid` au domaine de l'expéditeur), corps texte, pièce jointe `cv.pdf` facultative |
-| Erreurs | `SMTPAuthenticationError` ⇒ « Le serveur SMTP refuse l'authentification : vérifie SMTP_USER et SMTP_PASSWORD. » ; `SMTPRecipientsRefused` ⇒ « Le destinataire a été refusé par le serveur : <to>. » ; autre ⇒ « Envoi impossible (<Classe> : <détail>). » |
+| Erreurs | `SMTPAuthenticationError` ⇒ « Le serveur SMTP refuse l'authentification : vérifie SMTP_USER et SMTP_PASSWORD. » ; `SMTPRecipientsRefused` ⇒ « Le destinataire a été refusé par le serveur : <to masqué, E-12>. » ; autre ⇒ « Envoi impossible (<Classe> : <détail>). » (`outreach._smtp_failure`) |
+| `[ACTUEL]` (vague 2) | Une erreur à la **fermeture** de la connexion (`client.quit()`) **après** que le serveur a accepté le message (`client.send_message(message)` réussi) est **ignorée** (`outreach.deliver_email`, `except smtplib.SMTPException, OSError: client.close()`) : le message est considéré envoyé (`Message-ID` retourné et stocké dans `outreach_messages.smtp_message_id`), une erreur de `QUIT` ne change rien à la livraison déjà actée par le serveur. |
 | Relance | **aucune** (risque de doublon chez le destinataire) ; statut `échec`, nouvel envoi manuel |
+
+**Statut « à vérifier » (`outreach.UncertainDelivery`, canal LinkedIn uniquement)** `[ACTUEL]` (vague 2) :
+après le clic sur le bouton « Envoyer » d'un message direct LinkedIn, si l'attente de confirmation (le composeur
+qui se vide) échoue avec une exception (annulation, perte de page…) plutôt qu'un simple délai dépassé,
+`send_linkedin_message` lève `outreach.UncertainDelivery` (sous-classe de `OutreachError`) au lieu de
+`OutreachError` : le message a **peut-être** été envoyé sans confirmation visible. `services.send_message` la
+distingue des autres échecs : la réservation (`outreach_messages`) reste `status='confirmé'` avec `error`
+renseigné au lieu de passer à `échec` (`db/repositories/outreach.note_uncertain`, `03` § 5.1) — affiché « à
+vérifier » côté UI, compte toujours dans le plafond du jour, **jamais** renvoyé automatiquement (§ 1.6, I-04).
+Un délai simplement dépassé (composeur non vidé, sans exception) reste une `UncertainDelivery` classique avec le
+même message : « L'envoi n'a pas pu être confirmé : vérifie la conversation sur LinkedIn avant de réessayer. »
 
 Conformité prospection B2B `[CIBLE]` (I-12, I-13 ; CPCE art. L.34-5 ; RGPD art. 6(1)(f), 14 et 21 ; fiche CNIL
 « Communication électronique : quelles règles ? », mise à jour en juin 2026) :
@@ -252,10 +291,10 @@ Module `linkedin_market/sources/france_travail.py` (client `httpx` synchrone, ap
 | Appel | Délai | Relances | Sur échec définitif |
 | :--- | :--- | :--- | :--- |
 | Saisie utilisateur (`ask`) | 600 s | — | tâche `échec` |
-| Vérification manuelle à la connexion LinkedIn | 180 s | — | tâche `échec` (+ `blocked` `[CIBLE]`) |
+| Vérification manuelle à la connexion LinkedIn | 180 s | — | tâche `échec` + `blocked(where="connexion")` (G-7/E-5, `[ACTUEL]`) |
 | Chargement de page Selenium | 60 s | 0 | page ignorée (collecte) ou tâche `échec` |
 | Étape Easy Apply / confirmation d'envoi | 10 s / 20 s | l'étape est repassée tant que les erreurs affichées changent (12 étapes max) | `ApplyError` / état `incertaine` |
-| Message LinkedIn (éléments attendus) | 12 s | 0 | `OutreachError` |
+| Message LinkedIn (éléments attendus) | 12 s | 0 | `OutreachError`, ou `UncertainDelivery` après le clic « Envoyer » (§ 2.4) |
 | SMTP | 25 s | 0 | `OutreachError` ⇒ `échec` |
 | Claude | défaut SDK (`timeout=120` s `[CIBLE]`) | 2 (SDK) | interprète / rédacteur local |
 | France Travail (jeton, recherche) `[CIBLE]` | 10 s | 3, backoff 1-2-4 s, `Retry-After` | source ignorée pour cette analyse |

@@ -20,7 +20,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from . import config
+from . import activity, config
 from .db import crypto
 from .db.repositories import platform_sessions as sessions_repo
 from .db.repositories import user_transaction
@@ -33,6 +33,13 @@ EMAIL_SELECTOR = "#username, input[name='session_key'], input[type='email'], inp
 PASSWORD_SELECTOR = "#password, input[name='session_password'], input[type='password']"
 # Délai laissé à l'utilisateur pour résoudre un captcha / une validation 2FA.
 MANUAL_CHECK_TIMEOUT = 180
+# Attente du fil d'actualité après l'envoi des identifiants, puis après la reprise par cookies.
+FEED_TIMEOUT = 20
+RESTORE_PAUSE = 4.0
+VERIFICATION_NOT_DONE = (
+    "LinkedIn demande une vérification que tu n'as pas terminée à temps : les actions navigateur sont suspendues "
+    "6 h. Termine-la sur LinkedIn puis lève le blocage depuis le tableau de bord."
+)
 
 
 SOURCE_CODE = "linkedin"
@@ -91,12 +98,25 @@ def _restore(driver, cookies: list[dict]) -> bool:
         except WebDriverException:
             continue
     driver.get(FEED_URL)
-    time.sleep(4)
+    time.sleep(RESTORE_PAUSE)
+    if "/checkpoint" in driver.current_url:
+        _blocked_at_login()
     return _is_logged_in(driver)
 
 
 class MissingCredentialsError(RuntimeError):
     """Identifiants LinkedIn absents en mode non interactif (interface web)."""
+
+
+class VerificationNotDoneError(RuntimeError):
+    """Vérification LinkedIn (captcha, 2FA, checkpoint) non terminée à la connexion : repos de 6 h (I-06, E-5)."""
+
+
+def _blocked_at_login() -> None:
+    """Événement ``blocked`` (``where="connexion"``) puis arrêt : aucune nouvelle tentative (I-06)."""
+    activity.record("blocked", where="connexion")
+    log.error("Vérification LinkedIn non terminée : actions navigateur suspendues 6 h.")
+    raise VerificationNotDoneError(VERIFICATION_NOT_DONE)
 
 
 def _credentials(interactive: bool = True) -> tuple[str, str]:
@@ -131,7 +151,7 @@ def _login_with_password(driver, interactive: bool = True, on_manual_check=None)
     field.send_keys(password)
     field.send_keys(Keys.RETURN)
     try:
-        WebDriverWait(driver, 20).until(EC.url_contains("/feed"))
+        WebDriverWait(driver, FEED_TIMEOUT).until(EC.url_contains("/feed"))
     except TimeoutException:
         message = (
             f"LinkedIn demande une vérification (captcha, code 2FA...). "
@@ -141,7 +161,10 @@ def _login_with_password(driver, interactive: bool = True, on_manual_check=None)
             on_manual_check(message)
         else:
             print("\n" + message)
-        WebDriverWait(driver, MANUAL_CHECK_TIMEOUT).until(EC.url_contains("/feed"))
+        try:
+            WebDriverWait(driver, MANUAL_CHECK_TIMEOUT).until(EC.url_contains("/feed"))
+        except TimeoutException:
+            _blocked_at_login()
 
 
 def session_age_hours() -> float | None:

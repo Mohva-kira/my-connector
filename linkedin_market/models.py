@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+from .config import CAUTION_LEVELS, DEFAULT_CAUTION
+
 
 @dataclass
 class SearchRequest:
     keyword: str
     location: str = ""  # vide = monde entier
     remote_only: bool = True
-    caution: str = "normal"
-    max_items: int = 30
+    caution: str = DEFAULT_CAUTION  # « prudent » (E-3, I-07)
+    max_items: int = CAUTION_LEVELS[DEFAULT_CAUTION].max_items  # ≤ plafond de la prudence (``pipeline.capped``)
     profile_source: str = "auto"  # auto | file | linkedin
     extra_skills: list[str] = field(default_factory=list)
     years_experience: int | None = None

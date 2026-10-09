@@ -11,7 +11,7 @@ from pydantic import BaseModel, field_validator
 
 from ... import activity, application, config, outreach, settings
 from .. import services
-from ..guards import require_browser_ready
+from ..guards import quota_exceeded, require_browser_ready, require_credentials, require_not_blocked
 from ..services import tidy
 from .core import tasks_of
 
@@ -160,45 +160,72 @@ class MessageBody(BaseModel):
 
 @router.post("/applications/{job_id}/messages", status_code=202)
 def send_message(request: Request, job_id: str, body: MessageBody) -> dict:
-    """Envoie un message à l'entreprise. ``confirm: true`` est exigé : l'interface le pose après relecture."""
+    """Envoie un message à l'entreprise. ``confirm: true`` est exigé : l'interface le pose après relecture.
+
+    Le plafond est réservé en base (``429`` décidé dans la transaction, E-11) ; la place est rendue si la tâche
+    n'est finalement pas créée.
+    """
     _entry(job_id)
     if not body.confirm:
         raise HTTPException(422, "Confirmation explicite requise : relis le message puis confirme l'envoi.")
-    limit = settings.load_settings()["message_daily_max"]
     if body.channel == "email":
-        if config.smtp_config() is None:
-            raise HTTPException(503, "SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.")
+        _require_smtp()
         try:
             outreach.validate_recipient(body.to)
         except outreach.OutreachError as exc:
             raise HTTPException(422, str(exc)) from exc
         if not body.subject.strip() or "\n" in body.subject:
             raise HTTPException(422, "Objet requis, sur une seule ligne.")
-        try:
-            activity.check_quota(("message_email", "message_linkedin"), limit, "messages")
-        except activity.QuotaExceeded as exc:
-            raise HTTPException(429, str(exc)) from exc
     else:
-        require_browser_ready(("message_email", "message_linkedin"), limit, "messages")
-    tasks = tasks_of(request)
-    if tasks.has_active("message", job_id):
-        raise HTTPException(409, "Un envoi est déjà en cours pour cette candidature.")
-    label = "email" if body.channel == "email" else "message LinkedIn"
-    return tasks.submit(
-        "message",
-        f"Envoyer un {label}",
-        lambda ctx: services.send_message(
-            ctx,
-            job_id,
-            channel=body.channel,
-            to=body.to.strip(),
-            subject=body.subject,
-            body=body.body,
-            attach_cv=body.attach_cv,
-        ),
-        browser=body.channel == "linkedin",
-        meta={"key": job_id, "job_id": job_id},
-    ).public()
+        require_credentials()
+    to = body.to.strip()
+    try:
+        message_id = services.reserve_message(
+            job_id, channel=body.channel, to=to, subject=body.subject, body=body.body, attach_cv=body.attach_cv
+        )
+    except activity.QuotaExceeded as exc:
+        raise quota_exceeded(exc) from exc
+    except application.ApplicationNotFound:
+        raise HTTPException(404, "Aucune candidature préparée pour cette offre.") from None
+    try:
+        if body.channel == "linkedin":
+            require_not_blocked()
+        tasks = tasks_of(request)
+        if tasks.has_active("message", job_id):
+            raise HTTPException(409, "Un envoi est déjà en cours pour cette candidature.")
+        label = "email" if body.channel == "email" else "message LinkedIn"
+        task = tasks.submit(
+            "message",
+            f"Envoyer un {label}",
+            lambda ctx: services.send_message(
+                ctx,
+                job_id,
+                message_id=message_id,
+                channel=body.channel,
+                to=to,
+                subject=body.subject,
+                body=body.body,
+                attach_cv=body.attach_cv,
+            ),
+            browser=body.channel == "linkedin",
+            meta={"key": job_id, "job_id": job_id},
+            on_abort=lambda: services.abort_message(message_id),
+        )
+    except BaseException:
+        services.release_message(message_id)
+        raise
+    return task.public()
+
+
+def _require_smtp() -> dict:
+    """SMTP configuré et chiffré, ou en clair vers un relais local seulement (E-20) ; sinon ``503``."""
+    smtp = config.smtp_config()
+    if smtp is None:
+        raise HTTPException(503, "SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.")
+    insecure = config.smtp_security_error(smtp)
+    if insecure:
+        raise HTTPException(503, insecure)
+    return smtp
 
 
 class TestMail(BaseModel):
@@ -208,9 +235,7 @@ class TestMail(BaseModel):
 @router.post("/smtp/test")
 def smtp_test(body: TestMail) -> dict:
     """Email de test, uniquement vers soi-même (adresse de contact des paramètres ou expéditeur SMTP)."""
-    smtp = config.smtp_config()
-    if smtp is None:
-        raise HTTPException(503, "SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.")
+    smtp = _require_smtp()
     own = {a for a in (settings.load_settings()["contact_email"], smtp["from"], smtp["user"]) if a}
     target = (body.to or settings.load_settings()["contact_email"] or smtp["from"]).strip()
     if target not in own:

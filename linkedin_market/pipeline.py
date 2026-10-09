@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from . import activity, config, matching, storage, trends
@@ -18,7 +19,32 @@ class ProfileMissingError(RuntimeError):
 
 
 class Cancelled(RuntimeError):
-    """Tâche annulée par l'utilisateur (vérifiée entre deux sources)."""
+    """Collecte annulée par l'utilisateur (``should_stop`` testé avant chaque page, E-22).
+
+    Interceptée par ``TaskManager._run`` : la tâche finit ``annulée`` (« Tâche annulée. »).
+    """
+
+
+@dataclass
+class ScrapeOutcome:
+    """Résultat d'une collecte : texte du profil LinkedIn (si demandé) et blocage éventuel (E-4, option A)."""
+
+    profile_text: str = ""
+    blocked: bool = False
+
+
+def capped(request: SearchRequest) -> SearchRequest:
+    """``max_items`` ramené au plafond de la prudence (I-07, E-3) : garde-fou après le contrôle 422 de l'API."""
+    caution = config.CAUTION_LEVELS.get(request.caution, config.CAUTION_LEVELS[config.DEFAULT_CAUTION])
+    if request.max_items <= caution.max_items:
+        return request
+    log.warning(
+        "max_items ramené de %d à %d : plafond de la prudence « %s ».",
+        request.max_items,
+        caution.max_items,
+        caution.name,
+    )
+    return replace(request, max_items=caution.max_items)
 
 
 def scrape(
@@ -29,38 +55,60 @@ def scrape(
     on_manual_check: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     on_ready: Callable[[], None] | None = None,
-) -> str:
-    """Collecte LinkedIn et l'ajoute à l'historique ; retourne le texte du profil si demandé."""
+) -> ScrapeOutcome:
+    """Collecte LinkedIn ajoutée à l'historique ; texte du profil si demandé, et blocage éventuel.
+
+    Blocage (checkpoint, authwall) : arrêt immédiat de la navigation, événement ``blocked`` (``where="collecte"``)
+    et repos de 6 h (I-06) ; les éléments déjà collectés sont gardés et l'analyse porte sur eux (E-4, option A).
+    Annulation (``should_stop``, testé avant chaque page) : les éléments déjà collectés sont enregistrés, puis
+    ``Cancelled`` est levée.
+    """
     from .browser import create_driver
     from .scraper import LinkedInScraper
     from .session import login
 
+    request = capped(request)
     activity.guard_not_blocked()
+
+    def check() -> None:
+        if should_stop and should_stop():
+            raise Cancelled("Collecte annulée.")
+
+    check()
     driver = create_driver()
-    profile_text = ""
+    outcome = ScrapeOutcome()
     try:
         login(driver, interactive=interactive, on_manual_check=on_manual_check)
         if on_ready:
             on_ready()  # connexion (et vérification manuelle éventuelle) terminée
-        scraper = LinkedInScraper(driver, request)
+        scraper = LinkedInScraper(driver, request, check=check)
         if want_profile:
             log.info("Lecture de ton profil LinkedIn...")
-            profile_text = scraper.own_profile_text()
-            if profile_text:
-                storage.save_linkedin_profile_text(profile_text)
+            outcome.profile_text = scraper.own_profile_text()
+            if outcome.profile_text:
+                storage.save_linkedin_profile_text(outcome.profile_text)
         for label, collect in (("offres", scraper.jobs), ("posts", scraper.posts), ("profils", scraper.people)):
-            if should_stop and should_stop():
-                raise Cancelled("Collecte annulée.")
+            if scraper.blocked:
+                break
+            check()
             log.info("Collecte des %s...", label)
-            items = collect()
+            try:
+                items = collect()
+            except Cancelled:
+                if scraper.partial:
+                    storage.append_items(scraper.partial)
+                    log.info("Collecte annulée : %d %s déjà lus enregistrés.", len(scraper.partial), label)
+                raise
             storage.append_items(items)
             log.info("%d %s enregistrés.", len(items), label)
-            if scraper._blocked():
-                activity.record("blocked", where="collecte")
+            if scraper.blocked or scraper._blocked():
                 break
+        if scraper.blocked:
+            activity.record("blocked", where="collecte")
+            outcome.blocked = True
     finally:
         driver.quit()
-    return profile_text
+    return outcome
 
 
 def build_profile(request: SearchRequest, linkedin_text: str = "", use_overrides: bool = True) -> Profile:

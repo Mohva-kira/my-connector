@@ -341,7 +341,7 @@ class MatchingModelRecord(Base):
     id: Mapped[UUID] = uuid_pk()
     user_id: Mapped[UUID] = owner()
     version: Mapped[int]
-    weights: Mapped[list[Any]]  # 8 poids + biais
+    weights: Mapped[dict[str, Any]]  # {weights (8 poids), bias, mean, std, train_accuracy, loss_history}
     feature_names: Mapped[list[Any]]
     n_positive: Mapped[int] = mapped_column(server_default=text("0"))
     n_negative: Mapped[int] = mapped_column(server_default=text("0"))

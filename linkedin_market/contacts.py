@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from selenium.common.exceptions import WebDriverException
 
-from . import config
+from . import config, logmask
 from .browser import human_pause
 
 log = logging.getLogger(__name__)
@@ -114,7 +114,11 @@ def find_hiring_team(
     log_fn: Callable[[str], None] = log.info,
     to_overlay: Callable[[str], str] = overlay_url,
 ) -> list[dict]:
-    """Recruteurs de l'offre avec leur email quand LinkedIn l'affiche."""
+    """Recruteurs de l'offre avec leur email quand LinkedIn l'affiche.
+
+    Le journal (``log_fn``) ne reçoit que des initiales et des adresses masquées (E-12) ; les valeurs complètes
+    sont renvoyées pour l'historique de la candidature.
+    """
     driver.get(job_url)
     human_pause(caution, 0.6)
     if any(p in driver.current_url for p in ("/checkpoint", "/authwall", "/login", "/uas/")):
@@ -138,8 +142,9 @@ def find_hiring_team(
             data = driver.execute_script(_JS_OVERLAY) or {}
             contact["email"] = extract_email(data.get("mails", []), data.get("text", ""))
         except WebDriverException as exc:
-            log_fn(f"Coordonnées illisibles pour {contact['full_name']} : {exc.msg}")
-        log_fn(f"{contact['full_name']} : " + (contact["email"] or "email non affiché par LinkedIn"))
+            log_fn(f"Coordonnées illisibles pour {logmask.mask_name(contact['full_name'])} : {exc.__class__.__name__}")
+        email = logmask.mask_email(contact["email"]) if contact["email"] else "email non affiché par LinkedIn"
+        log_fn(f"{logmask.mask_name(contact['full_name'])} : {email}")
     return contacts
 
 

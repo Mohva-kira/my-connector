@@ -3,7 +3,9 @@
 Base de test (``backend/03`` § 8) : ``LM_TEST_DATABASE_URL`` désigne une base dont le nom finit par ``_test``,
 distincte de ``LM_DATABASE_URL`` ; sinon la session pytest s'arrête. Pendant les tests, ``LM_DATABASE_URL`` est
 remplacée par l'URL de test (ou retirée) : aucun code ne peut atteindre la vraie base. ``LM_SECRET_KEY`` est une
-clé éphémère générée pour la session : jamais celle du ``.env``, et rien n'est écrit dans le ``.env``.
+clé éphémère générée pour la session : jamais celle du ``.env``, et rien n'est écrit dans le ``.env``. Les
+identifiants LinkedIn, SMTP et la clé Anthropic du ``.env`` sont retirés de l'environnement : sans eux, aucune tâche
+lancée par un test ne peut se connecter à un vrai service.
 """
 
 import os
@@ -31,6 +33,19 @@ ALEMBIC_INI = Path(config.__file__).resolve().parent / "alembic.ini"
 _LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1"}
 # Tables conservées entre deux tests : données de référence et version du schéma.
 _KEPT_TABLES = {"sources", "alembic_version"}
+# Secrets du .env de l'utilisateur jamais visibles des tests (aucun appel réel à LinkedIn, SMTP ou Claude) : un test
+# qui en a besoin pose une valeur factice avec monkeypatch.setenv.
+_REAL_SECRETS = (
+    "LINKEDIN_EMAIL",
+    "LINKEDIN_PASSWORD",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "SMTP_FROM",
+    "SMTP_SECURITY",
+    "ANTHROPIC_API_KEY",
+)
 
 
 def _target(url: str) -> tuple[str, int, str]:
@@ -64,6 +79,8 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "db: test sur la base PostgreSQL de test (LM_TEST_DATABASE_URL)")
     # Le .env racine a déjà été chargé à l'import de linkedin_market.config : on neutralise la vraie base.
     real_url = os.environ.pop("LM_DATABASE_URL", None)
+    for name in _REAL_SECRETS:
+        os.environ.pop(name, None)
     os.environ["LM_SECRET_KEY"] = Fernet.generate_key().decode("ascii")
     test_url = (os.environ.get(TEST_URL_VAR) or "").strip()
     if not test_url:

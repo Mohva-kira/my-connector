@@ -97,8 +97,10 @@ class LocalInterpreter:
     def interpret(self, summary: dict) -> str:
         lines = ["## Lecture du marché"]
         counts = summary.get("counts", {})
-        lines.append(f"- Échantillon : {counts.get('job', 0)} offres, {counts.get('post', 0)} posts, "
-                     f"{counts.get('person', 0)} profils sur {config.TREND_WINDOW_DAYS} jours.")
+        lines.append(
+            f"- Échantillon : {counts.get('job', 0)} offres, {counts.get('post', 0)} posts, "
+            f"{counts.get('person', 0)} profils sur {config.TREND_WINDOW_DAYS} jours."
+        )
         terms = [t["term"] for t in summary.get("top_terms", [])[:8]]
         if terms:
             lines.append(f"- Termes dominants : {', '.join(terms)}.")
@@ -129,7 +131,8 @@ class LocalInterpreter:
         lines.append(f"- Poids {source} :")
         for row in model.get("importance", [])[:4]:
             direction = "augmente" if row["weight"] > 0 else "diminue"
-            lines.append(f"  - {FEATURE_LABELS.get(row['feature'], row['feature'])} {direction} le score (poids {row['weight']}).")
+            feature = FEATURE_LABELS.get(row["feature"], row["feature"])
+            lines.append(f"  - {feature} {direction} le score (poids {row['weight']}).")
 
         top = summary.get("top_jobs", [])[:5]
         if top:
@@ -140,10 +143,9 @@ class LocalInterpreter:
         return "\n".join(lines)
 
 
-def get_interpreter(name: str | None = None) -> Interpreter | None:
+def get_interpreter(name: str | None = None) -> Interpreter:
+    """Interprète demandé ; toute valeur autre que ``claude`` (dont l'ancienne ``none``, E-7) donne le local."""
     name = (name or config.interpreter_name()).lower()
-    if name == "none":
-        return None
     if name == "claude":
         try:
             return ClaudeInterpreter()
@@ -153,10 +155,8 @@ def get_interpreter(name: str | None = None) -> Interpreter | None:
 
 
 def interpret(summary: dict, name: str | None = None) -> tuple[str, str]:
-    """Retourne (texte, nom de l'interprète réellement utilisé)."""
+    """Retourne (texte, nom de l'interprète réellement utilisé : ``claude`` ou ``local``, jamais vide, I-11)."""
     interpreter = get_interpreter(name)
-    if interpreter is None:
-        return "", "none"
     try:
         return interpreter.interpret(summary), interpreter.name
     except Exception as exc:

@@ -38,22 +38,25 @@ Les identifiants d'élément gardent la forme `<kind>:<external_id>` (`job:40123
 `kind` + `external_id` et le dépôt recompose l'identifiant ; la question de l'unicité entre sources est reportée à
 la vague 5.
 
-### 1.2 Changements de contrat figés pour la vague 2 (garde-fous) `[CIBLE]`
+### 1.2 Changements de contrat figés pour la vague 2 (garde-fous) `[ACTUEL]`
+
+Livrés et vérifiés par les tests (`test_guardrails_api.py`, `test_collect_guards.py`, `test_message_quota.py`,
+`test_logmask.py`, plus les suites existantes mises à jour).
 
 | # | Point | Contrat |
 | :--- | :--- | :--- |
-| G-1 (E-10) | Erreur de validation Pydantic | Toujours `422 {"detail": "<champ> : <message>"}` (chaîne) ; plusieurs erreurs jointes par « ; ». `<champ>` = dernier élément de `loc` hors `body`/`query`/`path`. Messages : `missing` → « champ requis » ; `literal_error` / `enum` → « doit être l'un de : a, b » ; `int_parsing`/`int_type` → « doit être un entier » ; `float_parsing` → « doit être un nombre » ; `bool_parsing` → « doit valoir true ou false » ; `string_type` → « doit être un texte » ; `greater_than_equal` / `less_than_equal` → « doit être ≥ N » / « ≤ N » ; `value_error` → message du validateur sans le préfixe « Value error, » ; `json_invalid` → `Corps JSON invalide.` (sans champ) ; autre → « valeur invalide ». Le frontend accepte encore une liste (compatibilité). |
-| G-2 | `429` (plafonds `apply`, `message_*`) | `detail` inchangé + en-tête `Retry-After: <secondes jusqu'à minuit, heure locale de la machine>` (entier ≥ 1). |
-| G-3 (E-3) | `RunBody.max_items` et `PUT /api/settings` | `422 max_items ne peut pas dépasser 15 en prudence « prudent ».` (30 / 60 selon la prudence) ; `SearchRequest.caution` par défaut `prudent` ; `min()` défensif dans `pipeline`. |
-| G-4 (E-7) | Interprète `none` | API : `422 interpreter doit être l'un de : claude, local.` (réglages et `RunBody`) ; CLI : `--interpreter` ∈ `claude`, `local` ; `LINKEDIN_INTERPRETER=none` lu comme `local` avec un avertissement de log. |
-| G-5 (E-20) | `SMTP_SECURITY=none` | **Confirmé le 2026-10-08.** Admis **uniquement** si `SMTP_HOST` ∈ `127.0.0.1`, `localhost`, `::1` (relais local, tests). Sinon `503 SMTP_SECURITY=none n'est permis que vers un serveur SMTP local (127.0.0.1) : choisis starttls ou ssl dans le fichier .env.` sur `POST …/messages` (canal email, à l'étape « SMTP non configuré ») et `POST /api/smtp/test` ; revérifié au début de la tâche. |
-| G-6 (E-11) | Plafond de messages | Réservation transactionnelle de `backend/03` § 5.1 (sans la ligne `suppression_list`, ajoutée en vague 4) : le `429` est décidé **dans** la transaction ; message inchangé. Plafond `apply` : `FOR UPDATE` sur `user_settings` + comptage au **début** de la tâche (§ 5.2). |
-| G-7 (E-5) | Vérification non terminée à la connexion | Événement `blocked` (`where = "connexion"`) puis tâche `échec`, `error` = `LinkedIn demande une vérification que tu n'as pas terminée à temps : les actions navigateur sont suspendues 6 h. Termine-la sur LinkedIn puis lève le blocage depuis le tableau de bord.` ; reprise par cookies tombant sur un checkpoint : même traitement. |
-| G-8 (E-22) | Annulation pendant la collecte | `should_stop` testé à chaque page ; la tâche finit `annulée`, `error = "Tâche annulée."` ; les éléments déjà enregistrés sont conservés. |
-| G-9 (E-12) | Journaux de tâche | Adresses masquées `j***@acme.com`, noms de tiers en initiales (`J. D.`), URL de profil `linkedin.com/in/j***` ; ni corps de message ni texte de profil. L'historique de candidature (`history`) garde l'information complète. |
-| G-10 (E-4) | Run bloqué pendant la collecte | **Décidé (option A, 2026-10-08)** : tâche `terminée`, rapport partiel. `result` de toute tâche `run` : `{"report": "data-engineer-2026-10-08", "jobs": 12, "counts": {"job": 12, "post": 0, "person": 0}, "blocked": true, "blocked_where": "collecte"}` ; sans blocage `"blocked": false` et **pas** de `blocked_where`. Types : `blocked: bool` toujours présent, `blocked_where: "collecte"` présent seulement si `blocked`. Le frontend affiche le bandeau « Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées. » |
-| G-11 (E-3) | Minimum de `max_items` (réglages, `RunBody`) | `422 max_items doit être au moins 1.` ; remplace `max_items doit être compris entre 1 et 200.` (supprimé). |
-| G-12 | `contact_email` (`PUT /api/settings`) | Vide admis ; sinon même expression que `outreach._EMAIL`, refus `422 contact_email doit être une adresse email valide.` |
+| G-1 (E-10) | Erreur de validation Pydantic | Toujours `422 {"detail": "<champ> : <message>"}` (chaîne), via le gestionnaire `RequestValidationError` de `web/app.py` (`validation_detail()`) ; plusieurs erreurs jointes par « ; ». `<champ>` = dernier élément de `loc` hors `body`/`query`/`path`/`header`/`cookie`. Messages : `missing` → « champ requis » ; `literal_error` / `enum` → « doit être l'un de : a, b » ; `int_parsing`/`int_type`/`int_from_float` → « doit être un entier » ; `float_parsing`/`float_type` → « doit être un nombre » ; `bool_parsing`/`bool_type` → « doit valoir true ou false » ; `string_type` → « doit être un texte » ; `dict_type` → « doit être un objet JSON » ; `greater_than_equal` / `less_than_equal` → « doit être ≥ N » / « ≤ N » ; `value_error` → message du validateur sans le préfixe « Value error, » ; `json_invalid` → `Corps JSON invalide.` (sans champ, les autres erreurs de la liste sont ignorées) ; autre → « valeur invalide ». Le backend ne renvoie plus jamais la liste native de Pydantic ; le frontend garde `typeof detail === "string"` par robustesse. |
+| G-2 | `429` (plafonds `apply`, `message_*`) | `detail` inchangé + en-tête `Retry-After: <secondes jusqu'à minuit, heure locale de la machine>` (entier ≥ 1, `guards.seconds_until_local_midnight()`). Posé par `guards.quota_exceeded()`, utilisé par les routeurs **et** par la réservation de message (§ 5.7). |
+| G-3 (E-3) | `RunBody.max_items` et `PUT /api/settings` | `422 max_items ne peut pas dépasser 15 en prudence « prudent ».` (30 / 60 selon la prudence) ; `SearchRequest.caution` par défaut `prudent` (`config.DEFAULT_CAUTION`) ; garde défensive `pipeline.capped()` (remplace `max_items` par le plafond de la prudence et journalise un avertissement s'il était dépassé, ne devrait plus se produire après le contrôle 422). |
+| G-4 (E-7) | Interprète `none` | API : `422 interpreter doit être l'un de : claude, local.` (réglages et `RunBody`, `settings._INTERPRETERS = ("claude", "local")`) ; CLI : `--interpreter` ∈ `config.INTERPRETERS` (`claude`, `local`) ; `LINKEDIN_INTERPRETER=none` lu comme `local` avec un avertissement de log (`config.interpreter_name()`). `interpreter.get_interpreter()` / `interpret()` ne renvoient plus jamais `None` / `"none"` (I-11). |
+| G-5 (E-20) | `SMTP_SECURITY=none` | Admis **uniquement** si `SMTP_HOST` ∈ `127.0.0.1`, `localhost`, `::1` (relais local, tests), via `config.smtp_security_error()`. Sinon `503 SMTP_SECURITY=none n'est permis que vers un serveur SMTP local (127.0.0.1) : choisis starttls ou ssl dans le fichier .env.` Une valeur autre que `ssl`/`starttls`/`none` est **également refusée**, y compris vers un hôte local : `503 SMTP_SECURITY=<valeur> n'est pas reconnu : choisis starttls ou ssl dans le fichier .env (none seulement pour un serveur SMTP local, 127.0.0.1).` Appliqué sur `POST …/messages` (canal email, via `applications._require_smtp()`) et `POST /api/smtp/test` ; revérifié au début de la tâche (`services.send_message`, avant l'envoi SMTP). |
+| G-6 (E-11) | Plafond de messages | Réservation transactionnelle de `backend/03` § 5.1 (sans la ligne `suppression_list`, ajoutée en vague 4) : `services.reserve_message()` verrouille la candidature puis `user_settings`, compte le jour (`db/repositories/outreach.count_day`, qui retient le plus grand de la réservation et de l'ancien compteur `activity_events`, § 5.1) et insère `status='confirmé'` ; le `429` (avec `Retry-After`, G-2) est décidé **dans** cette transaction, message inchangé. Si la tâche n'est jamais créée (erreur synchrone du routeur), la réservation est supprimée (`release_message`) ; si la tâche est créée mais annulée avant de démarrer (attente du verrou navigateur), elle est révoquée en `échec` (`abort_message`, `on_abort` de `TaskManager.submit`, `backend/05` § 1.2). Plafond `apply` : `activity.check_quota_locked()`, `FOR UPDATE` sur `user_settings` + comptage au **début** de la tâche (§ 5.2). |
+| G-7 (E-5) | Vérification non terminée à la connexion | Événement `blocked` (`where = "connexion"`) puis tâche `échec`, `error` = `LinkedIn demande une vérification que tu n'as pas terminée à temps : les actions navigateur sont suspendues 6 h. Termine-la sur LinkedIn puis lève le blocage depuis le tableau de bord.` (`session._blocked_at_login()`, `VerificationNotDoneError`) ; reprise par cookies tombant sur un checkpoint (`/checkpoint` après restauration) : même traitement. |
+| G-8 (E-22) | Annulation pendant la collecte | `should_stop` (`pipeline.scrape`'s `check()`) testé **avant chaque page** (`LinkedInScraper._get`), pas seulement entre deux types d'éléments ; lève `pipeline.Cancelled`, désormais interceptée par `TaskManager._run` (`except TaskCancelled, CollectCancelled:`) : la tâche finit `annulée`, `error = "Tâche annulée."` ; les éléments déjà lus par la méthode de collecte en cours (`scraper.partial`) et ceux des types déjà terminés sont conservés. |
+| G-9 (E-12) | Journaux de tâche | Masquage par le module `logmask.py` : adresses `j***@acme.com` (`mask_email`), noms de tiers en initiales `J. D.` (`mask_name`), URL de profil `linkedin.com/in/j***` (`mask_profile_url`) ; appliqué dans `contacts.find_hiring_team` (recruteurs), `services.send_message`/`_send_linkedin` (destinataire) et en filet de sécurité dans tout message de tâche (`TaskManager._append_log`, `mask_text`, détection par motif sur le texte libre) et toute erreur de tâche (`task.error`). L'historique de candidature (`history`) et `outreach_messages`/`company_contacts` gardent l'information complète (soumise à la rétention, I-14). L'événement d'activité `message_*` (`activity_events`, exposé par `/api/monitor`) porte lui aussi le destinataire **masqué** (`to`) ; seul l'historique de candidature garde l'adresse complète. |
+| G-10 (E-4) | Run bloqué pendant la collecte | **Décidé (option A, 2026-10-08).** `result` de toute tâche `run` : `{"report": "data-engineer-2026-10-08", "jobs": 12, "counts": {"job": 12, "post": 0, "person": 0}, "blocked": true, "blocked_where": "collecte"}` ; sans blocage `"blocked": false` et **pas** de `blocked_where`. Types : `blocked: bool` toujours présent, `blocked_where: "collecte"` présent seulement si `blocked`. Le frontend affiche le bandeau « Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées. » |
+| G-11 (E-3) | Minimum de `max_items` (réglages, `RunBody`) | `422 max_items doit être au moins 1.` ; remplace `max_items doit être compris entre 1 et 200.` (supprimé, `settings._max_items()`). |
+| G-12 | `contact_email` (`PUT /api/settings`) | Vide admis ; sinon même expression que `logmask.EMAIL_ADDRESS` (source unique, reprise par `outreach._EMAIL`), refus `422 contact_email doit être une adresse email valide.` |
 
 ## 2. Format Standard des Réponses
 
@@ -74,21 +77,18 @@ Format natif FastAPI, message **en français** destiné à être affiché tel qu
 ```
 
 Exception : les erreurs de **validation de schéma** Pydantic (types, champ manquant, `Literal`, validateurs)
-renvoient `422` avec une **liste** :
+renvoient aussi `422`, mais **plus jamais** la liste native de Pydantic (E-10, `[ACTUEL]` depuis la vague 2) : le
+gestionnaire `RequestValidationError` de `web/app.py` (`validation_detail()`) les traduit toujours en une chaîne
+`{"detail": "<champ> : <message français>"}`, plusieurs erreurs jointes par « ; » :
 
 ```json
-{
-  "detail": [
-    {"type": "literal_error", "loc": ["body", "channel"], "msg": "Input should be 'email' or 'linkedin'",
-     "input": "sms", "ctx": {"expected": "'email' or 'linkedin'"}}
-  ]
-}
+{"detail": "channel : doit être l'un de : email, linkedin"}
 ```
 
-Pour un `field_validator`, `msg` vaut `"Value error, Adresse email invalide."`. Ces messages Pydantic sont en
-anglais (écart E-10) ; `[CIBLE]` : un gestionnaire `RequestValidationError` les traduit en
-`{"detail": "<champ> : <message français>"}` en gardant le code 422. Le frontend doit accepter les deux formes
-(`typeof detail === "string"`).
+En interne, Pydantic produit par exemple `{"type": "literal_error", "loc": ["body", "channel"], "msg": "Input
+should be 'email' or 'linkedin'", "ctx": {"expected": "'email' or 'linkedin'"}}` ; pour un `field_validator`,
+`msg` vaut `"Value error, Adresse email invalide."` (préfixe retiré par `validation_detail()`). Le frontend garde
+`typeof detail === "string"` par robustesse, mais ne reçoit plus jamais de liste.
 
 ### Objet Tâche (`Task.public()`)
 Toute route `202` renvoie l'objet tâche complet ; `GET /api/tasks` et les champs `active_tasks` / `recent_tasks`
@@ -135,7 +135,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | `Cache-Control: no-store` | Réponse | Sur `index.html` (contient le jeton). |
 | `Content-Security-Policy: sandbox allow-scripts allow-popups` | Réponse | `GET /api/reports/{name}/html`. Pour `cv.html` : `sandbox allow-scripts allow-modals allow-popups`. Origine opaque : ces pages ne peuvent ni lire le jeton ni appeler l'API. |
 | `Authorization`, `Idempotency-Key`, `X-Correlation-Id` | — | **Non utilisés.** Pas de compte (jeton local, cf. `04`) ; idempotence par refus des doublons de tâche (409) ; la corrélation se fait par l'`id` de tâche repris dans les logs. |
-| `Retry-After` | Réponse | `[CIBLE]` sur `429` : secondes jusqu'à minuit (heure locale), début du jour suivant pour les plafonds. |
+| `Retry-After` | Réponse | `[ACTUEL]` sur tout `429` de plafond (`apply`, `message_*`) : secondes jusqu'à minuit heure locale, début du jour suivant (`guards.quota_exceeded()`, G-2). |
 
 ## 4. Codes de Statut Utilisés
 
@@ -156,7 +156,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | `429 Too Many Requests` | Plafond quotidien atteint (`apply_daily_max`, `message_daily_max`). |
 | `500 Internal Server Error` | Dossier de candidature hors du répertoire de données (`ValueError` de `folder_of`) ; toute exception non rattrapée. |
 | `502 Bad Gateway` | `POST /api/smtp/test` : le serveur SMTP refuse ou échoue (`OutreachError`). |
-| `503 Service Unavailable` | SMTP non configuré (`/messages` canal `email`, `/smtp/test`) ; frontend non compilé (route SPA, page HTML). |
+| `503 Service Unavailable` | SMTP non configuré, ou `SMTP_SECURITY` refusé (`none` vers un hôte distant, ou valeur inconnue, G-5) sur `/messages` canal `email` et `/smtp/test` ; frontend non compilé (route SPA, page HTML). |
 
 ## 5. Catalogue des Endpoints
 
@@ -227,14 +227,15 @@ Réglages et règles de `settings.validate_settings()` :
 | `keyword` | `""` | chaîne, `strip()` | — |
 | `location` | `""` | chaîne (vide = monde entier) | — |
 | `remote_only` | `true` | `bool(value)` | — |
-| `caution` | `"normal"` (`[CIBLE]` décidé : `"prudent"`) | ∈ `prudent`, `normal`, `agressif` | `caution doit être l'un de : prudent, normal, agressif.` |
-| `max_items` | `null` | `[ACTUEL]` `null`/`""` ou entier 1–200 ; `[CIBLE]` décidé : entier 1 à `Caution.max_items` de la prudence choisie (15 / 30 / 60) | `max_items doit être un entier.` / `max_items doit être compris entre 1 et 200.` ; `[CIBLE]` `max_items ne peut pas dépasser 15 en prudence « prudent ».` |
+| `caution` | `"prudent"` (`config.DEFAULT_CAUTION`) | ∈ `prudent`, `normal`, `agressif` | `caution doit être l'un de : prudent, normal, agressif.` |
+| `max_items` | `null` (= plafond de la prudence) | `null`/`""` ou entier ≥ 1, puis ≤ `Caution.max_items` de la prudence choisie (15 / 30 / 60, `settings._max_items()` + `_check_max_items()`) | `max_items doit être un entier.` ; `max_items doit être au moins 1.` (G-11) ; `max_items ne peut pas dépasser 15 en prudence « prudent ».` (G-3, 30 / 60 selon la prudence) |
 | `profile_source` | `"auto"` | ∈ `auto`, `file`, `linkedin` | `profile_source doit être l'un de : auto, file, linkedin.` |
-| `interpreter` | `"claude"` | ∈ `claude`, `local`, `none` (`[CIBLE]` `none` refusé à l'écriture et lu comme `local`, I-11) | `interpreter doit être l'un de : claude, local, none.` |
+| `interpreter` | `"claude"` | ∈ `claude`, `local` (`settings._INTERPRETERS`) ; `none` (ancienne valeur) refusé à l'écriture et lu comme `local` à la lecture (`settings.read_interpreter()`, I-11, G-4) | `interpreter doit être l'un de : claude, local.` |
 | `apply_min_score` | `70.0` | nombre 0–100 | `apply_min_score doit être un nombre.` / `apply_min_score doit être compris entre 0 et 100.` |
 | `apply_daily_max` | `10` | entier 0–200 | `apply_daily_max doit être compris entre 0 et 200.` |
 | `message_daily_max` | `15` | entier 0–200 | `message_daily_max doit être compris entre 0 et 200.` |
-| `contact_email`, `contact_phone`, `signature` | `""` | chaîne, `strip()` | — |
+| `contact_email` | `""` | chaîne, `strip()` ; vide admis, sinon `logmask.EMAIL_ADDRESS` (G-12) | `422 contact_email doit être une adresse email valide.` |
+| `contact_phone`, `signature` | `""` | chaîne, `strip()` | — |
 | `linkedin_skill_sync` | `true` | `bool(value)` | — |
 | `answers` | `{}` | objet ; clé = `nlp.normalize(question)[:200]`, valeur `str[:500]` | `answers doit être un objet question -> réponse.` |
 
@@ -290,8 +291,12 @@ Sans profil : `{"available": false, "message": "Aucun profil : dépose profil.md
 | `GET /api/reports/{name}/html` | `200 text/html` sandboxé | `404 Rapport introuvable.` (aussi si le rapport existe en base mais que son fichier HTML manque : E-19 livré en vague 1) |
 
 Clés d'un rapport : `generated_at`, `window_days` (30), `request`, `profile`, `counts`, `top_terms`, `skill_demand`,
-`rising`, `weekly`, `gap`, `top_jobs`, `model`, `min_labels`, `interpretation`, `interpreter` (`claude` \| `local`
-\| `none`), `interpreter_model`. Aucune route n'écrit un rapport existant (I-02).
+`rising`, `weekly`, `gap`, `top_jobs`, `model`, `min_labels`, `interpretation`, `interpreter`, `interpreter_model`.
+Depuis la vague 2 (G-4, E-7), `interpreter.interpret()` ne renvoie plus jamais `"none"` : un nouveau rapport porte
+toujours `claude` ou `local`. `interpreter = "none"` ne peut apparaître que sur un rapport **historique**, importé
+avant la vague 2 (`db/import_json.py` convertit déjà `none` → `local` à l'import, mais un rapport immuable créé par
+une ancienne version du code peut encore porter cette valeur, I-02). Aucune route n'écrit un rapport existant
+(I-02).
 
 ### 5.5 Tâches (`core.py`)
 
@@ -328,8 +333,8 @@ ne peut pas être annulée (pas de contexte) ⇒ 409.
 | `location` | `str \| null` | réglage | — |
 | `remote_only` | `bool \| null` | réglage | Ajoute `f_WT=2` à la recherche d'offres LinkedIn. |
 | `caution` | `str \| null` | réglage | `prudent`/`normal`/`agressif`. |
-| `max_items` | `int \| null` | `Caution.max_items` | `[ACTUEL]` 1–200 ; `[CIBLE]` décidé : 1 à `Caution.max_items`, valeur supérieure refusée (422) (E-3). |
-| `interpreter` | `str \| null` | réglage | `claude`/`local`/`none` (`[CIBLE]` `none` ⇒ 422). |
+| `max_items` | `int \| null` | `Caution.max_items` | Entier ≥ 1, ≤ `Caution.max_items` de la prudence retenue, valeur supérieure refusée (422, G-3/G-11, E-3). |
+| `interpreter` | `str \| null` | réglage | `claude`/`local` ; `none` ⇒ `422 interpreter doit être l'un de : claude, local.` (G-4, E-7). |
 | `sources` `[CIBLE]` | `list[str]` | `["linkedin"]` | Codes de `GET /api/sources` ; `indeed` refusé (import manuel). |
 
 Exemple :
@@ -346,7 +351,9 @@ Content-Type: application/json
  "logs": [], "result": null, "error": "", "needs_input": null, "meta": {}, "browser": true,
  "created_at": "2026-10-08T14:30:01Z", "started_at": null, "finished_at": null}
 ```
-Résultat final : `{"report": "data-engineer-2026-10-08", "jobs": 30, "counts": {"job": 30, "post": 30, "person": 30}}`.
+Résultat final : `{"report": "data-engineer-2026-10-08", "jobs": 30, "counts": {"job": 30, "post": 30, "person": 30},
+"blocked": false}` ; si la collecte a été interrompue par LinkedIn, `"blocked": true, "blocked_where": "collecte"`
+s'ajoute (G-10, E-4).
 
 `GET /api/jobs` :
 ```json
@@ -386,7 +393,7 @@ remplie (409).
 | `POST /api/applications/{job_id}/contacts/lookup` | — | `202` tâche `contacts` | `404` ; `409 Une recherche de contacts est déjà en cours pour cette offre.` ; `409` identifiants / blocage ; `[CIBLE]` `428` |
 | `GET /api/applications/{job_id}/message-draft` | — | `200 {"subject": "Candidature — <titre ≤ 100>", "body": "<message.txt>\n\n<signature>"}` | `404` |
 | `POST /api/applications/{job_id}/messages` | `MessageBody` | `202` tâche `message` (`browser` si canal `linkedin`) | voir ordre ci-dessous |
-| `POST /api/smtp/test` | `TestMail {to: str \| null}` | `200 {"channel": "email", "to": "me@example.com", "subject": "Test my-connector", "attachments": []}` | `503 SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.` ; `422 Le test n'est autorisé que vers ton adresse de contact ou l'expéditeur SMTP.` ; `502 <OutreachError>` |
+| `POST /api/smtp/test` | `TestMail {to: str \| null}` | `200 {"channel": "email", "to": "me@example.com", "subject": "Test my-connector", "attachments": []}` | `503 SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.` ; `503 <SMTP_SECURITY refusé, G-5>` (via `applications._require_smtp()`, partagé avec `/messages`) ; `422 Le test n'est autorisé que vers ton adresse de contact ou l'expéditeur SMTP.` ; `502 <OutreachError>` |
 
 `ApplicationPatch` (tous facultatifs) : `cv`, `message`, `advice` (`str`, réécrivent `cv.md`/`message.txt`/
 `conseils.md` ; changer `cv` régénère `cv.html` et supprime `cv.pdf`), `status` (statut libre, **seule** voie de
@@ -407,18 +414,33 @@ sinon « L'URL doit être un profil LinkedIn (https://www.linkedin.com/in/...). 
 | `attach_cv` | `bool` | `true` | Email : joint `cv.pdf` (généré si absent). |
 | `confirm` | `bool` | `false` | Doit valoir `true` (I-04). |
 
-Ordre des contrôles de `POST …/messages` (le premier qui échoue répond) :
+Ordre des contrôles de `POST …/messages` (le premier qui échoue répond ; `[ACTUEL]` depuis la vague 2, G-6/E-11) :
 1. `404 Aucune candidature préparée pour cette offre.`
 2. `422 Confirmation explicite requise : relis le message puis confirme l'envoi.`
-3. Canal `email` : `503 SMTP non configuré : …` → `422 Adresse email invalide : « pas-un-mail ».` →
-   `422 Objet requis, sur une seule ligne.` → `429 Plafond quotidien atteint (15 messages par jour) : …`.
-   Canal `linkedin` : `409` identifiants → `429` plafond → `409` blocage.
-4. `409 Un envoi est déjà en cours pour cette candidature.`
-5. `[CIBLE]` dans la transaction : `409 Ce destinataire a demandé à ne plus être contacté.` ;
+3. Canal `email` : `503 SMTP non configuré : …` / `503 <SMTP_SECURITY refusé, G-5>` → `422 Adresse email invalide :
+   « pas-un-mail ».` → `422 Objet requis, sur une seule ligne.` Canal `linkedin` : `409` identifiants
+   (`require_credentials()`).
+4. **Réservation** (`services.reserve_message()`, transaction de `backend/03` § 5.1) : `429 Plafond quotidien
+   atteint (15 messages par jour) : …` (+ `Retry-After`, G-2) décidé **dans** la transaction, le plus souvent
+   avant toute autre écriture ; `404` si la candidature a disparu entre temps (filet de sécurité, improbable après
+   le contrôle 1). Canal `linkedin` seulement, **après** la réservation : `409` blocage (`require_not_blocked()`).
+5. `409 Un envoi est déjà en cours pour cette candidature.` Si cette erreur (ou toute autre, y compris une erreur
+   serveur) survient après la réservation mais avant la création de la tâche, la réservation est **supprimée**
+   (`services.release_message()`, pas de trace dans `outreach_messages`). Si la tâche est créée mais annulée avant
+   d'avoir démarré (ex. attente du verrou navigateur interrompue), la réservation passe en `échec` (`on_abort`,
+   `backend/05` § 1.2) plutôt que d'être supprimée : la place est rendue dans les deux cas, mais la trace diffère.
+6. `[CIBLE]` dans la transaction : `409 Ce destinataire a demandé à ne plus être contacté.` ;
    `428` (canal `linkedin`). Le pied de conformité (origine de l'adresse + désinscription) est **ajouté par le serveur** après le corps saisi (cf. `05-queues-and-integrations.md`) : il n'est jamais exigé dans `body`, donc pas de `422` à ce titre.
 
+Au début de la tâche (`services.send_message`), la réservation et le plafond sont revérifiés
+(`_confirm_reservation()`, `FOR UPDATE` sur `user_settings`) : un plafond abaissé entre la réservation et
+l'exécution lève `activity.QuotaExceeded` et marque la réservation `échec`, sans envoi.
+
 Résultat de tâche : email `{"channel": "email", "to": "jane@acme.com", "subject": "Candidature — Senior Python Developer", "attachments": ["cv.pdf"]}` ;
-LinkedIn `{"channel": "linkedin", "mode": "message" | "connexion", "to": "https://www.linkedin.com/in/jane-doe/", "truncated": false}`.
+LinkedIn `{"channel": "linkedin", "mode": "message" | "connexion", "to": "https://www.linkedin.com/in/jane-doe/", "truncated": false}`. Si l'envoi LinkedIn échoue **après** le clic sur « Envoyer » sans confirmation visible
+(page qui ne se vide pas, exception pendant l'attente), l'exception `outreach.UncertainDelivery` laisse la
+réservation `confirmé` avec `error` renseigné (« à vérifier » côté UI) au lieu de `échec` : elle compte toujours
+dans le plafond et n'est **jamais** renvoyée automatiquement (cf. `05` § 2.4).
 
 Entrée de candidature (`GET /api/applications`) :
 ```json

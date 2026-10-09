@@ -57,8 +57,10 @@ npx tsc --noEmit       # contrôle de types seul
 docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
 # LM_DATABASE_URL (et non DATABASE_URL, déjà lu par email_analyzer dans le même .env)
 
-# Tests (hors ligne, ~2 min). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
-# sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré).
+# Tests (hors ligne, ~2 min, 191 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
+# sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré). Depuis la
+# vague 2, conftest retire du processus LINKEDIN_*/SMTP_*/ANTHROPIC_API_KEY (identifiants réels du .env racine) :
+# aucune tâche lancée par un test ne peut se connecter à un vrai service.
 # Démarrage (CLI et web) : alembic upgrade head -> utilisateur unique -> import des JSON historiques -> tâches non finales en échec.
 # LM_DATABASE_URL=<url> .venv/bin/alembic -c linkedin_market/alembic.ini check    # modèles == migrations
 LM_TEST_DATABASE_URL=postgresql+psycopg://<user>:<mdp>@127.0.0.1:<port>/linkedin_market_test .venv/bin/python -m pytest linkedin_market/tests
@@ -92,9 +94,12 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
 - **I-06** Checkpoint, authwall, CAPTCHA, perte de session ⇒ **arrêt immédiat**, événement `blocked`, repos de 6 h.
   **Aucun contournement** : seule la vérification manuelle par l'utilisateur dans la fenêtre visible est permise.
 - **I-07** Plafonds de prudence (`prudent` 15 / `normal` 30 / `agressif` 60 éléments par type) et plafonds
-  quotidiens (`apply_daily_max`, `message_daily_max`) jamais dépassés ; contrôle à l'API **et** au début de la tâche.
-  Décidé (E-3) : `max_items` ≤ plafond de la prudence choisie, prudence par défaut `prudent` : `CHECK` en
-  base et défaut `[ACTUEL]` (vague 1), contrôle 422 à l'API et `min()` dans `pipeline` `[CIBLE]` (vague 2).
+  quotidiens (`apply_daily_max`, `message_daily_max`) jamais dépassés ; contrôle à l'API **et** au début de la
+  tâche, `[ACTUEL]` depuis la vague 2 : `max_items` ≤ plafond de la prudence choisie (422 à l'API/réglages,
+  garde défensive `pipeline.capped()`), prudence par défaut `prudent` (`CHECK` en base depuis la vague 1). Plafond
+  `apply` revérifié sous `FOR UPDATE` au début de la tâche (`activity.check_quota_locked`) ; plafond de messages
+  réservé en base avant l'envoi (transaction unique, `backend/03` § 5.1), place rendue sur échec ou annulation
+  avant démarrage, jamais sur un envoi « à vérifier » (`outreach.UncertainDelivery`).
 - **I-08** Uniquement le propre compte de l'utilisateur : ni faux compte, ni compte partagé, ni rotation.
 - **I-09** Minimisation : un profil tiers (`person`) ne garde que titre + compétences ; aucune donnée sensible
   (art. 9 RGPD).
@@ -163,7 +168,11 @@ touche un invariant ou un risque se soumet à l'utilisateur avant le code.
 ## Tests
 - Tout changement de comportement s'accompagne d'un test **pytest** dans `linkedin_market/tests/`.
 - Tests **hors ligne** : fixtures HTML (`tests/fixtures/`), doublures ; aucun appel réel à LinkedIn, France
-  Travail, Claude ou SMTP. La fixture `conftest.data_dir` isole les données dans `tmp_path`.
+  Travail, Claude ou SMTP. La fixture `conftest.data_dir` isole les données dans `tmp_path`. Depuis la vague 2,
+  `pytest_configure` retire aussi les identifiants réels (`LINKEDIN_EMAIL`, `LINKEDIN_PASSWORD`, `SMTP_HOST`,
+  `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_SECURITY`, `ANTHROPIC_API_KEY`) de l'environnement
+  du processus de test (`tests/conftest.py`, `_REAL_SECRETS`) : un test qui en a besoin pose une valeur factice
+  avec `monkeypatch.setenv`.
 - Lancer la suite complète avant de conclure ; `npx tsc --noEmit` (ou `npm run build`) après toute modification du front.
 
 ## Marqueurs `[ACTUEL]` / `[CIBLE]`

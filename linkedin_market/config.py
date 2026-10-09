@@ -6,6 +6,7 @@ du projet) pour fonctionner à l'identique sous Linux et Windows.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,8 @@ try:
     from dotenv import load_dotenv
 except ImportError:  # python-dotenv est optionnel
     load_dotenv = None
+
+log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if load_dotenv is not None:
@@ -96,9 +99,23 @@ def headless() -> bool:
     return os.environ.get("LINKEDIN_HEADLESS", "0").strip() in ("1", "true", "yes")
 
 
+INTERPRETERS = ("claude", "local")
+
+
 def interpreter_name() -> str:
-    """``claude`` (défaut), ``local`` (modèle entraîné) ou ``none``."""
-    return (os.environ.get("LINKEDIN_INTERPRETER") or "claude").strip().lower()
+    """``claude`` (défaut) ou ``local`` (modèle entraîné).
+
+    ``none`` (ancienne valeur, E-7) est lu comme ``local`` : le mode local produit toujours une interprétation
+    (I-11).
+    """
+    name = (os.environ.get("LINKEDIN_INTERPRETER") or "claude").strip().lower()
+    if name == "none":
+        log.warning(
+            "LINKEDIN_INTERPRETER=none n'est plus accepté : interprète local utilisé. "
+            "Remplace-le par « local » ou « claude » dans le fichier .env."
+        )
+        return "local"
+    return name
 
 
 def anthropic_model() -> str:
@@ -121,6 +138,30 @@ def smtp_config() -> dict | None:
         "password": os.environ.get("SMTP_PASSWORD") or "",
         "from": sender,
     }
+
+
+SMTP_LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+SMTP_INSECURE_REMOTE = (
+    "SMTP_SECURITY=none n'est permis que vers un serveur SMTP local (127.0.0.1) : "
+    "choisis starttls ou ssl dans le fichier .env."
+)
+
+
+def smtp_security_error(smtp: dict) -> str | None:
+    """Message d'erreur si la connexion SMTP serait en clair vers un serveur distant (E-20, RGPD art. 32).
+
+    ``none`` (connexion sans chiffrement) n'est admise que vers un relais local (``127.0.0.1``, ``localhost``,
+    ``::1``) ; une valeur inconnue est refusée avec un message explicite.
+    """
+    if smtp["security"] in ("ssl", "starttls"):
+        return None
+    if smtp["security"] != "none":
+        return (
+            f"SMTP_SECURITY={smtp['security']} n'est pas reconnu : choisis starttls ou ssl dans le fichier .env "
+            "(none seulement pour un serveur SMTP local, 127.0.0.1)."
+        )
+    host = str(smtp["host"]).strip().lower().strip("[]")
+    return None if host in SMTP_LOCAL_HOSTS else SMTP_INSECURE_REMOTE
 
 
 DATABASE_URL_VAR = "LM_DATABASE_URL"

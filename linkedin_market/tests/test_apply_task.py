@@ -21,7 +21,10 @@ def client(monkeypatch):
     manager = TaskManager(persist=False)
     with TestClient(create_app(tasks=manager, token=None), base_url="http://127.0.0.1:8765") as c:
         yield c
-    manager.shutdown()
+    # Isolation : aucune tâche d'un test ne doit survivre au TRUNCATE du suivant (annulation puis attente de fin).
+    for task in manager.active():
+        manager.cancel(task.id)
+    manager.shutdown(wait=True)
 
 
 def prepare_entry(workdir, monkeypatch, url, status="préparée"):
@@ -62,7 +65,8 @@ def prepare_entry(workdir, monkeypatch, url, status="préparée"):
     return folder
 
 
-def wait_task(client, task_id, until, timeout=60):
+def wait_task(client, task_id, until, timeout=180):
+    """Relève la tâche jusqu'à ``until`` ; délai large : sous forte charge, Firefox met longtemps à se fermer."""
     end = time.time() + timeout
     while time.time() < end:
         task = client.get(f"/api/tasks/{task_id}").json()
@@ -123,7 +127,9 @@ def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir):
         else:
             answer = "12" if "years" in question["question"] else "Yes"
         assert client.post(f"/api/tasks/{task['id']}/answer", json={"value": answer}).status_code == 200
-        time.sleep(0.3)
+        # La réponse retire la question avant de rendre la main (TaskManager.answer) : le prochain relevé ne peut
+        # pas revoir cette question et y répondre une seconde fois (cause de l'instabilité sous charge).
+        assert client.get(f"/api/tasks/{task['id']}").json()["needs_input"] != question
 
     assert task["status"] == "terminée", task
     assert task["result"]["state"] == "postulée"

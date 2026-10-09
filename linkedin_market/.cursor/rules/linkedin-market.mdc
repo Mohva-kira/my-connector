@@ -34,7 +34,10 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
 - I-06 : sur checkpoint, authwall, CAPTCHA ou perte de session → arrêter, enregistrer `blocked`, repos 6 h.
   Aucune tentative de contournement ; seule la vérification manuelle de l'utilisateur est attendue.
 - I-07 : ne jamais dépasser les plafonds de prudence (15/30/60) ni les plafonds quotidiens ; contrôler à l'API
-  et au début de la tâche. `max_items` ≤ plafond de la prudence choisie ; prudence par défaut `prudent` (E-3).
+  et au début de la tâche (`[ACTUEL]` depuis la vague 2). `max_items` ≤ plafond de la prudence choisie ; prudence
+  par défaut `prudent` (E-3, résolu). Plafond `apply` revérifié sous `FOR UPDATE` au début de la tâche ; plafond
+  de messages réservé en base avant l'envoi (transaction unique, place rendue sur échec ou annulation avant
+  démarrage, jamais sur un envoi « à vérifier »).
 - I-08 : uniquement le compte personnel de l'utilisateur.
 - I-09, I-10 : pour un profil tiers, garder titre + compétences seulement ; purge 30 j (posts/profils), 90 j (offres).
 - I-11 : aucune donnée de tiers identifiable envoyée à Claude ; l'interprète local produit toujours un texte ;
@@ -46,7 +49,9 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
 - I-01, I-02, I-03 : `user_id` sur chaque table et dans chaque requête (PostgreSQL 18) ; rapports immuables
   (trigger `trg_reports_immutable`) ; pas de régression automatique de statut.
 
-E-4 tranché (option A) : `run` bloqué ⇒ `terminée`, rapport partiel, `result.blocked = true`.
+E-4 tranché (option A) : `run` bloqué ⇒ `terminée`, rapport partiel, `result.blocked = true` (`[ACTUEL]`).
+Vague 2 (2026-10-09) : E-3, E-4, E-5, E-7, E-10, E-11, E-12, E-20, E-22 résolus et retirés (`backend/01` § 1.2,
+`backend/02` § 4, `backend/05`).
 
 ## Ne pas trancher seul
 Aucun point en arbitrage au 2026-10-09. Tout nouveau point touchant un invariant ou un risque : demande la décision.
@@ -74,7 +79,9 @@ Aucun point en arbitrage au 2026-10-09. Tout nouveau point touchant un invariant
 ## Tests et vérifications (depuis la racine du dépôt)
 - Tout changement de comportement : test pytest, hors ligne (fixtures HTML, aucun appel réel à LinkedIn,
   France Travail, Claude ou SMTP). `LM_TEST_DATABASE_URL=<base _test> .venv/bin/python -m pytest linkedin_market/tests`
-  (0 test ignoré exigé). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`, réservé à email_analyzer).
+  (0 test ignoré exigé, ~2 min, 191 tests). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`,
+  réservé à email_analyzer). Depuis la vague 2, `conftest.py` retire aussi `LINKEDIN_*`/`SMTP_*`/`ANTHROPIC_API_KEY`
+  de l'environnement du processus de test : aucune tâche lancée par un test ne peut atteindre un vrai service.
 - Front : `npx tsc --noEmit` ou `npm run build` dans `linkedin_market/web/frontend`. `npm run lint` (ESLint 9, 0 erreur et 0 avertissement exigés).
 
 ## Maintenance

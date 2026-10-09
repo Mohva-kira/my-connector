@@ -211,7 +211,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seniority", choices=list(matching.nlp.SENIORITY_LEVELS))
     p.add_argument("--no-scrape", action="store_true", help="réanalyser l'historique sans aller sur LinkedIn")
     p.add_argument("--label", type=int, default=None, help="nombre d'offres à annoter (0 = aucune)")
-    p.add_argument("--interpreter", choices=["claude", "local", "none"], help="défaut : LINKEDIN_INTERPRETER ou claude")
+    p.add_argument("--interpreter", choices=list(config.INTERPRETERS), help="défaut : LINKEDIN_INTERPRETER ou claude")
     p.add_argument("--apply", action="store_true", help="aller directement à la préparation des candidatures")
     p.add_argument(
         "--apply-min-score",
@@ -240,7 +240,13 @@ def main(argv: list[str] | None = None) -> None:
         want_profile = request.profile_source == "linkedin" or (
             request.profile_source == "auto" and profile_mod.find_profile_file() is None
         )
-        linkedin_text = scrape(request, want_profile)
+        outcome = scrape(request, want_profile)
+        linkedin_text = outcome.profile_text
+        if outcome.blocked:
+            log.warning(
+                "Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées. "
+                "Actions navigateur suspendues 6 h ; vérifie ton compte dans un navigateur normal avant de relancer."
+            )
     try:
         prof = build_profile(request, linkedin_text)
     except ProfileMissingError as exc:

@@ -91,3 +91,43 @@ def test_logs_captured_only_for_own_thread():
     joined = "\n".join(task.logs)
     assert "dans la tâche" in joined and "direct" in joined and "hors tâche" not in joined
     manager.shutdown(wait=True)
+
+
+def test_answer_removes_question_before_returning():
+    """Une seule réponse par question : après ``answer()``, la question n'est plus visible (test déterministe)."""
+    manager = TaskManager()
+    gate = threading.Event()
+
+    def two_questions(ctx):
+        first = ctx.ask("Première ?", "q1")
+        gate.wait(5)  # la tâche ne reprend la main qu'après les vérifications ci-dessous
+        return first, ctx.ask("Seconde ?", "q2")
+
+    task = manager.submit("run", "ask", two_questions)
+    assert wait_for(lambda: task.status == INPUT)
+    assert manager.answer(task.id, "1")
+    assert task.needs_input is None and task.status != INPUT  # plus de question périmée à relire
+    assert not manager.answer(task.id, "réponse en double")  # refusée, ne peut pas viser la question suivante
+    gate.set()
+    assert wait_for(lambda: task.status == INPUT and task.needs_input["field"] == "q2")
+    assert manager.answer(task.id, "2")
+    assert wait_for(lambda: task.status == DONE)
+    assert task.result == ("1", "2")
+    manager.shutdown(wait=True)
+
+
+def test_on_abort_only_when_function_never_started():
+    manager = TaskManager()
+    gate, aborted = threading.Event(), []
+    holder = manager.submit("rescore", "occupe", lambda ctx: gate.wait(5), browser=True)
+    waiting = manager.submit(
+        "message", "attend", lambda ctx: "envoyé", browser=True, on_abort=lambda: aborted.append(1)
+    )
+    assert wait_for(lambda: holder.status == "en_cours")
+    assert manager.cancel(waiting.id)
+    assert wait_for(lambda: waiting.status == CANCELLED)
+    gate.set()
+    ran = manager.submit("message", "démarre", lambda ctx: 1 / 0, on_abort=lambda: aborted.append(2))
+    assert wait_for(lambda: ran.status == FAILED and holder.status == DONE)
+    assert aborted == [1]  # rien pour une tâche dont la fonction a démarré, même en échec
+    manager.shutdown(wait=True)

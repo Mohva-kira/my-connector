@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote_plus
 
@@ -145,15 +146,26 @@ def _scroll(driver, caution: config.Caution, times: int = 3) -> None:
 
 
 class LinkedInScraper:
-    def __init__(self, driver, request: SearchRequest):
+    """Collecte page par page.
+
+    ``check`` est appelé avant chaque chargement de page : il lève une exception si l'utilisateur a annulé (E-22).
+    Après un blocage (``blocked``), plus aucune page n'est chargée (I-06). ``partial`` contient les éléments déjà
+    construits par la méthode de collecte en cours (conservés si elle est interrompue).
+    """
+
+    def __init__(self, driver, request: SearchRequest, *, check: Callable[[], None] | None = None):
         self.driver = driver
         self.request = request
         self.caution = config.CAUTION_LEVELS.get(request.caution, config.CAUTION_LEVELS[config.DEFAULT_CAUTION])
         self.now = datetime.now(UTC)
+        self._check = check or (lambda: None)
+        self.blocked = False
+        self.partial: list[Item] = []
 
     def _blocked(self) -> bool:
         url = self.driver.current_url
         if "/checkpoint" in url or "/authwall" in url or "/login" in url:
+            self.blocked = True
             log.error(
                 "LinkedIn a interrompu la navigation (%s). Arrêt de la collecte : "
                 "relance plus tard avec le niveau « prudent ».",
@@ -163,6 +175,9 @@ class LinkedInScraper:
         return False
 
     def _get(self, url: str) -> bool:
+        if self.blocked:
+            return False  # arrêt immédiat après un blocage (I-06)
+        self._check()
         try:
             self.driver.get(url)
         except WebDriverException as exc:
@@ -173,6 +188,7 @@ class LinkedInScraper:
 
     # ----------------------------------------------------------- offres
     def jobs(self) -> list[Item]:
+        self.partial = []
         keyword = quote_plus(self.request.keyword)
         params = f"keywords={keyword}&f_TPR=r{config.TREND_WINDOW_DAYS * 86400}"
         if self.request.remote_only:
@@ -195,7 +211,7 @@ class LinkedInScraper:
         job_ids = job_ids[: self.request.max_items]
         log.info("%d offres trouvées, lecture du détail...", len(job_ids))
 
-        items = []
+        items = self.partial = []
         for job_id in job_ids:
             url = f"https://www.linkedin.com/jobs/view/{job_id}/"
             if not self._get(url):
@@ -247,6 +263,7 @@ class LinkedInScraper:
 
     # ------------------------------------------------------------ posts
     def posts(self) -> list[Item]:
+        self.partial = []
         keyword = quote_plus(self.request.keyword)
         url = (
             f"https://www.linkedin.com/search/results/content/?keywords={keyword}"
@@ -287,6 +304,7 @@ class LinkedInScraper:
 
     # ---------------------------------------------------------- profils
     def people(self) -> list[Item]:
+        self.partial = []
         keyword = quote_plus(self.request.keyword)
         cards: dict[str, str] = {}
         page = 1

@@ -180,3 +180,18 @@ def test_linkedin_profile_without_message_or_connect(driver, local_profiles):
 def test_linkedin_rejects_non_profile_urls():
     with pytest.raises(outreach.OutreachError, match="Profil LinkedIn invalide"):
         outreach.send_linkedin_message(None, "https://evil.example.com/in/x", "Bonjour", CAUTION)
+
+
+def test_linkedin_exception_after_send_click_is_uncertain(driver, local_profiles):
+    """Après le clic sur « Envoyer », une annulation ou une erreur ne peut pas être classée « non envoyé »."""
+
+    def cancel_after_send():
+        if driver.execute_script("return window.__sent"):
+            raise RuntimeError("Tâche annulée.")
+
+    driver.get("about:blank")
+    with pytest.raises(outreach.UncertainDelivery, match="n'a pas pu être confirmé"):
+        outreach.send_linkedin_message(
+            driver, url_of("profile_first_degree.html"), "Bonjour", CAUTION, check=cancel_after_send, timeout=5
+        )
+    assert driver.execute_script("return window.__sent") == "Bonjour"

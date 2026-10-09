@@ -14,6 +14,7 @@ from datetime import date, datetime, time, timedelta
 from .db import utc_iso, utcnow
 from .db.models import ActivityEvent
 from .db.repositories import activity as activity_repo
+from .db.repositories import settings as settings_repo
 from .db.repositories import user_transaction
 
 
@@ -42,13 +43,17 @@ def _local_today() -> date:
     return datetime.now().astimezone().date()
 
 
+def day_bounds(today: date | None = None) -> tuple[datetime, datetime]:
+    """Minuit local du jour, minuit local du lendemain (plafonds quotidiens)."""
+    day = today or _local_today()
+    return _local_midnight(day), _local_midnight(day + timedelta(days=1))
+
+
 def count_today(*kinds: str, today: date | None = None) -> int:
     """Événements des types donnés depuis minuit local (plafonds quotidiens, I-07)."""
-    day = today or _local_today()
+    start, end = day_bounds(today)
     with user_transaction() as (s, uid):
-        return activity_repo.count_between(
-            s, uid, kinds, _local_midnight(day), _local_midnight(day + timedelta(days=1))
-        )
+        return activity_repo.count_between(s, uid, kinds, start, end)
 
 
 def per_day(days: int = 14, today: date | None = None) -> list[dict]:
@@ -77,6 +82,20 @@ class QuotaExceeded(Exception):
 
 def check_quota(kinds: tuple[str, ...], limit: int, label: str) -> None:
     if count_today(*kinds) >= limit:
+        raise QuotaExceeded(label, limit)
+
+
+def check_quota_locked(kinds: tuple[str, ...], limit_key: str, label: str) -> None:
+    """Plafond revérifié au début d'une tâche (I-07, ``backend/03`` § 5.2).
+
+    ``FOR UPDATE`` sur ``user_settings`` : le plafond est relu à jour et le comptage se fait dans la même
+    transaction, sérialisé avec les autres contrôles de plafond.
+    """
+    start, end = day_bounds()
+    with user_transaction() as (s, uid):
+        limit = settings_repo.get_settings(s, uid, lock=True)[limit_key]
+        used = activity_repo.count_between(s, uid, kinds, start, end)
+    if used >= limit:
         raise QuotaExceeded(label, limit)
 
 

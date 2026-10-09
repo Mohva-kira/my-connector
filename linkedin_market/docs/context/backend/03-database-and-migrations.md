@@ -1,8 +1,9 @@
 # Base de Données, Modélisation & Migrations
 
-> **Statut (acceptation de la vague 1, 2026-10-09)** : §§ 1 à 4 et 8 `[ACTUEL]` sauf mention `[CIBLE]` ; § 5
-> (transactions par cas d'usage, vague 2), § 6 (purge, vague 6) et la sauvegarde automatique du § 7 restent
-> `[CIBLE]`. Le schéma de référence est
+> **Statut** : §§ 1 à 4 et 8 `[ACTUEL]` depuis l'acceptation de la vague 1 (2026-10-09) ; § 5.1 (réservation de
+> message) et § 5.2 (plafond `apply`) `[ACTUEL]` depuis l'acceptation de la vague 2 (2026-10-09) ; le reste de la
+> généralisation « transaction par cas d'usage », § 6 (purge, vague 6) et la sauvegarde automatique du § 7
+> restent `[CIBLE]`. Le schéma de référence est
 > `schemas-architecture/03-database-erd.md` (tables, colonnes, contraintes, rétention, correspondance des
 > fichiers). Ce document fixe **comment** l'implémenter.
 
@@ -42,9 +43,10 @@ def dispose_engine() -> None: ...
 sauvegarde de `matching.MatchingModel`, `TaskManager`) **gardent leurs signatures publiques** et deviennent des
 façades : chaque fonction ouvre une transaction courte (`with db.session.transaction() as s:`), résout
 `user_id` (`db.users.current_user_id(s)`) et délègue à `db/repositories/*`. Aucune `Session` ne traverse un
-thread ni une navigation Selenium. La dépendance FastAPI `get_db` et les transactions par cas d'usage du § 5
-(réservation de message, E-11) arrivent en vague 2 ; seule exception dès la vague 1 : `advance_status()` lit et
-écrit le statut dans **une** transaction avec `SELECT … FOR UPDATE` (I-03).
+thread ni une navigation Selenium. La dépendance FastAPI `get_db` reste `[CIBLE]` ; la transaction par cas d'usage
+de la réservation de message (§ 5.1, E-11) et celle du plafond `apply` (§ 5.2) sont livrées en vague 2, en passant
+par les façades existantes (`user_transaction()`), pas par une dépendance FastAPI dédiée. Autre exception dès la
+vague 1 : `advance_status()` lit et écrit le statut dans **une** transaction avec `SELECT … FOR UPDATE` (I-03).
 
 ## 2. Conventions de Schéma
 
@@ -321,12 +323,15 @@ Les messages `confirmé` comptent dans le plafond : un envoi réservé puis éch
 
 ## 5. Transactions Critiques
 
-### 5.1 Réservation d'un message (`EnvoyerMessage`)
+### 5.1 Réservation d'un message (`EnvoyerMessage`) `[ACTUEL]` (vague 2, G-6/E-11)
+Implémentée par `web/services.reserve_message()` (ORM SQLAlchemy, pas de SQL brut) et
+`db/repositories/outreach.py` ; équivalent fonctionnel :
 ```sql
 BEGIN;
 SELECT id FROM applications WHERE id = :app AND user_id = :uid FOR UPDATE;          -- un envoi à la fois par candidature
 SELECT message_daily_max FROM user_settings WHERE user_id = :uid FOR UPDATE;         -- sérialise le plafond (E-11)
-SELECT 1 FROM suppression_list WHERE user_id = :uid AND recipient_hash = :h;         -- trouvé ⇒ ROLLBACK + 409 (I-13)
+-- [CIBLE] vague 4 : SELECT 1 FROM suppression_list WHERE user_id = :uid AND recipient_hash = :h ;
+--                   trouvé ⇒ ROLLBACK + 409 (I-13) — absent à ce jour.
 SELECT count(*) FROM outreach_messages WHERE …;                                      -- ≥ plafond ⇒ ROLLBACK + 429
 INSERT INTO outreach_messages (…, status) VALUES (…, 'confirmé') RETURNING id;
 COMMIT;
@@ -340,13 +345,37 @@ INSERT INTO application_events (application_id, kind, details) VALUES (:app, 'me
 INSERT INTO activity_events (user_id, kind, data) VALUES (:uid, 'message_email', :data);
 COMMIT;
 ```
-`recipient_hash` = `sha256(lower(trim(email)))` ou `sha256(url de profil normalisée sans paramètres ni « / » final)`.
+`recipient_hash` = `sha256(lower(trim(email)))` ou `sha256(url de profil normalisée sans paramètres ni « / » final)`
+(utilisé seulement à partir de la vague 4, pas encore en base).
+
+Précisions livrées (`db/repositories/outreach.py::count_day`, `insert_confirmed`, `mark_sent`, `mark_failed`,
+`note_uncertain`, `release`) :
+- **Comptage du jour** = `max(réservations du jour dans outreach_messages hors status='échec', événements
+  message_email/message_linkedin du jour dans activity_events)`. Le second terme couvre la **transition** : des
+  messages envoyés avant l'existence de la réservation (vague 1 et avant) n'existent que comme événements
+  d'activité, jamais l'inverse (chaque réservation produit aussi un événement à l'envoi) — un simple `count(*)`
+  sur `outreach_messages` sous-compterait ces anciens envois le jour du passage à la vague 2.
+- **Libération si la tâche n'a jamais démarré** : deux cas distincts.
+  - La création de la tâche échoue de façon synchrone dans le routeur (ex. `409` « Un envoi est déjà en cours »,
+    déclenché par `has_active()` *après* la réservation) : la ligne est **supprimée**
+    (`outreach_repo.release`, `DELETE … WHERE status='confirmé' AND sent_at IS NULL`) — aucune trace.
+  - La tâche est créée mais annulée avant que sa fonction démarre (attente du verrou navigateur interrompue,
+    `TaskManager.submit(..., on_abort=...)`, `backend/05` § 1.2) : la réservation passe en `échec` avec
+    `error = "Tâche annulée avant l'envoi."` (`outreach_repo.mark_failed` via `services.abort_message`) — la
+    tentative reste visible, la place est rendue au plafond.
+- **`outreach.UncertainDelivery`** (envoi LinkedIn dont la confirmation visuelle n'a pas pu être vérifiée après le
+  clic sur « Envoyer », cf. `05` § 2.4) : `note_uncertain()` laisse `status='confirmé'` (pas `envoyé`, pas
+  `échec`) et renseigne `error` — affiché « à vérifier » côté UI, compte toujours dans le plafond du jour,
+  **jamais** renvoyé automatiquement (I-04, aucune relance d'un envoi, `backend/05` § 1.6).
+- Le champ `contact_id` de la réservation est résolu à l'insertion (`outreach_repo.find_contact`, recherche par
+  email ou URL de profil parmi les `company_contacts` de la candidature) ; `mark_sent()` l'utilise pour repousser
+  `last_contacted_at` / `purge_after` du contact (I-14).
 
 ### 5.2 Autres transactions
 | Cas | Contenu de la transaction |
 | :--- | :--- |
 | Changement de statut manuel | `FOR UPDATE` sur `applications` + `UPDATE` + `INSERT application_events(kind='status')`. |
-| Candidature soumise | `FOR UPDATE` sur `user_settings` + contrôle `count(apply du jour)` au **démarrage** de la tâche ; à la fin : statut + `apply_state` + `labels` (valeur 1) + `activity_events('apply')`. |
+| Candidature soumise `[ACTUEL]` (vague 2) | `FOR UPDATE` sur `user_settings` (`activity.check_quota_locked`) + contrôle `count(apply du jour)` au **démarrage** de la tâche (`services.apply_job`, avant tout accès au dossier) ; à la fin : statut + `apply_state` + `labels` (valeur 1) + `activity_events('apply')`. |
 | Consentement | `UPDATE source_consents SET revoked_at = now() WHERE … AND revoked_at IS NULL` + `INSERT`. |
 | Activation d'un modèle `[ACTUEL]` | `FOR UPDATE` sur `user_settings` + `UPDATE matching_models SET is_active = false WHERE user_id = :uid AND is_active` + `INSERT … (version = max+1, is_active = true)`. |
 | Collecte `[ACTUEL]` | insertion par lots de 100 (`ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE SET title, text, skills, keywords = anciens ∪ nouveaux, collected_at, purge_after` — ce dernier reste `NULL` s'il l'était) — une transaction par lot pour ne pas perdre une collecte interrompue. |
@@ -402,7 +431,11 @@ Le nombre de lignes supprimées par table est journalisé (sans contenu).
 - `pytest` utilise une base PostgreSQL 18 jetable (`LM_TEST_DATABASE_URL`, service `postgres:18` en CI,
   lot 1 `04` § 6) ; le nom de la base **doit finir par `_test`** et l'URL **différer de `LM_DATABASE_URL`**,
   sinon la session pytest s'arrête (protection de la vraie base). `LM_SECRET_KEY` éphémère générée par la
-  fixture ; l'écriture d'une clé dans `.env` est refusée sous pytest. Schéma : `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` puis `alembic upgrade head`
+  fixture ; l'écriture d'une clé dans `.env` est refusée sous pytest. `[ACTUEL]` (vague 2) : `pytest_configure`
+  retire aussi du processus les identifiants réels du `.env` racine (`LINKEDIN_EMAIL`, `LINKEDIN_PASSWORD`,
+  `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_SECURITY`, `ANTHROPIC_API_KEY`) : sans
+  eux, aucune tâche lancée par un test ne peut se connecter à un vrai service ; un test qui en a besoin pose une
+  valeur factice avec `monkeypatch.setenv`. Schéma : `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` puis `alembic upgrade head`
   une fois par session (teste aussi `0001`). Isolation : avant chaque test marqué `db`, `TRUNCATE` de toutes les
   tables sauf `sources` et `alembic_version` (`RESTART IDENTITY CASCADE`) puis création de l'utilisateur de test.
   Pas de transaction annulée : les tâches tournent dans des threads du `TaskManager`, qui ouvrent leurs propres
