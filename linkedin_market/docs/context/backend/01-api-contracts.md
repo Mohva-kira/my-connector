@@ -110,7 +110,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
   "browser": true,
   "created_at": "2026-10-08T14:32:04Z",
   "started_at": "2026-10-08T14:32:04Z",
-  "finished_at": ""
+  "finished_at": null
 }
 ```
 
@@ -121,7 +121,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | `error` | chaîne | Message de l'exception (`str(exc)`) en `échec` ; `"Tâche annulée."` en `annulée`. |
 | `needs_input` | `null` ou `{question, field, options, suggestion, review}` | Non nul uniquement en `attente_saisie`. `field` commençant par `confirm` = confirmation d'une action irréversible ; `review` = texte à relire (≤ 3 500 caractères). |
 | `logs` | liste de chaînes `HH:MM:SS message` | 400 lignes au plus (`MAX_LOG_LINES`). |
-| `created_at`, `started_at`, `finished_at` | chaîne ISO ou `""` | `""` tant que l'étape n'est pas atteinte. |
+| `created_at`, `started_at`, `finished_at` | chaîne ISO UTC `Z` ou `null` | `null` tant que l'étape n'est pas atteinte (C-2, vague 1). |
 
 ## 3. Headers HTTP Standards
 
@@ -152,7 +152,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | `405 Method Not Allowed` | Méthode non `GET` sur une route `/api/…` inexistante (capturée par la route SPA `GET /{path:path}`). |
 | `409 Conflict` | Tâche du même type déjà active ; identifiants LinkedIn absents ; blocage en cours ; aucune analyse disponible ; candidature déjà postulée ; tâche qui n'attend pas de réponse ou déjà terminée. `[CIBLE]` destinataire en liste d'opposition, `risk_version` périmée. |
 | `422 Unprocessable Entity` | Corps invalide (Pydantic) **et** règle métier de validation : réglage hors bornes, statut inconnu, `value` d'annotation, confirmation absente, adresse/objet invalides, test SMTP vers un tiers, mot-clé vide. |
-| `428 Precondition Required` | `[CIBLE]` action navigateur sans consentement actif à la version courante des risques de la source (I-16). Corps : `{"detail": "…", "source": "linkedin", "risk_version": "2026-10"}` — le frontend ouvre la popup de cette source puis rejoue la requête une fois. |
+| `428 Precondition Required` | `[CIBLE]` action navigateur sans consentement actif à la version courante des risques de la source (I-16). Corps : `{"detail": "…", "source": "linkedin", "risk_version": "2026-10"}` — le frontend ouvre la popup de cette source ; **aucun rejeu automatique** (décision du 2026-10-09) : après acceptation, un bandeau « Relancer : {action} » attend un clic explicite ; pour un message, la relance rouvre la relecture et n'envoie rien (I-04). |
 | `429 Too Many Requests` | Plafond quotidien atteint (`apply_daily_max`, `message_daily_max`). |
 | `500 Internal Server Error` | Dossier de candidature hors du répertoire de données (`ValueError` de `folder_of`) ; toute exception non rattrapée. |
 | `502 Bad Gateway` | `POST /api/smtp/test` : le serveur SMTP refuse ou échoue (`OutreachError`). |
@@ -469,7 +469,9 @@ Types d'historique écrits par le code : `statut`, `candidature`, `contacts`, `m
     frontend peut en envoyer une par coordonnée (idempotent, `201` à chaque fois). Ainsi un échec réseau entre deux
     requêtes ne laisse jamais une coordonnée effacée mais non bloquée.
   - **V4-2 — message de `reason`** (G-1, `literal_error`) : `422 reason : doit être l'un de : désinscription,
-    refus_oral, plainte` (sans point final, comme tous les messages Pydantic traduits par G-1).
+    refus_oral, plainte` (sans point final, comme tous les messages Pydantic générés traduits par G-1). En revanche
+    `422 recipient : adresse email ou URL de profil LinkedIn attendue.` garde son point : c'est le message d'un
+    validateur (`value_error`), repris tel quel par G-1 (confirmé à la contre-revue du 2026-10-09).
   - **V4-3 — validation de `recipient`** (après `strip()`) : email = `outreach._EMAIL`
     (`^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$`) **ou** URL = `outreach._PROFILE_URL`
     (`^https://([a-z]{2,3}\.)?linkedin\.com/in/[^/?#\s]+`, correspondance de préfixe `re.match`) ; sinon le `422`
@@ -477,8 +479,8 @@ Types d'historique écrits par le code : `statut`, `candidature`, `contacts`, `m
   - **V4-4 — assemblage corps + pied** : séparateur **`"\n\n"`** (2 caractères) sur les deux canaux :
     `texte = body.rstrip() + "\n\n" + footer`. Note de connexion LinkedIn (`LINKEDIN_NOTE_MAX = 300`, comptés en
     caractères Unicode = `len()` Python) : si `len(body.rstrip()) + 2 + len(footer) > 300`, le corps est tronqué à
-    `300 − 2 − len(footer)` caractères (puis `rstrip()`), le pied est toujours conservé entier, `result.truncated =
-    true`. Message direct (relation de 1er degré) : aucune troncature. Le frontend compte de la même façon
+    `300 − 2 − len(footer)` caractères (puis `rstrip()`), **sans ajout de « … »** (remplace la troncature actuelle
+    `note[:299] + "…"` d'`outreach.py`), le pied est toujours conservé entier, `result.truncated = true`. Message direct (relation de 1er degré) : aucune troncature. Le frontend compte de la même façon
     (`Array.from(s).length`, pas `s.length`).
 - **`Contact`** (lecture) ajoute `opposed: bool` (`opposed_at IS NOT NULL`) et `collected_at` (UTC `Z`), pour la
   ligne « Origine de l'adresse » ; `PATCH contacts` ignore `opposed` et ne peut pas réécrire l'email ni l'URL d'un

@@ -14,11 +14,16 @@
 | **État local** | `useState` | Formulaires (brouillons), onglet actif, modales ouvertes, filtres, sélection de rapport, compétences ajoutées depuis Marché (`added`). |
 | **Secret** | Constante module `token` dans `api.ts` | Jeton local lu une fois dans `<meta name="lm-token">`, jamais stocké ailleurs. |
 
-`[CIBLE]` :
-- filtres de la page Offres et rapport de Marché dans les **paramètres de recherche d'URL** (`useSearchParams`)
-  pour survivre au rechargement et pouvoir être partagés entre onglets ;
-- pas de store global supplémentaire : le contexte `TaskProvider` suffit ; un second contexte
-  `SourceConsentProvider` porte la file d'attente de la popup de risques (action en attente + source).
+`[ACTUEL]` (vagues 2 à 7, revue du 2026-10-09) :
+- filtres de la page Offres (`/offres?q=&min_score=&label=&status=`) et rapport de Marché (`/marche?rapport=`) dans
+  l'URL (`useSearchParams`) ;
+- pas de store global supplémentaire ni de `SourceConsentProvider` : la popup de risques est portée par
+  `ConsentGate` (état local de `App.tsx`, abonné à `onConsentRequired()` d'`api.ts`, pour les 428) et par
+  `useConsentGuard()` (état local de l'appelant, pour la popup **préventive**) ;
+- jeton périmé (401) : drapeau module `tokenExpired` de `hooks.ts` lu par `useSyncExternalStore`
+  (`useTokenExpired`) ;
+- mémoire d'un message interrompu par un 428 (`ComposeInitial` : canal, destinataire, objet, corps, pièce jointe ;
+  **jamais** `confirm`) dans l'état de `ConsentGate`, pour rouvrir la relecture.
 
 ## 2. Stratégie de Requêtage (Query & Mutations)
 
@@ -34,6 +39,24 @@ new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retr
 - Mutations : options par défaut (pas de `retry`).
 
 ### 2.2 Clés de cache et intervalles `[ACTUEL]`
+
+> **Vague 3 (frontend)** : clé `sources` (`GET /api/sources`, sans intervalle, invalidée après acceptation,
+> révocation et `block/clear`) ; bandeaux de blocage par source lus dans `sources[].blocked`. Repli temporaire sur
+> `/api/status.blocked` si `GET /api/sources` répond 404 — **à retirer en vague 4** (le backend de la vague 3 sera
+> livré).
+
+
+> **Vague 7, partie 1 `[ACTUEL]`** (le tableau ci-dessous décrit l'état d'avant) :
+> - `useTask` s'arrête quand la tâche est finale ; `useTasks` interroge toutes les 2 s s'il existe une tâche non
+>   finale, **sinon toutes les 15 s** (décision 2026-10-08 : capte une tâche lancée depuis un autre onglet) ;
+> - `invalidateAfterTask(client, task)` invalide selon `task.kind` (§ 2.3) ;
+> - `useJobs` : anti-rebond de 300 ms sur `q` (`useDebouncedValue`) et `placeholderData: keepPreviousData` ;
+> - filtres de la page Offres dans l'URL (`useSearchParams`).
+> Vague 7, partie 2 `[ACTUEL]` : `useLabelJob()` invalide `["jobs"]`, `["report"]`, `["monitor"]` (Offres et Marché) ;
+> `/marche?rapport=`. Vagues 3-4 `[ACTUEL]` côté UI (backend `[CIBLE]`) : `useSources()` `["sources"]` sans
+> intervalle ; `ComposeModal` lit `["message-draft", app.id, to]` (`staleTime: 0`, `gcTime: 0`) à chaque relecture.
+> Tous les hooks passent par `useLiveQuery` : requête et intervalle suspendus après un 401.
+
 
 Toutes les fonctions passent par `api<T>(path)` (préfixe `/api`). Les clés sont **plates** (pas de hiérarchie
 `[domaine, "list", filtres]`).
@@ -67,10 +90,26 @@ Requête hors cache : `ComposeModal` charge le brouillon par `api(…/message-dr
 - La recherche texte de la page Offres déclenche une requête **à chaque frappe** (clé `["jobs", query]`).
   `[CIBLE]` anti-rebond de 300 ms sur `q` et `placeholderData: keepPreviousData` pour éviter le clignotement.
 
-`[CIBLE]` nouvelles clés : `["sources"]` (`GET /api/sources`, sans intervalle, invalidée après acceptation /
-révocation), `["suppression"]` si une liste d'oppositions est affichée.
+`[ACTUEL]` côté UI (backend `[CIBLE]`, vagues 3-4) : `["sources"]` (`GET /api/sources`, sans intervalle, invalidée
+avec `["status"]` après acceptation, révocation ou levée d'un blocage) ; `["message-draft", appId, to]`
+(`GET …/message-draft?to=`, toujours relu). Pas de clé `["suppression"]` : aucune liste d'oppositions n'est
+affichée (minimisation).
 
 ### 2.3 Mutations et invalidations `[ACTUEL]`
+
+> Vagues 2-4 `[ACTUEL]` côté UI (backend des vagues 3-4 `[CIBLE]`) — en plus du tableau ci-dessous :
+> - fin de tâche : `invalidateAfterTask(client, task)` selon `task.kind` (table `INVALIDATE_BY_KIND`, type inconnu ⇒
+>   tout le cache), et non plus `invalidateQueries()` sans clé ;
+> - annoter (Offres ou Marché) : `jobs`, `report`, `monitor` ;
+> - accepter les risques `POST /sources/{code}/consent`, révoquer `DELETE /sources/{code}/consent`, lever un
+>   blocage `POST /block/clear {source}` : `sources`, `status` ;
+> - passer la prudence à « prudent » depuis la popup (`useSwitchToPrudent`, local à `RiskConsentDialog`,
+>   `PUT /settings {caution: "prudent"}`) : `settings`, `status` ;
+> - opposition `POST /suppressions` (une requête par coordonnée, 201 idempotent) : `application/{id}`,
+>   `applications` ;
+> - relance explicite après un 428 (`ConsentGate`) : appel direct `api` puis `track` si la réponse est une tâche ;
+>   pour `/runs`, si la prudence vient d'être passée à « prudent », corps relancé avec `caution: "prudent"` et sans
+>   `max_items` > 15 ; pour `…/messages`, aucune requête : la relecture se rouvre.
 
 Toutes les mutations passent par `useAction(fn, invalidate)` : `useMutation` qui, **en cas de succès**,
 appelle `invalidateQueries({ queryKey })` pour chaque clé listée (correspondance par **préfixe** : `["jobs"]`
@@ -105,14 +144,14 @@ invalide toutes les variantes filtrées, `["report"]` tous les rapports). Pas de
 **Invalidation de fin de tâche** : `TaskProvider` compare le statut de chaque tâche de `["tasks"]` à la valeur
 précédente ; à la première transition vers `terminée` / `échec` / `annulée`, il appelle
 `client.invalidateQueries()` **sans clé** (tout le cache). Simple et sûr pour un utilisateur unique ; coût :
-une rafale de requêtes à chaque fin de tâche. `[CIBLE]` invalider selon `task.kind` : `run` → `reports`,
+une rafale de requêtes à chaque fin de tâche. **Corrigé (vague 7, `[ACTUEL]`)** : invalidation selon `task.kind` : `run` → `reports`,
 `jobs`, `monitor`, `profile`, `status` ; `rescore` / `train` → `jobs`, `report`, `monitor` ; `prepare` /
 `apply` / `contacts` / `message` → `applications`, `application`, `jobs`, `monitor`, `status` ;
 `import_profile` / `profile_skill` → `profile`.
 
 Écarts relevés :
 - Annoter depuis la page Offres n'invalide pas `["report"]` : Marché peut afficher une annotation périmée
-  jusqu'au prochain chargement (5 s de `staleTime`). `[CIBLE]` invalider `report` aussi.
+  jusqu'au prochain chargement (5 s de `staleTime`). **Corrigé (vague 7, `[ACTUEL]`)** : `useLabelJob` invalide `report`.
 - Enregistrer les contacts n'invalide pas `["applications"]` (sans effet visible aujourd'hui, la liste n'affiche
   pas les contacts).
 - `[CIBLE]` mise à jour optimiste admise pour l'**annotation** uniquement (réversible, fréquente) avec
@@ -128,6 +167,13 @@ une rafale de requêtes à chaque fin de tâche. `[CIBLE]` invalider selon `task
 ## 3. Gestion des Erreurs Réseau
 
 ### 3.1 Client `api<T>()` `[ACTUEL]`
+> **Vague 2 `[ACTUEL]`** : `api()` lève `ApiError(status, detail, body, retryAfter)` ; `detail` est toujours une chaîne
+> (une liste Pydantic est normalisée en « champ : message », G-1) ; `retryAfter` vient de l'en-tête `Retry-After`.
+> Panne réseau ⇒ `ApiError(0, "API locale injoignable : l'application est-elle lancée ?")`.
+> **Vague 3 `[ACTUEL]` côté UI** : sur un 428, `ApiError` porte `source`, `riskVersion` et `request` (chemin,
+> méthode, corps d'origine) ; `api()` notifie les abonnés de `onConsentRequired()` **et** lève l'erreur (l'appelant
+> affiche `detail`). Aucun rejeu dans `api()`.
+
 - En-têtes : `Content-Type: application/json` et `X-Local-Token` si un jeton est présent (absent en
   `--dev`, le proxy Vite transmet vers 8765 sans jeton).
 - Corps lu en texte puis `JSON.parse` tolérant (corps non JSON ⇒ `null`).
@@ -140,6 +186,15 @@ une rafale de requêtes à chaque fin de tâche. `[CIBLE]` invalider selon `task
   JSON, CV imprimable).
 
 ### 3.2 Codes renvoyés par l'API et traitement attendu
+> **Vague 3 `[ACTUEL]` côté UI (backend `[CIBLE]`)** : 428 ⇒ `ConsentGate` ouvre `RiskConsentDialog` pour
+> `body.source` (construite depuis le 428 si `GET /api/sources` n'est pas chargée) ; aucun rejeu ; bandeau
+> « Relancer : {action} » + « Ignorer ». 409 `Ce destinataire a demandé à ne plus être contacté.` ⇒ bandeau
+> d'opposition de `ComposeModal` (vague 4).
+
+> **Vague 2 `[ACTUEL]`** : 401 ⇒ bandeau global « recharge la page » **et arrêt de tout polling** (décision
+> 2026-10-09 : le jeton ne redeviendra pas valide sans rechargement) ; 409 / 422 ⇒ `detail` tel quel ; 428 ⇒
+> `detail` affiché en attendant la popup (vague 3) ; 429 ⇒ `detail` + « Réessaie dans X h ».
+
 
 | Code | Origine (vérifiée) | Message serveur (exemples) | Traitement `[ACTUEL]` | Traitement `[CIBLE]` |
 | :--- | :--- | :--- | :--- | :--- |
@@ -148,22 +203,26 @@ une rafale de requêtes à chaque fin de tâche. `[CIBLE]` invalider selon `task
 | **404** | ressource absente | « Rapport introuvable. », « Aucune candidature préparée pour cette offre. » | `ErrorBox` | Idem + lien de retour (liste). |
 | **409** | conflit d'état : tâche déjà en cours, identifiants absents, blocage actif (`require_browser_ready`), statut déjà `postulée`, tâche n'attendant plus de réponse, pas d'analyse ; `[CIBLE]` destinataire en opposition | « Une analyse est déjà en cours. », « Identifiants LinkedIn absents : … » | `ErrorBox` | `ErrorBox` + action : « Voir la tâche » (ouvre le tiroir), rafraîchir `status` (bandeau de blocage). |
 | **422** | validation : `SettingsError`, Pydantic, `confirm` absent, email / objet invalide | « apply_daily_max doit être compris entre 0 et 200. » | `ErrorBox` | Évité par la validation client (cf. `05`) ; sinon message rattaché au champ. |
-| **428** `[CIBLE]` | consentement de source absent ou d'une autre `risk_version` (I-16) | corps proposé : `{"detail": "...", "source": "linkedin", "risk_version": "2026-10"}` | — | Ouvrir `RiskConsentDialog` pour `source`, puis rejouer la requête **une fois** après acceptation. |
+| **428** `[CIBLE]` | consentement de source absent ou d'une autre `risk_version` (I-16) | corps proposé : `{"detail": "...", "source": "linkedin", "risk_version": "2026-10"}` | — | Ouvrir `RiskConsentDialog` pour `source` ; **aucun rejeu automatique** (décision du 2026-10-09) : bandeau « Relancer : {action} », clic explicite ; un message rouvre la relecture (I-04). |
 | **429** | plafond quotidien (`check_quota`) | « Plafond quotidien atteint (10 candidatures par jour) : réessaie demain ou relève-le dans les paramètres. » | `ErrorBox` ; boutons déjà désactivés par anticipation via `status.quotas` | Message + lien « Régler les plafonds » (`/parametres`), rappel que le plafond n'est jamais dépassé (I-07). |
 | **500** | `read_files` d'une candidature | message d'exception | `ErrorBox` | Message générique « Erreur interne de l'application locale » + détail repliable. |
 | **502** | échec SMTP du test | erreur SMTP | `ErrorBox` | Inchangé. |
 | **503** | SMTP non configuré ; interface non compilée (HTML) | « SMTP non configuré : … » | `ErrorBox` (+ bouton désactivé par anticipation via `status.smtp_configured`) | Inchangé. |
 | Réseau | API arrêtée | `TypeError` | texte anglais brut | `ApiError(status 0)` « API locale injoignable : l'application est-elle lancée ? » |
 
-`[CIBLE]` implémentation : `api()` lève `ApiError` enrichie (`status`, `detail`, `body`) ; un `QueryCache` /
-`MutationCache` global (`onError`) gère 401, 403 et réseau (bandeau unique dans `App`), tandis que 409, 422, 428
-et 429 restent traités localement par le composant appelant (le 428 via `SourceConsentProvider`).
+Implémentation `[ACTUEL]` : `api()` lève `ApiError` ; `useWatchUnauthorized()` (abonnement aux `QueryCache` /
+`MutationCache`) traite le 401 (bandeau unique dans `App`, requêtes suspendues) ; 409, 422 et 429 restent traités
+par le composant appelant ; le 428 passe par `onConsentRequired()` → `ConsentGate`. Restent `[CIBLE]` : bandeau
+global 403, lien « Régler les plafonds » sur 429, message générique 500.
 
 ### 3.3 Erreurs de rendu
-`[ACTUEL]` aucune *Error Boundary* : une exception de rendu (ex. donnée inattendue d'un rapport ancien) vide toute
-l'application. `[CIBLE]` `ErrorBoundary` autour de `<Routes>` (message « Cette page a rencontré une erreur » +
-« Revenir au tableau de bord ») et autour de `MarketBody` ; le tiroir des tâches reste hors de la frontière pour
-rester utilisable.
+> **Vague 2 `[ACTUEL]`** : `ErrorBoundary` autour de `<Routes>` avec `key = pathname` (changer de page réinitialise
+> l'erreur) ; le tiroir des tâches reste hors frontière. Les rapports passent par `reportSchema` (Zod, `.catch`
+> sur `weekly`, `rising`… : un rapport ancien ou incomplet ne fait plus planter Marché).
+
+Avant la vague 2 : aucune *Error Boundary*. Depuis : `components/ErrorBoundary.tsx` (« Cette page a rencontré une
+erreur », « Revenir au tableau de bord », « Réessayer ») autour de `<Routes>`. Reste `[CIBLE]` : une frontière
+propre à `MarketBody`.
 
 ### 3.4 Bug bloquant relevé — corrigé en vague 0 `[ACTUEL]`
 `SettingsPage` appelle `useAction(...)` (hook `testMail`) **après** le `return` anticipé

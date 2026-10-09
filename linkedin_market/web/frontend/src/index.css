@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Contrastes (frontend/01 § 4.1) : texte ≥ 4,5:1 sur `surface`, bordure de champ ≥ 3:1. Les jetons `*-strong` colorent
+   le texte des badges et notices (fond du ton à 15 %) ; `on-accent` est le texte des boutons pleins. */
+:root, ::backdrop {
+  --color-bg-primary-rgb: 250, 250, 248;
+  --color-bg-secondary-rgb: 244, 244, 241;
+  --color-bg-tertiary-rgb: 236, 236, 231;
+  --color-surface-rgb: 255, 255, 255;
+  --color-text-primary-rgb: 30, 37, 48;
+  --color-text-secondary-rgb: 89, 99, 111;
+  --color-text-muted-rgb: 107, 114, 128;
+  --color-border-default-rgb: 226, 225, 220;
+  --color-border-subtle-rgb: 236, 235, 230;
+  --color-border-strong-rgb: 134, 142, 150;
+  --color-success-rgb: 21, 128, 61;
+  --color-warning-rgb: 180, 83, 9;
+  --color-danger-rgb: 220, 38, 38;
+  --color-info-rgb: 37, 99, 235;
+  --color-success-strong-rgb: 22, 101, 52;
+  --color-warning-strong-rgb: 146, 64, 14;
+  --color-danger-strong-rgb: 185, 28, 28;
+  --color-info-strong-rgb: 29, 78, 216;
+  --color-accent-primary-rgb: 29, 78, 216;
+  --color-accent-hover-rgb: 30, 64, 175;
+  --color-accent-soft-rgb: 29, 78, 216;
+  --color-accent-strong-rgb: 29, 78, 216;
+  --color-on-accent-rgb: 255, 255, 255;
+  --color-overlay-rgb: 15, 23, 42;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 24, 40, 0.05);
+  --shadow-lift: 0 2px 6px rgba(16, 24, 40, 0.06), 0 14px 32px rgba(16, 24, 40, 0.11);
+}
+
+[data-theme="dark"], [data-theme="dark"] ::backdrop {
+  --color-bg-primary-rgb: 11, 15, 26;
+  --color-bg-secondary-rgb: 16, 22, 42;
+  --color-bg-tertiary-rgb: 26, 35, 56;
+  --color-surface-rgb: 19, 26, 44;
+  --color-text-primary-rgb: 232, 234, 240;
+  --color-text-secondary-rgb: 167, 176, 192;
+  --color-text-muted-rgb: 128, 139, 163;
+  --color-border-default-rgb: 35, 44, 66;
+  --color-border-subtle-rgb: 28, 36, 56;
+  --color-border-strong-rgb: 96, 108, 135;
+  --color-success-rgb: 34, 197, 94;
+  --color-warning-rgb: 245, 158, 11;
+  --color-danger-rgb: 239, 68, 68;
+  --color-info-rgb: 59, 130, 246;
+  --color-success-strong-rgb: 74, 222, 128;
+  --color-warning-strong-rgb: 251, 191, 36;
+  --color-danger-strong-rgb: 248, 113, 113;
+  --color-info-strong-rgb: 96, 165, 250;
+  --color-accent-primary-rgb: 59, 130, 246;
+  --color-accent-hover-rgb: 96, 165, 250;
+  --color-accent-soft-rgb: 59, 130, 246;
+  --color-accent-strong-rgb: 96, 165, 250;
+  --color-on-accent-rgb: 11, 15, 26;
+  --color-overlay-rgb: 0, 0, 0;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 18px rgba(0, 0, 0, 0.28);
+  --shadow-lift: 0 2px 6px rgba(0, 0, 0, 0.35), 0 16px 36px rgba(0, 0, 0, 0.45);
+}
+
+body {
+  @apply bg-bg-primary text-text-primary min-h-screen font-sans;
+}
+
+/* Focus visible (WCAG 2.4.7) partout, y compris liens et boutons bruts ; le bouton flottant « Tâches » ne doit pas
+   masquer l'élément focalisé (2.4.11). */
+@layer base {
+  html { scroll-padding-bottom: 4rem; }
+  :focus-visible { outline: 2px solid rgb(var(--color-accent-primary-rgb)); outline-offset: 2px; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible { outline-offset: 0; }
+}
+
+/* Page avec barre de sections collante (Marché) : l'élément focalisé ne passe pas sous la barre (2.4.11). */
+.sticky-nav-offset :focus { scroll-margin-top: 4.5rem; }
+
+.prose-md h1, .prose-md h2, .prose-md h3 { @apply font-semibold mt-3 mb-1; }
+.prose-md h1 { @apply text-lg; }
+.prose-md h2 { @apply text-base; }
+.prose-md h3 { @apply text-sm; }
+.prose-md p { @apply my-1.5; }
+.prose-md ul { @apply list-disc pl-5 my-1.5; }
+.prose-md ol { @apply list-decimal pl-5 my-1.5; }
+.prose-md a { @apply text-accent-primary underline; }
+.prose-md strong { @apply font-semibold; }
+
+/* Animations d'entrée et d'élévation (désactivées si l'utilisateur réduit les animations). */
+@keyframes lm-fade-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes lm-grow { from { transform: scaleX(0); } }
+@keyframes lm-ring { from { stroke-dashoffset: var(--ring-length); } }
+
+.animate-in { animation: lm-fade-up 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both; animation-delay: calc(var(--i, 0) * 60ms); }
+.bar-grow { transform-origin: left; animation: lm-grow 0.8s cubic-bezier(0.2, 0.7, 0.2, 1) both; animation-delay: calc(var(--i, 0) * 30ms); }
+.ring-draw { animation: lm-ring 1s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.card-lift { transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
+.card-lift:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift); }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-in, .bar-grow, .ring-draw { animation: none; }
+  .card-lift, .card-lift:hover { transition: none; transform: none; }
+  html { scroll-behavior: auto !important; }
+}

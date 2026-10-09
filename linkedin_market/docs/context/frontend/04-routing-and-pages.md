@@ -49,14 +49,29 @@ flowchart LR
     apps --> appdetail
     appdetail --> tabs["Onglets Dossier, Postuler, Contacts, Historique"]
     tabs --> compose["ComposeModal rédaction puis relecture"]
-    run -.->|"CIBLE"| risk["RiskConsentDialog"]
-    tabs -.->|"CIBLE"| risk
-    tabs -.->|"CIBLE"| opposition["OppositionDialog"]
+    run -.->|"UI vague 3"| risk["RiskConsentDialog"]
+    tabs -.->|"UI vague 3"| risk
+    tabs -.->|"UI vague 4"| opposition["OppositionDialog"]
     jobs -.->|"CIBLE"| importmodal["ManualImportModal Indeed"]
-    settings -.->|"CIBLE"| sources["Carte Sources et consentements"]
+    settings -.->|"UI vague 3"| sources["Carte Sources et consentements"]
 ```
 
 ### 1.3 Évolutions `[CIBLE]`
+> **`[ACTUEL]` côté UI (revue du 2026-10-09 ; backend des vagues 3-4 encore `[CIBLE]`)** :
+> - Paramètres : carte « Sources et consentements » (`#sources`, défilement vers l'ancre une fois les sources
+>   chargées) : mode d'accès, « bientôt » si `enabled = false`, identifiants France Travail, version et date du
+>   consentement, « nouvelle version à relire », « Lire les risques », « Révoquer » (modale de confirmation) ;
+>   l'option « Aucune » de l'interprète a disparu (G-4).
+> - Candidatures › Contacts : badge « Opposé », bouton « Ce contact refuse d'être recontacté » (`OppositionDialog`),
+>   champs Email / Profil d'un contact opposé désactivés, « Écrire » désactivé ; origine de l'adresse affichée à la
+>   relecture du message.
+> - Filtres dans l'URL : `/offres?q=&min_score=&label=&status=`, `/marche?rapport={name}`.
+> - Bandeaux de blocage par source (`BlockBanners`, d'après `GET /api/sources`, repli sur `/api/status.blocked` si
+>   `/sources` échoue : V4-5) ; bouton « Lever le blocage » par source.
+> - Bandeau « Relancer : {action} » après acceptation des risques sur un 428 (`ConsentGate`).
+> Restent `[CIBLE]` : Offres (« Importer une offre » Indeed, badge Source, libellé « Ouvrir l'offre »), Marché
+> (`InterpreterBadge`, filtre par source).
+
 
 Aucune nouvelle route n'est nécessaire ; les nouveautés s'intègrent aux pages existantes :
 - **Paramètres** : nouvelle carte « Sources et consentements » (ancre `#sources`) — par source : libellé, mode
@@ -92,9 +107,12 @@ dans Paramètres.
   - `smtp_configured = false` → canal Email bloqué dans `ComposeModal`, bouton d'email de test masqué.
   `RunModal` n'applique aucune de ces gardes : identifiants absents ou blocage actif ⇒ 409 affiché après clic.
   `[CIBLE]` même garde préventive dans `RunModal` (case « Collecter » désactivée avec explication).
-- **Garde de consentement** `[CIBLE]` : intercepteur d'action (pas de route) — popup de risques avant toute
-  action sur une source `navigateur` sans consentement valide, et sur réponse 428 (cf. `02` § 4.1).
-- **Jeton périmé** `[CIBLE]` : sur 401, bandeau global « recharge la page » (le jeton change à chaque lancement).
+- **Garde de consentement** `[ACTUEL]` côté UI (backend `[CIBLE]`, vague 3) : pas de route ; popup de risques
+  **préventive** (`RunModal` pour les sources cochées, `useConsentGuard()` pour « Lancer la candidature »,
+  « Chercher les recruteurs », « Importer depuis LinkedIn », ajout de compétence si `linkedin_skill_sync`, relecture
+  et envoi d'un message LinkedIn) et, sur réponse 428, popup globale `ConsentGate` sans rejeu (cf. `02` § 4.1).
+- **Jeton périmé** `[ACTUEL]` (vague 2) : sur 401, bandeau global « Le jeton local a changé : recharge la page »
+  + « Recharger », requêtes et interrogations suspendues.
 - **Quitter une page avec une saisie non enregistrée** : aucune protection `[ACTUEL]` (Dossier, Contacts,
   Paramètres) — Contacts signale seulement « Enregistre d'abord les contacts » sur le bouton « Écrire ».
   `[CIBLE]` indicateur « Modifications non enregistrées » sur la carte et `beforeunload` tant qu'un formulaire
@@ -102,20 +120,26 @@ dans Paramètres.
 
 ## 3. SEO, Titres & Métadonnées
 
-- **SEO** : sans objet (application locale, jamais indexée). `[CIBLE]` `<meta name="robots" content="noindex">`
-  par principe.
-- **Titre de document** `[ACTUEL]` : unique et statique, « LinkedIn Market — gestion » (`index.html`) ; non mis à
-  jour par page (critère WCAG 2.4.2 *Page Titled*, niveau A, partiellement satisfait). `[CIBLE]` hook
+> **Vague 7, partie 1 `[ACTUEL]`** : `noindex` ; titre « {Section} · LinkedIn Market » posé par `App.tsx` ;
+> `React.lazy` pour `Market` ; focus programmatique sur le `<h1>` **au changement de section** seulement (pas entre
+> deux candidatures de la même page : décision 2026-10-08, évite de perdre la position dans la liste).
+> **Vague 7, partie 2 `[ACTUEL]`** : lien d'évitement « Aller au contenu » (`#contenu`, `<main tabIndex=-1>`).
+> Reste `[CIBLE]` : titre détaillé par candidature et préfixe « (1) Réponse attendue — ».
+
+
+- **SEO** : sans objet (application locale, jamais indexée). `<meta name="robots" content="noindex">` `[ACTUEL]`.
+- **Titre de document** : avant la vague 7, unique et statique ; depuis, « {Section} · LinkedIn Market » posé par
+  `useRouteAnnouncements()` d'`App.tsx` `[ACTUEL]` (2.4.2 satisfait par section). Reste `[CIBLE]` le titre détaillé :
   `useDocumentTitle(titre)` dans chaque page : « {Titre de la page} · LinkedIn Market » (ex. « Candidature —
   Senior Python Developer · LinkedIn Market ») ; en `attente_saisie`, préfixe « (1) Réponse attendue — » pour
   attirer l'attention depuis un autre onglet.
 - **Langue** : `<html lang="fr">` `[ACTUEL]` ; contenus d'offres en anglais non balisés (acceptable, 3.1.2 AA
   concerne les passages : `[CIBLE]` `lang` sur le texte d'offre si la langue détectée diffère).
-- **Écrans blancs** `[ACTUEL]` : pas de chargement paresseux de routes (bundle unique), états « Chargement… » par
-  page, squelette dans Marché. `[CIBLE]` `React.lazy` pour `Market` (react-markdown + graphiques) si le bundle
-  dépasse 500 ko, avec `Suspense` et le même squelette.
-- **Focus à la navigation** `[CIBLE]` : après changement de route, focus programmatique sur le `<h1>` de la page
-  (`tabIndex=-1`) pour les lecteurs d'écran ; lien d'évitement « Aller au contenu » avant la navigation (2.4.1, A).
+- **Écrans blancs** `[ACTUEL]` : `React.lazy` pour `Market` avec `Suspense` (squelette `role="status"`), états
+  « Chargement… » par page, morceaux séparés React / Zod / Markdown (`manualChunks`).
+- **Focus à la navigation** `[ACTUEL]` (vague 7) : au changement de **section**, focus sur le `<h1 tabIndex=-1>`
+  de la page (attente du `<h1>` de Marché chargé à la demande, 3 s au plus) ; lien d'évitement « Aller au contenu »
+  avant la navigation (2.4.1, A).
 - **Landmarks** `[ACTUEL]` : `<nav aria-label="Navigation">`, `<main>`, `<aside aria-label="Tâches">`,
   `<nav aria-label="Sections de la page">` (Marché) ; le lien actif est stylé par `NavLink` qui pose
   automatiquement `aria-current="page"`.
@@ -123,6 +147,9 @@ dans Paramètres.
 ## 4. Outillage, Versions & Migrations
 
 ### 4.1 Pile actuelle `[ACTUEL]` (`package.json`, versions résolues dans `node_modules`)
+> Vague 2 : `zod` `^4.6.5` ajouté ; découpage du bundle par `build.rollupOptions.output.manualChunks` dans
+> `vite.config.ts` (React, Zod, Markdown en morceaux séparés), autorisé le 2026-10-09.
+
 
 | Paquet | Déclaré | Installé |
 | :--- | :--- | :--- |
@@ -135,8 +162,10 @@ dans Paramètres.
 | `tailwindcss` (+ `postcss`, `autoprefixer`) | `^3.4.15` | 3.4.19 |
 
 Scripts : `dev` (Vite, port **5174**, proxy `/api` → `http://127.0.0.1:8765`), `build` (`tsc --noEmit && vite
-build`), `preview`, `lint` (`eslint src`) `[ACTUEL]` depuis la vague 0 : ESLint 9 en configuration plate
-(`eslint.config.js`), 0 erreur, 9 avertissements de dette (§ 4.3).
+build`), `preview`, `lint` (`eslint src`) `[ACTUEL]` : ESLint 9 en configuration plate (`eslint.config.js`),
+**0 erreur, 0 avertissement** depuis la vague 2 (revérifié le 2026-10-09 ; plus aucune exception par fichier).
+Dépendances ajoutées : `zod` `^4.6.5` (vague 2) ; police Inter auto-hébergée (`@fontsource-variable/inter`, cf.
+`01` § 1.3).
 
 ### 4.2 Versions stables au 8 octobre 2026 (registre npm et annonces officielles)
 
@@ -153,6 +182,9 @@ build`), `preview`, `lint` (`eslint src`) `[ACTUEL]` depuis la vague 0 : ESLint 
 | Zod | 4.6.5 | Cf. `05-forms-and-validation.md`. |
 
 ### 4.3 Recommandations `[CIBLE]`
+> État au 2026-10-09 : la recommandation 1 (ESLint) est `[ACTUEL]` et sa dette soldée (0 / 0, aucune exception
+> `warn` restante) ; Zod 4 est installé (`src/schemas.ts`). Les montées de version 2 à 4 restent optionnelles et
+> non planifiées.
 
 1. **Fait (vague 0) `[ACTUEL]` — ESLint (configuration plate)** : ajouter `eslint`, `@eslint/js`, `typescript-eslint`,
    `eslint-plugin-react-hooks`, `eslint-plugin-jsx-a11y` et `globals` ; script `"lint": "eslint src"` ; fichier :
@@ -181,7 +213,10 @@ build`), `preview`, `lint` (`eslint src`) `[ACTUEL]` depuis la vague 0 : ESLint 
    `eslint-plugin-react-hooks` 7.1 (`reactHooks.configs.flat.recommended`), `globals` 17. Le préréglage
    `react-hooks` 7 active les règles du compilateur React. Résultat sur le code existant : 10 erreurs, dont le bug
    réel `rules-of-hooks` de `SettingsPage.tsx` (à corriger, la règle reste `error`).
-   **Dette lint** (règles abaissées en `warn` à la vague 0, à remonter en `error` une fois corrigées, vague 7) :
+   **Mise à jour vague 7, partie 1** : toutes les règles sont remontées en `error` ; seule exception,
+   `react-hooks/set-state-in-effect` reste en `warn` **pour `src/pages/Applications.tsx` uniquement** (2 occurrences,
+   l.17 et l.103), à corriger en vague 7 partie 2 avec la migration des onglets du Détail.
+   Dette initiale (vague 0, pour mémoire) :
    | Règle | Occurrences au 2026-10-08 |
    | :--- | :--- |
    | `react-hooks/set-state-in-effect` | 6 : `TaskDrawer.tsx:109`, `Applications.tsx:17` et `:103`, `Market.tsx:21`, `SettingsPage.tsx:11`, `Skills.tsx:15` |

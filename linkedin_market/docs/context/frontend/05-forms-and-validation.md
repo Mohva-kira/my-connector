@@ -15,7 +15,10 @@
   natif — et à quelques conditions `disabled` (champ requis vide). Toute autre erreur vient du serveur (422) et
   s'affiche dans l'`ErrorBox` globale du formulaire, avec le nom technique du champ
   (« apply_daily_max doit être compris entre 0 et 200. »).
-- **Cible** `[CIBLE]` : **Zod 4** pour les schémas (fichier `src/schemas.ts`), types inférés
+- **Depuis la vague 2** `[ACTUEL]` : **Zod 4** (`src/schemas.ts`, § 4) ; erreurs par champ via `Field error` +
+  `fieldErrors()`. Le hook `useZodForm` décrit ci-dessous n'a pas été retenu (validation au rendu par
+  `safeParse`, bouton désactivé tant que le schéma échoue).
+- **Conception d'origine** : **Zod 4** pour les schémas (fichier `src/schemas.ts`), types inférés
   (`type SettingsForm = z.infer<typeof settingsSchema>`), messages en français portant le **libellé du champ**.
   Pas de React Hook Form : les formulaires sont petits ; un hook maison `useZodForm(schema, initial)` (valeurs,
   erreurs par champ, `validate()` à la soumission, revalidation au changement d'un champ en erreur) suffit.
@@ -101,6 +104,10 @@ Les libellés de séniorité sont affichés bruts (`confirme` sans accent, ident
 `[CIBLE]` libellés « Junior », « Confirmé », « Senior », « Lead » avec les mêmes valeurs.
 
 ### 3.3 Lancement d'analyse (`RunModal`, `POST /api/runs`)
+> **Vague 2 `[ACTUEL]`** : `runBodySchema` ; `max_items` ∈ [1, plafond de la prudence] ; messages : `max_items doit
+> être au moins 1.` (minimum) et `max_items ne peut pas dépasser 15 en prudence « prudent ».` (maximum, G-3).
+> Option « Aucune » de l'interprète retirée (Paramètres).
+
 
 | Champ | Défaut | Règle client | Règle serveur |
 | :--- | :--- | :--- | :--- |
@@ -111,17 +118,22 @@ Les libellés de séniorité sont affichés bruts (`confirme` sans accent, ident
 | Collecter de nouvelles données sur LinkedIn | `true` | case ; avertissement CGU si cochée | `scrape: true` ⇒ `require_browser_ready()` : 409 identifiants absents ou blocage actif |
 | — (non exposé) | `max_items`, `interpreter` | — | acceptés par `RunBody` : `max_items` validé 1–200, `interpreter` validé |
 
-Autres réponses : 409 « Une analyse est déjà en cours. ». `[CIBLE]` : sélection des sources (au moins une si
-collecte), champ `max_items` borné par la prudence, choix de l'interprète (`claude` / `local`), popup de risques
-pour chaque source `navigateur` cochée, gestion du 428.
+Autres réponses : 409 « Une analyse est déjà en cours. ».
+`[ACTUEL]` côté UI (backend des vagues 2-3 `[CIBLE]`) : `SourcePicker` (au moins une source si collecte, message
+client « Choisis au moins une source. ») ; champ « Éléments par source » borné par la prudence (vide = plafond) ;
+popup de risques **avant** la requête pour la première source `navigateur` cochée sans consentement à jour, sans
+lancement automatique après acceptation ; si la popup a passé la prudence à « prudent »
+(`onAccepted({ switchedToPrudent: true })`), le formulaire passe à « prudent » et vide un `max_items` > 15 ; un 428
+passe par `ConsentGate` (relance explicite, corps de `/runs` réécrit en `caution: "prudent"` dans le même cas).
+Reste `[CIBLE]` : choix de l'interprète (`claude` / `local`) dans `RunModal`.
 
 ### 3.4 Réponse à une tâche (`TaskDetail` et modale de relecture)
 
 | Cas | Contrôle | Envoi | Règles |
 | :--- | :--- | :--- | :--- |
-| Question avec options (`needs_input.options` non vide) | un bouton par option | `POST /api/tasks/{id}/answer` `{ value: option, remember: true }` | Erreur réseau **non capturée** (promesse sans `catch`) → `[CIBLE]` afficher dans l'`ErrorBox` du détail. |
+| Question avec options (`needs_input.options` non vide, champ ≠ `confirm*`) | un bouton par option | `POST /api/tasks/{id}/answer` `{ value: option, remember: true }` | Erreur affichée dans l'`ErrorBox` du détail `[ACTUEL]` (revue du 2026-10-09). |
 | Question libre | champ texte (placeholder « Suggestion : … » ou « Ta réponse (mémorisée pour la suite) ») + « Envoyer » désactivé si vide | `{ value, remember: true }` | Serveur : `value: str` requis ; mémorise si `remember` et champ ≠ `confirm*` (clé tronquée à 200, réponse à 500). 409 « Cette tâche n'attend pas de réponse. » / « … n'attend plus de réponse. » ; délai 600 s. |
-| Confirmation `confirm_*` | modale « Relire avant l'envoi », boutons des options | `{ value, remember: false }` | **jamais mémorisée** (client et serveur, I-04). Fermer = dernière option. |
+| Confirmation `confirm_*` | modale « Relire avant l'envoi » **uniquement**, boutons des options ; le tiroir n'affiche aucune option (« Relecture ouverte : confirme ou annule dans la fenêtre « Relire avant l'envoi » ») | `{ value, remember: false }` | **jamais mémorisée** (client et serveur, I-04). Fermer (Échap, « ✕ ») = **toujours `"Annuler"`** ; focus initial sur « Annuler » (sinon sur le titre), jamais sur « Soumettre » ; voile sans effet. `[ACTUEL]` |
 
 `[CIBLE]` : case « Mémoriser cette réponse pour les prochaines candidatures » (cochée par défaut) au lieu d'un
 `remember: true` implicite ; indication du temps restant ; pour une suggestion, bouton « Utiliser la suggestion »
@@ -143,9 +155,19 @@ Gardes : plafond `message_daily_max` (bouton désactivé + Notice ; serveur 429)
 serveur 503), envoi déjà en cours (409). Le brouillon est chargé depuis `message-draft` : objet
 « Candidature — {titre} », corps = message du dossier + signature.
 
-`[CIBLE]` (I-12, I-13) : case obligatoire « J'ai relu ce message et je confirme l'envoi » ; mention de
-désinscription et origine de l'adresse ajoutées et affichées en lecture seule ; refus si destinataire opposé (409)
-affiché comme bandeau bloquant ; validation de l'URL LinkedIn côté client avec la même expression que les contacts.
+`[ACTUEL]` côté UI (I-12, I-13 ; backend vague 4 `[CIBLE]`, revue du 2026-10-09) :
+- relecture : origine de l'adresse et pied imposé lus par `GET …/message-draft?to=` à chaque relecture, affichés
+  en lecture seule ; « Confirmer l'envoi » désactivé tant qu'ils ne sont pas chargés ;
+- case obligatoire « J'ai relu ce message et je confirme l'envoi », jamais pré-cochée, décochée à chaque retour à
+  la relecture et après tout échec ; aucun rejeu ;
+- destinataire opposé (`contact.opposed`, `draft.opposed` ou 409 `Ce destinataire a demandé à ne plus être
+  contacté.`) : bandeau `danger` « Cette personne a demandé à ne plus être contactée : envoi impossible. », case et
+  bouton désactivés, aucun moyen de forcer ;
+- longueur LinkedIn comptée comme le serveur (V4-4) : `Array.from(s).length` ; dépassement si
+  `len(body.trimEnd()) + 2 + len(footer) > 300` ; le compteur affiche la place utile `300 − 2 − len(footer)`
+  (« mention déduite ») ; le corps est tronqué avant la mention, jamais la mention ;
+- message LinkedIn : popup de risques préventive à l'ouverture de la relecture et à l'envoi.
+Reste `[CIBLE]` : validation de l'URL LinkedIn côté client avant la relecture.
 
 ### 3.6 Contacts et dossier (`Applications`)
 
@@ -171,7 +193,22 @@ affiché comme bandeau bloquant ; validation de l'URL LinkedIn côté client ave
 | Entreprise, localisation | facultatifs (≤ 80 / 120 caractères) |
 | Envoi | `POST /api/items/import` (cf. `backend/01-api-contracts.md`) `{ source_code: "indeed", url, text, title, company?, location? }` → `201`, `409` si déjà dans l'historique |
 
-## 4. Schémas Zod `[CIBLE]`
+## 4. Schémas Zod `[ACTUEL]` (vagues 2 à 4)
+> Vague 4 `[ACTUEL]` : `suppressionSchema` (`recipient` après `trim` = `EMAIL_RE` ou `LINKEDIN_PROFILE_RE`, message
+> `recipient : adresse email ou URL de profil LinkedIn attendue.` — avec point final, comme le message du
+> validateur serveur repris tel quel par G-1 `value_error` ; `reason` ∈ `désinscription`, `refus_oral`, `plainte`,
+> message `reason : doit être l'un de : désinscription, refus_oral, plainte` — sans point, forme G-1
+> `literal_error`). `LINKEDIN_PROFILE_RE = /^https:\/\/([a-z]{2,3}\.)?linkedin\.com\/in\/[^/?#\s]+/` =
+> `outreach._PROFILE_URL` (`backend/01` § 5.7.1, V4-3).
+> Vagues 2-3 : `EMAIL_RE` identique à `outreach._EMAIL` (sans `,;<>`) ; `contact_email` (G-12) ; `max_items` :
+> `max_items doit être au moins 1.` (G-11) / G-3 ; `runBodySchema.sources` : tableau non vide de codes, défaut
+> `linkedin` (`backend/01` § 5.8.1).
+
+> **`[ACTUEL]` depuis la vague 2** : `src/schemas.ts` (Zod 4) contient `settingsSchema`, `runBodySchema`,
+> `reportSchema` et les constantes `CAUTIONS`, `CAUTION_MAX`, `DEFAULT_CAUTION`. Les messages sont ceux du serveur
+> (`backend/01` § 1.2, § 5.2). `contact_email` : même expression que le serveur, validée **aussi** côté serveur
+> (G-12). Le code ci-dessous reste la référence de conception.
+
 
 ```ts
 // src/schemas.ts — bornes identiques à settings.py, outreach.py et web/routers/applications.py

@@ -37,17 +37,24 @@ bouton `secondary` (bordure + `surface`) ; `accent` = `accent-soft` + `accent-pr
 `bg-primary` / `surface` ; `destructive` = `danger` ; `success` = `success`. Il n'y a pas de jeton `secondary`
 dédié.
 
-**Couleurs hors jetons relevées** `[ACTUEL]` (à résorber `[CIBLE]`) : `text-white` sur boutons `primary` /
-`danger` et sur le bouton « Tâches » en attente ; `bg-black/40` du voile des modales ; ombres Tailwind par défaut
-`shadow-xl` (Modal), `shadow-lg` (bouton Tâches), `shadow-2xl` (tiroir). Les graphiques SVG utilisent
-directement `rgb(var(--color-…-rgb))` (Dashboard `KIND_COLORS`, Market `ScoreRing`, `WeeklyChart`) : c'est
-admis, la valeur reste thémée.
+**Couleurs hors jetons** : **aucune** `[ACTUEL]` (vague 7 ; revue du 2026-10-09 : aucune classe Tailwind brute ni
+hexadécimal hors `index.css`). Ombres : `shadow-lift` (Modal, bouton Tâches, tiroir) et `shadow-card`. Les
+graphiques SVG utilisent directement `rgb(var(--color-…-rgb))` (Dashboard `KIND_COLORS`, Market `ScoreRing`,
+`WeeklyChart`) : c'est admis, la valeur reste thémée.
+
+**Vague 7, partie 1 (2026-10-08) `[ACTUEL]`** : couleurs hors jetons résorbées. Nouveaux jetons, définis dans
+les **deux** thèmes de `index.css` et exposés par `tailwind.config.js` : `accent-strong`, `border-strong`,
+`success-strong`, `warning-strong`, `danger-strong`, `info-strong` (texte des badges et notices sur fond à 15 %),
+`on-accent` (texte des boutons pleins, remplace `text-white` ; quasi noir en sombre), `overlay` (voile des
+modales, remplace `bg-black/40`). Valeurs claires : celles du § 4.1 ; valeurs sombres calculées par lm-frontend
+(≥ 4,5:1 texte, ≥ 3:1 bordures) — re-mesurées à la revue du 2026-10-09 (§ 4.1).
 
 ### 1.2 Tons sémantiques (`ui.tsx`) `[ACTUEL]`
 
 Type `Tone = "neutral" | "success" | "warning" | "danger" | "info" | "accent"`, table `TONES` partagée par
-`Badge` et `Notice` : fond à 15 % + texte plein (`bg-success/15 text-success`…), `neutral` =
-`bg-bg-tertiary text-text-secondary`, `accent` = `bg-accent-soft text-accent-primary`.
+`Badge` et `Notice` : fond à 15 % + texte en jeton `*-strong` (`bg-success/15 text-success-strong`…), `neutral` =
+`bg-bg-tertiary text-text-secondary`, `accent` = `bg-accent-soft text-accent-strong`. `Notice` de ton `success` /
+`info` porte `role="status"`.
 
 | Fonction | Règle |
 | :--- | :--- |
@@ -57,8 +64,8 @@ Type `Tone = "neutral" | "success" | "warning" | "danger" | "info" | "accent"`, 
 
 ### 1.3 Typographie `[ACTUEL]`
 
-- **Police principale** : `Inter` (400, 500, 600, 700) chargée depuis **Google Fonts** dans `index.html`, puis
-  `system-ui, sans-serif` (`fontFamily.sans`). **Monospace** : `JetBrains Mono, monospace` (`fontFamily.mono`)
+- **Police principale** : `Inter` variable, **auto-hébergée** (`@fontsource-variable/inter`, importée dans
+  `main.tsx`), puis `system-ui, sans-serif` (`fontFamily.sans`) ; aucun appel à un serveur de polices tiers. **Monospace** : `JetBrains Mono, monospace` (`fontFamily.mono`)
   — JetBrains Mono n'est **pas** chargée : rendu réel = police monospace du système.
 - **Échelle utilisée** (classes Tailwind par défaut, aucune taille personnalisée) :
 
@@ -76,9 +83,9 @@ Type `Tone = "neutral" | "success" | "warning" | "danger" | "info" | "accent"`, 
 - **Markdown** (conseils, CV, interprétation) : classe utilitaire `.prose-md` définie dans `index.css`
   (h1 `text-lg`, h2 `text-base`, h3 `text-sm`, listes à puces / numérotées, liens `text-accent-primary underline`).
   Pas de plugin `@tailwindcss/typography`.
-- `[CIBLE]` **auto-héberger Inter** (paquet `@fontsource-variable/inter` importé dans `main.tsx`) et supprimer
-  l'appel à `fonts.googleapis.com` : un outil local ne doit pas transmettre l'adresse IP de l'utilisateur à un
-  tiers à chaque ouverture (RGPD, cohérent avec R-3 et « aucune donnée ne sort de la machine », lot 1 § 04-1).
+- `[ACTUEL]` (vague 7) **Inter auto-hébergée** : `index.html` n'appelle plus `fonts.googleapis.com` ; un outil
+  local ne doit pas transmettre l'adresse IP de l'utilisateur à un tiers à chaque ouverture (RGPD, cohérent avec
+  R-3 et « aucune donnée ne sort de la machine », lot 1 § 04-1).
 
 ### 1.4 Espacements, rayons, ombres `[ACTUEL]`
 
@@ -98,16 +105,16 @@ Type `Tone = "neutral" | "success" | "warning" | "danger" | "info" | "accent"`, 
 ## 2. Gestion des Thèmes `[ACTUEL]`
 
 - **Mode clair / sombre** : attribut `data-theme` sur `<html>`.
-  - Au démarrage (`main.tsx`) : valeur de `localStorage["lm-theme"]` si présente, sinon
+  - Au démarrage (script inline de `index.html`) : valeur de `localStorage["lm-theme"]` si présente, sinon
     `prefers-color-scheme: dark` ; en cas d'exception (stockage indisponible) → clair.
   - Bascule manuelle : bouton « Thème clair / sombre » en bas de la navigation (`App.tsx`, `toggleTheme()`),
     persistée dans `localStorage["lm-theme"]`.
-  - Le thème n'est appliqué qu'après le chargement du JS : un bref flash clair est possible en sombre.
-    `[CIBLE]` script inline de 3 lignes dans `index.html` pour poser `data-theme` avant le premier rendu, et
-    `aria-pressed` sur le bouton de bascule.
+  - `[ACTUEL]` (vague 7) un script inline dans `index.html` pose `data-theme` avant le premier rendu (lecture de
+    `localStorage` dans un `try`, sinon `prefers-color-scheme`) : plus de flash clair en sombre. Aucune CSP n'est servie pour la SPA : le script inline est admis. Si une CSP
+    `script-src 'self'` est ajoutée un jour, y mettre le **hash sha256** de ce script (pas de `'unsafe-inline'`).
 - **Règle** : toujours utiliser les classes sémantiques (`bg-surface`, `text-text-secondary`, `bg-danger/15`…),
-  jamais de couleur Tailwind brute (`bg-blue-600`) ni d'hexadécimal. Exceptions tolérées : `text-white` sur un fond
-  plein `accent-primary` / `danger`, voile `bg-black/40`.
+  jamais de couleur Tailwind brute (`bg-blue-600`) ni d'hexadécimal. Plus d'exception : texte des boutons pleins
+  `text-on-accent`, voile des modales `backdrop:bg-overlay/40` (vague 7).
 - **Nouvelles couleurs** : ajouter la variable dans **les deux** blocs de `index.css` puis l'exposer dans
   `tailwind.config.js` via `withOpacity`.
 
@@ -132,63 +139,49 @@ les tableaux de données).
 
 ### 4.1 Contrastes mesurés (ratio WCAG, calculé sur les jetons) `[ACTUEL]`
 
-| Combinaison | Clair | Sombre | Verdict (texte < 18 px : 4,5:1 requis, critère 1.4.3) |
+Re-mesurés à la revue du 2026-10-09 sur les valeurs de `index.css` (vague 7, partie 1). Les badges et notices sont
+mesurés sur le fond du ton à 15 % (8 % pour `accent`) composé sur `surface`.
+
+| Combinaison | Clair | Sombre | Verdict (texte < 18 px : 4,5:1 ; composant : 3:1) |
 | :--- | :--- | :--- | :--- |
-| `text-primary` / `surface` | 15,4 | 14,4 | OK |
-| `text-secondary` / `surface` | 6,1 | 7,9 | OK |
-| `text-muted` / `surface` | **3,1** | **3,8** | **Échec** — utilisé pour les aides de champ, dates, états vides |
-| `success` texte / `surface` | **3,3** | 7,6 | Échec en clair |
-| `warning` texte / `surface` | **3,2** | 8,1 | Échec en clair |
-| `danger` texte / `surface` | 4,8 | 4,6 | OK |
-| `info` texte / `surface` | 5,2 | 4,7 | OK |
-| Badge `success` / `warning` (texte sur fond 15 %) | **2,8 / 2,7** | 5,9 / 6,2 | Échec en clair |
-| Badge `danger` / `info` (fond 15 %) | **3,8 / 4,2** | **4,0 / 3,9** | Échec |
-| Blanc sur `accent-primary` (bouton `primary`) | 6,7 | **3,7** | Échec en sombre |
-| Blanc sur `danger` (bouton `danger`) | 4,8 | **3,8** | Échec en sombre |
-| Blanc sur `warning` (bouton « Tâches » en attente) | **3,2** | **2,2** | Échec |
-| `border-default` / `surface` (contour des champs, critère 1.4.11 : 3:1) | **1,3** | **1,3** | Échec pour identifier un champ |
+| `text-muted` / `surface` | 4,8 | 5,1 | OK |
+| Texte `success` / `warning` / `danger` sur `surface` | 5,0 / 5,0 / 4,8 | 7,6 / 8,1 / 4,6 | OK |
+| Badge / notice `success-strong` / `warning-strong` (fond 15 %) | 5,8 / 5,8 | 7,7 / 8,0 | OK |
+| Badge / notice `danger-strong` / `info-strong` (fond 15 %) | 5,1 / 5,4 | 5,4 / 5,6 | OK |
+| Badge `accent-strong` (fond `accent-soft`) | 5,9 | 6,2 | OK |
+| `on-accent` sur `accent-primary` (bouton `primary`) | 6,7 | 5,2 | OK |
+| `on-accent` sur `danger` (bouton `danger`) | 4,8 | 5,1 | OK |
+| `border-strong` / `surface` (contour des champs, critère 1.4.11) | 3,3 | 3,3 | OK |
 
-`[CIBLE]` corrections minimales (sans changer l'identité visuelle) :
-- clair : `--color-text-muted-rgb: 107, 114, 128` (4,8:1 sur `surface`), `--color-success-rgb: 21, 128, 61`
-  (5,0:1), `--color-warning-rgb: 180, 83, 9` (5,0:1) ; pour le **texte des badges et notices** (fond à 15 %),
-  nouveaux jetons `--color-success-strong-rgb: 22, 101, 52` (5,8:1), `--color-warning-strong-rgb: 146, 64, 14`
-  (5,8:1), `--color-danger-strong-rgb: 185, 28, 28` (5,1:1), `--color-info-strong-rgb: 29, 78, 216` (5,4:1),
-  utilisés par `TONES` ; à recalculer de même pour le thème sombre ;
-- sombre : texte des boutons pleins en `text-bg-primary` (quasi noir) au lieu de `text-white`, ou
-  `--color-accent-primary-rgb: 37, 99, 235` pour le fond des boutons ;
-- bouton « Tâches » en attente : `bg-warning/15 text-warning border-warning` au lieu de `bg-warning text-white` ;
-- champs : bordure `border-text-muted` (≥ 3:1) ou fond `bg-bg-secondary` distinct.
-- vérification automatisée : `eslint-plugin-jsx-a11y` + test de contraste des jetons dans la CI.
+Le bouton « Tâches » en attente utilise `bg-warning/15 text-warning-strong border-warning`. `ErrorBox` et les
+erreurs de la liste des tâches utilisent `text-danger-strong` (fond `danger/10`) depuis la revue du 2026-10-09. Reste `[CIBLE]` : test
+automatisé de contraste des jetons (aujourd'hui seul `eslint-plugin-jsx-a11y` est branché sur `npm run lint`).
 
-### 4.2 Focus, clavier, libellés
+### 4.2 Focus, clavier, libellés `[ACTUEL]` (vague 7, revue du 2026-10-09)
 
-- **Focus visible (2.4.7, AA)** `[ACTUEL]` : les boutons gardent le contour natif du navigateur (pas de
-  `outline-none`) ; les champs (`inputClass`) suppriment le contour (`outline-none`) et ne changent que la couleur
-  de bordure (`focus:border-accent-primary`), indicateur faible. `[CIBLE]` ajouter à `Button`, `inputClass`,
-  onglets et liens-boutons : `focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-primary
-  focus-visible:ring-offset-2 focus-visible:ring-offset-surface`.
-- **Focus non masqué (2.4.11, AA, nouveau en 2.2)** : la barre de sections collante de Marché (`sticky top-0`) et
-  le bouton flottant « Tâches » ne doivent pas recouvrir l'élément focalisé — `[CIBLE]` `scroll-margin-top` sur les
-  éléments focusables de Marché (les titres ont déjà `scroll-mt-20`) et `scroll-padding-bottom: 4rem` sur `html`.
-- **Taille des cibles (2.5.8, AA, nouveau en 2.2)** : minimum 24 × 24 px. Points à vérifier : bouton « ✕ » de
-  retrait d'une compétence (`px-1.5`, ≈ 18 px de large), bouton de fermeture des modales (`p-1`), boutons
-  d'annotation de Marché (`p-1.5` + icône 16 px = 28 px, OK). `[CIBLE]` `min-h-6 min-w-6` sur ces boutons.
-- **Modales (2.1.2, 2.4.3)** : `Modal` pose `role="dialog"`, `aria-modal="true"`, `aria-label={title}` et ferme sur
-  Échap `[ACTUEL]`, mais **sans piège de focus, sans focus initial, sans restitution du focus** à l'élément
-  déclencheur. `[CIBLE]` spécification dans `02-components-catalog.md` § 3.6.
-- **Libellés (1.3.1, 3.3.2, 4.1.2)** : `Field` enveloppe le champ dans un `<label>` (association implicite)
-  `[ACTUEL]` ; les champs sans `Field` ont un `aria-label` (« Rechercher », « Annotation », « Candidature »,
-  « Nouvelle compétence », « Filtrer par statut », « Statut », « Rapport ») `[ACTUEL]`. Les boutons d'annotation 👍 /
-  👎 de la page Offres n'ont qu'un `title` → `[CIBLE]` `aria-label` + `aria-pressed` comme dans Marché.
-- **Annonce des changements (4.1.3, AA)** : `ErrorBox` a `role="alert"` `[ACTUEL]` ; les `Notice` de succès et le
-  changement de statut d'une tâche ne sont pas annoncés → `[CIBLE]` `role="status"` sur `Notice` de ton `success`
-  / `info` et région `aria-live="polite"` dans le tiroir pour le statut courant.
-- **Onglets** : `Tabs` pose `role="tablist"`, `role="tab"`, `aria-selected` `[ACTUEL]` ; manquent
-  `aria-controls`, `role="tabpanel"` et la navigation aux flèches → `[CIBLE]`.
+- **Focus visible (2.4.7, AA)** : règle globale de `index.css` (`:focus-visible` = contour 2 px `accent-primary`,
+  décalé de 2 px ; décalage 0 pour les champs). Les champs ont une bordure `border-strong` (≥ 3:1).
+- **Focus non masqué (2.4.11, AA)** : `html { scroll-padding-bottom: 4rem }` (bouton flottant « Tâches ») ; page
+  Marché enveloppée dans `.sticky-nav-offset` (`scroll-margin-top: 4.5rem` sous la barre de sections collante).
+- **Taille des cibles (2.5.8, AA)** : `min-h-6 min-w-6` sur le « ✕ » des modales et le retrait d'une compétence.
+- **Modales (2.1.2, 2.4.3)** : élément natif `<dialog>` + `showModal()` (piège de focus, page inerte, Échap natif),
+  `aria-labelledby` vers le titre, `aria-describedby` facultatif, focus initial (`initialFocus` ou titre avec
+  `focusTitle`), restitution du focus au déclencheur, `dismissible = false` pour les dialogues de décision ; détail
+  dans `02-components-catalog.md` § 3.6. Dialogues de décision (revue du 2026-10-09) : aucun bouton d'envoi
+  n'a le focus initial — relecture `confirm_*` : focus sur « Annuler » (sinon titre), Échap = « Annuler » ;
+  popup de risques : focus sur le titre, Échap = « Refuser » ; `ComposeModal` : focus sur le début de la relecture.
+- **Libellés (1.3.1, 3.3.2, 4.1.2)** : `Field` enveloppe le champ dans un `<label>` et relie l'erreur par
+  `aria-describedby` + `aria-invalid` ; les champs sans `Field` ont un `aria-label` (« Rechercher », « Annotation »,
+  « Message de candidature », « Nouvelle compétence », « Filtrer par statut », « Statut », « Rapport »). Les boutons
+  d'annotation des pages Offres et Marché portent `aria-label` + `aria-pressed`.
+- **Annonce des changements (4.1.3, AA)** : `ErrorBox` `role="alert"` ; `Notice` `success` / `info`
+  `role="status"` ; statut courant du tiroir des tâches dans une région `aria-live="polite"`.
+- **Onglets** : `Tabs` complet (WAI-ARIA) : flèches, Début / Fin, `tabIndex` itinérant, `role="tabpanel"` +
+  `aria-controls` quand le contenu est passé en `children` (candidature, `ComposeModal`).
 - **Graphiques** : SVG avec `role="img"` + `aria-label` et `<title>` par barre / point `[ACTUEL]` ;
   `QuotaBar` utilise `role="progressbar"` avec `aria-valuenow` / `aria-valuemax` `[ACTUEL]`.
-- **Icônes** : `Icon` est `aria-hidden="true"` ; tout bouton purement iconographique doit porter `aria-label`
-  (le lien « Ouvrir sur LinkedIn » de `OfferCard` n'a qu'un `title` → `[CIBLE]`).
+- **Icônes** : `Icon` est `aria-hidden="true"` ; tout bouton purement iconographique porte un `aria-label` (lien
+  « Ouvrir l'offre … sur LinkedIn (nouvel onglet) » de `OfferCard` compris).
 - **Saisie redondante (3.3.7, A, nouveau en 2.2)** : satisfait par les réponses mémorisées (I-05) et le
   pré-remplissage de `RunModal` depuis les Paramètres ; à conserver pour les nouveaux formulaires.
 - **Authentification accessible (3.3.8, AA)** : sans objet (aucun mot de passe dans l'UI, jeton injecté).
