@@ -49,8 +49,8 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 
 | ID | Invariant | Garde-fou technique |
 | :--- | :--- | :--- |
-| **I-01** | Toute ligne persistée appartient à un utilisateur ; toute requête filtre par `user_id`. | Colonne `user_id NOT NULL` + FK sur chaque table métier `[CIBLE]`. |
-| **I-02** | Un rapport est immuable après production. | Aucun endpoint `PUT/PATCH/DELETE` sur `/api/reports` ; pas de `UPDATE` sur `reports`. |
+| **I-01** | Toute ligne persistée appartient à un utilisateur ; toute requête filtre par `user_id`. | Colonne `user_id NOT NULL` + FK sur chaque table métier ; filtre dans chaque dépôt `db/repositories/*` `[ACTUEL]` (vague 1). |
+| **I-02** | Un rapport est immuable après production. | Aucun endpoint `PUT/PATCH/DELETE` sur `/api/reports` ; trigger `trg_reports_immutable` refuse tout `UPDATE` sur `reports` `[ACTUEL]`. |
 | **I-03** | Le statut d'une candidature ne régresse jamais automatiquement (`_PROGRESS` : `préparée/externe/échec`=0 < `contactée`=1 < `postulée`=2 < `entretien`=3). Seule une action explicite (`PATCH /api/applications/{id}`) peut le changer librement. | `application.advance_status()`. |
 | **I-04** | Aucune candidature ni aucun message n'est soumis sans confirmation explicite de l'utilisateur à l'instant de l'envoi. | Candidature : arrêt à l'écran de relecture puis question `confirm_*` posée pendant la tâche (jamais mémorisée). Message : `confirm: true` exigé dans le corps de `POST /api/applications/{id}/messages` (HTTP 422 sinon). |
 | **I-05** | Aucune réponse de formulaire n'est inventée : seuls `contact_email`, `contact_phone` et les `answers` mémorisées sont remplis ; toute autre question est posée à l'utilisateur (statut de tâche `attente_saisie`, délai 600 s). | `apply_bot`, `TaskContext.ask()`. |
@@ -58,12 +58,12 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 | **I-07** | Les plafonds de la prudence et les plafonds quotidiens ne sont jamais dépassés, même sur demande. `max_items` ne peut que réduire le volume de la prudence choisie. Relever un plafond quotidien dans les Paramètres est permis ; le dépasser ne l'est pas. | `activity.check_quota()` (HTTP 429). |
 | **I-08** | Un utilisateur n'utilise que **son propre** compte sur chaque source : ni faux compte, ni compte partagé, ni rotation d'identités. | Un seul jeu d'identifiants par source et par utilisateur. |
 | **I-09** | Minimisation : pour un profil tiers (`kind="person"`), seuls le titre et les compétences extraites sont conservés ; aucune donnée sensible (art. 9 RGPD : santé, opinions, religion, syndicat…) n'est stockée. | Filtre à l'ingestion. |
-| **I-10** | Les éléments `post` et `person` sont purgés à **30 jours** (`purge_after`) ; les offres non liées à une candidature à **90 jours**. | Tâche de purge quotidienne `[CIBLE]`. |
-| **I-11** | Claude ne reçoit **que des agrégats** (jamais un élément brut ni un tiers identifiable). Le **mode local** doit toujours produire un rapport **avec interprétation** sans aucun service IA : si Claude est indisponible ou échoue, bascule automatique sur l'interprète local. | `interpreter.interpret()` ; la valeur `none` est dépréciée `[CIBLE]`. |
+| **I-10** | Les éléments `post` et `person` sont purgés à **30 jours** (`purge_after`) ; les offres non liées à une candidature à **90 jours**. | `purge_after` posé à l'ingestion `[ACTUEL]` ; tâche de purge quotidienne `[CIBLE]` (vague 6). |
+| **I-11** | Claude ne reçoit **jamais de donnée de tiers identifiable**. L'**interprétation** ne lui envoie que des agrégats. La **génération de CV** (si l'utilisateur choisit Claude) lui envoie le profil de l'utilisateur et le texte de l'offre, **après retrait** par `nlp.redact_third_parties` des noms, emails, téléphones et URL de profils de personnes (décidé le 2026-10-09, E-6 option A). Le **mode local** doit toujours produire un rapport **avec interprétation** sans aucun service IA : si Claude est indisponible ou échoue, bascule automatique sur l'interprète local. | `interpreter.interpret()` ; la valeur `none` est dépréciée `[CIBLE]`. |
 | **I-12** | Prospection B2B uniquement si : destinataire joint **dans le cadre de ses fonctions**, objet **en rapport avec sa fonction** (une offre qu'il publie), information sur l'origine de l'adresse, **lien/mention de désinscription simple et gratuite** dans chaque message. | Gabarit de message imposé par `outreach`. |
 | **I-13** | Chaque contact porte sa base légale (`interet_legitime`) et sa source ; une adresse présente dans `suppression_list` bloque tout envoi, définitivement. | Vérification avant chaque envoi (HTTP 409). |
 | **I-14** | Un contact entreprise sans réponse est supprimé **3 ans** après le dernier contact. | `purge_after` sur `company_contacts`. |
-| **I-15** | Identifiants, mots de passe SMTP, clés API et cookies de session ne sont jamais versionnés ni journalisés. Les cookies de session expirent **72 h** après la dernière connexion par identifiants. | `.env` hors Git ; cookies chiffrés en base `[CIBLE]`. |
+| **I-15** | Identifiants, mots de passe SMTP, clés API et cookies de session ne sont jamais versionnés ni journalisés. Les cookies de session expirent **72 h** après la dernière connexion par identifiants. | `.env` hors Git ; cookies chiffrés Fernet en base (`platform_sessions`) `[ACTUEL]`. |
 | **I-16** | Une source en mode `navigateur` (LinkedIn, Malt, WTTJ) ne peut être utilisée qu'après acceptation, dans une **popup de risques**, de la version courante du texte de risques ; un changement de version redemande l'acceptation. | `source_consents` ; HTTP 428 sinon `[CIBLE]`. |
 
 ## 3. Matrice Actions Métier → Impact Système
@@ -88,7 +88,8 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 
 ## 4. Niveaux de Consistance & Traçabilité
 
-- **Consistance forte (transaction ACID PostgreSQL)** `[CIBLE]` :
+- **Consistance forte (transaction ACID PostgreSQL)** — `[ACTUEL]` pour le changement de statut et l'activation
+  d'un modèle, `[CIBLE]` pour l'envoi de message et le consentement :
   - changement de statut de candidature + entrée d'historique ;
   - envoi d'un message : contrôle `suppression_list` + contrôle de plafond + insertion `outreach_messages` dans
     la même transaction (verrou `SELECT … FOR UPDATE` sur la ligne `applications`) ;
@@ -98,9 +99,9 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
   tableau de bord (`/api/monitor`), purge de rétention (quotidienne).
 - **Sérialisation des actions navigateur** : une seule session Selenium à la fois par instance ; les tâches
   `browser=True` attendent en `en_attente` (verrou du `TaskManager`).
-- **Traçabilité** : chaque tâche a un `id` (12 caractères hexadécimaux) repris dans ses logs et dans
-  `activity_events.data.task_id`. Toutes les dates sont stockées en **UTC** (`timestamptz`) `[CIBLE]` ; le code
-  actuel écrit des dates locales naïves (`datetime.now().isoformat()`), à corriger lors de la migration.
+- **Traçabilité** : chaque tâche a un `id` (UUID v7) repris dans ses logs et, `[CIBLE]`, dans
+  `activity_events.data.task_id`. Toutes les dates sont stockées en **UTC** (`timestamptz`) et exposées en ISO 8601
+  suffixé `Z` `[ACTUEL]` (vague 1).
 
 ## 5. Risques Connus & Mesures d'Atténuation
 
@@ -117,4 +118,4 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 | R-5 | **Rupture des sélecteurs** à chaque évolution de l'interface LinkedIn / Malt / WTTJ. | — | Élevée / moyen | Repérage par texte et `aria-label` (FR + EN), jamais par classes CSS générées ; fixtures HTML dans `tests/fixtures/` ; échec lisible (statut `échec`) plutôt que comportement imprévisible. |
 | R-6 | **Conditions d'utilisation des autres sources**. Indeed : API *Job Sync* réservée aux partenaires approuvés (employeurs, agences, plateformes) et contrat développeur interdisant le scraping. Malt / WTTJ : pas d'API publique de lecture des offres. | Indeed Developer Agreement / Job Sync API terms | — | `indeed` : **import manuel uniquement** (URL ou texte d'offre collé). `france_travail` : **API officielle** « Offres d'emploi v2 » (francetravail.io, OAuth2 *client credentials*) — source sans risque, recommandée. `malt`, `wttj` : mode `navigateur` soumis aux mêmes règles que LinkedIn (I-06, I-07, I-16). |
 | R-7 | **Dissimulation de l'automatisation** : options Chrome comme `--disable-blink-features=AutomationControlled` ou `excludeSwitches=["enable-automation"]`. | Contraire à la ligne directrice ci-dessus | — | Retirées de `browser.py` le 2026-10-08 (vague 0) `[ACTUEL]`, garanti par `tests/test_browser.py`. Ne jamais ajouter d'option de ce type. |
-| R-8 | **Fuite de secrets locaux** (cookies LinkedIn, mot de passe SMTP). | RGPD art. 32 | Faible / élevé | API liée à `127.0.0.1` uniquement, vérification `Host`/`Origin`, jeton local `X-Local-Token` ; cookies chiffrés en base avec `LM_SECRET_KEY` `[CIBLE]`. |
+| R-8 | **Fuite de secrets locaux** (cookies LinkedIn, mot de passe SMTP). | RGPD art. 32 | Faible / élevé | API liée à `127.0.0.1` uniquement, vérification `Host`/`Origin`, jeton local `X-Local-Token` ; cookies chiffrés en base avec `LM_SECRET_KEY` `[ACTUEL]`. |

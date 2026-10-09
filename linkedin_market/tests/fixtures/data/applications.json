@@ -1,0 +1,9 @@
+{"job:1004": {"title": "Data Architect", "company": "Fictive SARL", "url": "https://www.linkedin.com/jobs/view/1004/", "score": 77.5,
+  "folder": "@DATA@/applications/20261001-fictive-data-architect", "generator": "local", "status": "postulée",
+  "prepared_at": "@J-6@", "updated_at": "@J-5@", "apply_state": "postulée",
+  "contacts": [{"name": "Recruteuse Fictive", "profile_url": "https://www.linkedin.com/in/recruteuse-fictive/", "email": "recrutement@exemple.test", "headline": "Talent Acquisition", "source": "linkedin"},
+               {"name": "Contact Manuel", "profile_url": "", "email": "contact@exemple.test", "headline": "", "source": "manuel"}],
+  "history": [{"at": "@J-6@", "kind": "statut", "status": "contactée"}, {"at": "@J-5@", "kind": "candidature", "state": "postulée", "detail": ""},
+              {"at": "@J-5@", "kind": "message", "channel": "email", "to": "recrutement@exemple.test", "extrait": "Bonjour"}]},
+ "job:2001": {"title": "Offre hors historique", "company": "Absente SAS", "url": "https://www.linkedin.com/jobs/view/2001/", "score": 70,
+  "folder": "@DATA@/applications/20261002-absente-offre", "generator": "claude", "status": "préparée", "prepared_at": "@J-3@"}}

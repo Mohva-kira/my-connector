@@ -8,12 +8,12 @@
 | Points d'entrée | CLI `python -m linkedin_market` (pipeline complet, saisie interactive) et interface web `python -m linkedin_market.web` (http://127.0.0.1:8765). Les deux appellent les mêmes fonctions de `pipeline.py` (aucune saisie ni `sys.exit` dans `pipeline`). | `[ACTUEL]` |
 | Backend | **FastAPI** (≥ 0.115) servi par **Uvicorn**, routeurs sous `/api` (`core`, `jobs`, `applications`). Swagger uniquement en `--dev`. | `[ACTUEL]` |
 | Frontend | SPA **React 18 + TypeScript 5 + Vite 6 + Tailwind CSS 3 + TanStack Query 5**, compilée dans `web/frontend/dist` et servie par FastAPI. | `[ACTUEL]` |
-| Tâches longues | `TaskManager` en mémoire : `ThreadPoolExecutor`, un verrou partagé pour les tâches navigateur (un seul Selenium à la fois), suivi par *polling* de `/api/tasks/{id}`. | `[ACTUEL]` |
+| Tâches longues | `TaskManager` : exécution en mémoire (`ThreadPoolExecutor`), état persisté dans la table `tasks` ; un verrou partagé pour les tâches navigateur (un seul Selenium à la fois), suivi par *polling* de `/api/tasks/{id}`. | `[ACTUEL]` |
 | Automatisation navigateur | **Selenium 4.22** (Chrome puis Firefox, Selenium Manager pour les drivers). | `[ACTUEL]` |
 | Analyse | NumPy (TF-IDF, n-grammes, régression logistique par descente de gradient) — aucune dépendance ML lourde. | `[ACTUEL]` |
 | IA | **Claude** via SDK `anthropic` (modèle par défaut `claude-opus-5-5`, surchargeable par `ANTHROPIC_MODEL`), **optionnel** : l'interprète local à base de règles produit toujours une interprétation. | `[ACTUEL]` |
-| Persistance | Fichiers JSON / JSONL dans `linkedin_market_data/` (écriture atomique `tmp` + `os.replace`). | `[ACTUEL]` → à remplacer |
-| Persistance cible | **PostgreSQL 18** via **SQLAlchemy 2.x** (ORM, style `Mapped[]`), driver **psycopg 3**, migrations **Alembic**. Lancé localement (paquet système ou `docker compose`). | `[CIBLE]` |
+| Fichiers | `linkedin_market_data/` ne garde que les rapports HTML, les dossiers de candidature et les PDF ; les anciens JSON / JSONL sont importés une fois au démarrage (`db/import_json.py`) puis renommés `*.migrated`. | `[ACTUEL]` (vague 1) |
+| Persistance | **PostgreSQL 18** via **SQLAlchemy 2.x** (ORM, style `Mapped[]`), driver **psycopg 3**, migrations **Alembic** (`upgrade head` au démarrage). Lancé localement (paquet système ou `linkedin_market/compose.yaml`, port publié sur `127.0.0.1` seulement) ; URL dans `LM_DATABASE_URL`. | `[ACTUEL]` (vague 1) |
 | Langage | **Python 3.14** (minimum requis), typage complet, linter **ruff** 0.16 (`linkedin_market/ruff.toml`, `requirements-dev.txt` ; dette initiale de 224 avertissements). | `[ACTUEL]` |
 
 ### Pourquoi pas de Redis / Celery
@@ -51,7 +51,7 @@ C4Context
   Rel(linkedin, recruteur, "Délivre le message LinkedIn", "")
 ```
 
-## 3. Diagramme C4 — Niveau Conteneurs (cible)
+## 3. Diagramme C4 — Niveau Conteneurs
 
 ```mermaid
 C4Container
@@ -94,7 +94,7 @@ C4Container
 | Orchestration | `pipeline.py`, `web/services.py`, `web/tasks.py`, `web/guards.py` | Enchaîner les étapes, gérer annulation, saisies et vérifications manuelles, plafonds et blocages. |
 | Domaine | `nlp.py`, `trends.py`, `matching.py`, `profile.py`, `application.py`, `report.py`, `interpreter.py`, `settings.py` | Calculs et règles, sans I/O réseau. |
 | Intégrations | `browser.py`, `session.py`, `scraper.py`, `apply_bot.py`, `contacts.py`, `outreach.py`, `profile_sync.py`, `cv_pdf.py` ; `sources/france_travail.py` `[CIBLE]` | Accès aux systèmes externes ; lèvent des exceptions métier lisibles (`BlockedError`, `OutreachError`, `ProfileSyncError`). |
-| Persistance | `storage.py`, `activity.py`, `config.py` ; `db/models.py`, `db/session.py`, `db/repositories/*`, `db/import_json.py`, `migrations/` (Alembic) `[CIBLE]` | Lecture / écriture des données ; seul endroit autorisé à toucher la base ou `DATA_DIR`. |
+| Persistance | `storage.py`, `activity.py`, `config.py` ; `db/models.py`, `db/session.py`, `db/repositories/*`, `db/import_json.py`, `db/bootstrap.py`, `migrations/` (Alembic) `[ACTUEL]` | Lecture / écriture des données ; seul endroit autorisé à toucher la base ou `DATA_DIR`. |
 
 Règle de dépendance : `Entrées → Orchestration → Domaine / Intégrations → Persistance`. Le domaine n'importe
 jamais FastAPI ni Selenium ; les routeurs n'importent jamais Selenium.

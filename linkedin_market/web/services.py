@@ -4,10 +4,27 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
 
-from .. import (activity, application, apply_bot, config, contacts as contacts_mod, cv_pdf, interpreter, matching, outreach,
-                pipeline, profile_sync, report, session, settings, storage)
+from .. import (
+    activity,
+    application,
+    apply_bot,
+    config,
+    cv_pdf,
+    interpreter,
+    matching,
+    outreach,
+    pipeline,
+    profile_sync,
+    report,
+    session,
+    settings,
+    storage,
+)
+from .. import (
+    contacts as contacts_mod,
+)
+from ..db import utc_iso, utcnow
 from ..models import SearchRequest
 from .tasks import RUNNING, TaskContext
 
@@ -24,7 +41,10 @@ def build_request(overrides: dict | None = None) -> SearchRequest:
         raise ValueError("Renseigne le mot-clé du poste visé (Paramètres ou lancement d'analyse).")
     caution = values["caution"]
     return SearchRequest(
-        keyword=keyword, location=values["location"], remote_only=values["remote_only"], caution=caution,
+        keyword=keyword,
+        location=values["location"],
+        remote_only=values["remote_only"],
+        caution=caution,
         max_items=values["max_items"] or config.CAUTION_LEVELS[caution].max_items,
         profile_source=values["profile_source"],
     )
@@ -62,8 +82,16 @@ def tidy(text: str, limit: int, *, drop: bool = False) -> str:
 
 
 # Régions telles que LinkedIn les affiche (interface en français) à la fin de l'en-tête d'une offre.
-_REGIONS = ("Europe, Moyen-Orient et Afrique", "Afrique subsaharienne", "Amérique du Nord", "Amérique latine",
-            "Asie-Pacifique", "Union européenne", "Moyen-Orient", "Monde entier")
+_REGIONS = (
+    "Europe, Moyen-Orient et Afrique",
+    "Afrique subsaharienne",
+    "Amérique du Nord",
+    "Amérique latine",
+    "Asie-Pacifique",
+    "Union européenne",
+    "Moyen-Orient",
+    "Monde entier",
+)
 _POSTED = re.compile(r"(?:Republication )?il y a \d+ \w+")
 _APPLICANTS = re.compile(r"(?:Plus de )?\d+ (?:candidatures|personnes ont cliqué sur Postuler)")
 
@@ -80,14 +108,20 @@ def repair_identity(job: dict) -> dict:
     if " · " not in company or not title or not company.startswith(title):
         return {**job, "title": tidy(title, 150), "company": tidy(company, 80, drop=True)}
     head, _, meta = company.partition(" · ")
-    rest, location = head[len(title):].strip(), ""
+    rest, location = head[len(title) :].strip(), ""
     for region in _REGIONS:
         if rest.endswith(region):
             rest, location = rest[: -len(region)].strip(), region
             break
     posted, applicants = _POSTED.search(meta), _APPLICANTS.search(meta)
-    return {**job, "title": tidy(rest or title, 150), "company": tidy(title, 80, drop=True), "location": location,
-            "posted_label": posted.group(0) if posted else "", "applicants": applicants.group(0) if applicants else ""}
+    return {
+        **job,
+        "title": tidy(rest or title, 150),
+        "company": tidy(title, 80, drop=True),
+        "location": location,
+        "posted_label": posted.group(0) if posted else "",
+        "applicants": applicants.group(0) if applicants else "",
+    }
 
 
 def jobs_overview(results: dict) -> list[dict]:
@@ -96,8 +130,13 @@ def jobs_overview(results: dict) -> list[dict]:
     rows = []
     for job in results.get("top_jobs", []):
         entry = apps.get(job["id"])
-        rows.append({**repair_identity(job), "label": labels.get(job["id"]),
-                     "application_status": entry["status"] if entry else None})
+        rows.append(
+            {
+                **repair_identity(job),
+                "label": labels.get(job["id"]),
+                "application_status": entry["status"] if entry else None,
+            }
+        )
     return rows
 
 
@@ -106,18 +145,25 @@ def run_analysis(ctx: TaskContext, request: SearchRequest, *, scrape: bool, inte
     linkedin_text = ""
     if scrape:
         want_profile = request.profile_source == "linkedin" or (
-            request.profile_source == "auto" and pipeline.profile_mod.find_profile_file() is None)
+            request.profile_source == "auto" and pipeline.profile_mod.find_profile_file() is None
+        )
         linkedin_text = pipeline.scrape(
-            request, want_profile, interactive=False, on_manual_check=ctx.manual_check,
-            should_stop=ctx.should_stop, on_ready=lambda: ctx.set_status(RUNNING))
+            request,
+            want_profile,
+            interactive=False,
+            on_manual_check=ctx.manual_check,
+            should_stop=ctx.should_stop,
+            on_ready=lambda: ctx.set_status(RUNNING),
+        )
     ctx.check()
     prof = pipeline.build_profile(request, linkedin_text)
     ctx.log(f"Profil ({prof.origin}) : {len(prof.skills)} compétences.")
     results, scored = pipeline.analyse(request, prof)
     ctx.check()
     text, used = interpreter.interpret(pipeline.summary_for_interpreter(results), interpreter_name)
-    results.update(interpretation=text, interpreter=used,
-                   interpreter_model=config.anthropic_model() if used == "claude" else "")
+    results.update(
+        interpretation=text, interpreter=used, interpreter_model=config.anthropic_model() if used == "claude" else ""
+    )
     _, json_path = report.write(results)
     activity.record("run", keyword=request.keyword, scrape=scrape, jobs=len(scored))
     ctx.log(f"Rapport enregistré : {json_path.name}")
@@ -144,7 +190,9 @@ def train_model(ctx: TaskContext) -> dict:
     model = matching.train_from_labels(prof, request.keyword, storage.load_labels(), storage.load_labeled_items())
     if model is None:
         raise ValueError(f"Pas encore assez d'annotations (min. {matching.MIN_LABELS}, des deux types) pour entraîner.")
-    ctx.log(f"Modèle réentraîné sur {model.n_labels} annotations (précision {(model.train_accuracy or 0) * 100:.0f} %).")
+    ctx.log(
+        f"Modèle réentraîné sur {model.n_labels} annotations (précision {(model.train_accuracy or 0) * 100:.0f} %)."
+    )
     return {**rescore(ctx), "n_labels": model.n_labels, "accuracy": model.train_accuracy}
 
 
@@ -199,7 +247,7 @@ def apply_job(ctx: TaskContext, job_id: str) -> dict:
 
 def _record_apply_result(job_id: str, entry: dict, result: apply_bot.ApplyResult) -> dict:
     title = entry.get("title", "")
-    application.add_history(job_id, "candidature", state=result.state, detail=result.detail)
+    application.add_history(job_id, "apply", state=result.state, detail=result.detail)
     if result.state == "postulée":
         activity.record("apply", job=job_id, title=title)
         application.advance_status(job_id, "postulée")
@@ -246,7 +294,9 @@ def message_draft(job_id: str) -> dict:
     return {"subject": f"Candidature — {tidy(entry.get('title', ''), 100)}", "body": body}
 
 
-def send_message(ctx: TaskContext, job_id: str, *, channel: str, to: str, subject: str, body: str, attach_cv: bool) -> dict:
+def send_message(
+    ctx: TaskContext, job_id: str, *, channel: str, to: str, subject: str, body: str, attach_cv: bool
+) -> dict:
     """Envoie un message (email ou LinkedIn) déjà confirmé par l'utilisateur, puis le journalise."""
     entry = application.get_application(job_id)
     cfg = settings.load_settings()
@@ -255,7 +305,11 @@ def send_message(ctx: TaskContext, job_id: str, *, channel: str, to: str, subjec
         attachments = []
         if attach_cv:
             files = application.read_files(entry)
-            attachments = [cv_pdf.ensure_cv_pdf(application.folder_of(entry), files["cv"], entry.get("title") or "CV", config.CV_PDF_NAME)]
+            attachments = [
+                cv_pdf.ensure_cv_pdf(
+                    application.folder_of(entry), files["cv"], entry.get("title") or "CV", config.CV_PDF_NAME
+                )
+            ]
         ctx.log(f"Envoi de l'email à {to}…")
         sent = outreach.send_email(to, subject, body, attachments)
     else:
@@ -267,7 +321,9 @@ def send_message(ctx: TaskContext, job_id: str, *, channel: str, to: str, subjec
             session.login(driver, interactive=False, on_manual_check=ctx.manual_check)
             ctx.set_status(RUNNING)
             ctx.log(f"Envoi du message LinkedIn à {to}…")
-            sent = outreach.send_linkedin_message(driver, to, body, config.CAUTION_LEVELS[cfg["caution"]], check=ctx.check)
+            sent = outreach.send_linkedin_message(
+                driver, to, body, config.CAUTION_LEVELS[cfg["caution"]], check=ctx.check
+            )
         except PermissionError as exc:
             activity.record("blocked", where="message LinkedIn", job=job_id)
             raise RuntimeError(str(exc)) from exc
@@ -276,14 +332,22 @@ def send_message(ctx: TaskContext, job_id: str, *, channel: str, to: str, subjec
         if sent.get("truncated"):
             ctx.log("La note de connexion dépassait 300 caractères : elle a été tronquée.")
     activity.record(f"message_{channel}", job=job_id, to=to, title=entry.get("title", ""))
-    application.add_history(job_id, "message", channel=channel, to=to, extrait=body[:120],
-                            **({"mode": sent["mode"]} if "mode" in sent else {}))
+    application.add_history(
+        job_id,
+        "message",
+        channel=channel,
+        to=to,
+        extrait=body[:120],
+        **({"mode": sent["mode"]} if "mode" in sent else {}),
+    )
     application.advance_status(job_id, "contactée")
     return sent
 
 
 def send_test_email(to: str) -> dict:
-    return outreach.send_email(to, "Test my-connector", "Ceci est un email de test envoyé depuis l'interface linkedin_market.")
+    return outreach.send_email(
+        to, "Test my-connector", "Ceci est un email de test envoyé depuis l'interface linkedin_market."
+    )
 
 
 def import_linkedin_profile(ctx: TaskContext) -> dict:
@@ -302,7 +366,7 @@ def import_linkedin_profile(ctx: TaskContext) -> dict:
         driver.quit()
     if not text:
         raise RuntimeError("Profil LinkedIn illisible (page inattendue ou accès bloqué).")
-    config.LINKEDIN_PROFILE_CACHE.write_text(text, encoding="utf-8")
+    storage.save_linkedin_profile_text(text)
     prof = pipeline.build_profile(request, text, use_overrides=False)
     ctx.log(f"Profil LinkedIn importé : {len(prof.skills)} compétences détectées.")
     return {"skills": prof.skills}
@@ -340,9 +404,14 @@ def effective_profile(request: SearchRequest | None = None) -> dict:
     except pipeline.ProfileMissingError as exc:
         return {"available": False, "message": str(exc), "overrides": overrides, "skills": [], "base_skills": []}
     return {
-        "available": True, "origin": effective.origin, "title": effective.title, "skills": effective.skills,
-        "base_skills": base.skills, "years_experience": effective.years_experience,
-        "seniority": effective.seniority, "overrides": overrides,
+        "available": True,
+        "origin": effective.origin,
+        "title": effective.title,
+        "skills": effective.skills,
+        "base_skills": base.skills,
+        "years_experience": effective.years_experience,
+        "seniority": effective.seniority,
+        "overrides": overrides,
     }
 
 
@@ -355,10 +424,16 @@ def skill_suggestions(results: dict | None, owned: list[str]) -> dict:
     if not results:
         return {"missing": [], "rising": []}
     have = set(owned)
-    missing = [{"skill": r["skill"], "weight": r["weight"]} for r in results.get("gap", {}).get("missing", [])
-               if r["skill"] not in have][:15]
-    rising = [{"skill": r["term"], "growth": r["growth"]} for r in results.get("rising", {}).get("skills", [])
-              if r["growth"] > 0 and r["term"] not in have][:10]
+    missing = [
+        {"skill": r["skill"], "weight": r["weight"]}
+        for r in results.get("gap", {}).get("missing", [])
+        if r["skill"] not in have
+    ][:15]
+    rising = [
+        {"skill": r["term"], "growth": r["growth"]}
+        for r in results.get("rising", {}).get("skills", [])
+        if r["growth"] > 0 and r["term"] not in have
+    ][:10]
     return {"missing": missing, "rising": rising}
 
 
@@ -390,17 +465,30 @@ def monitor_snapshot(tasks) -> dict:
     ]
     all_tasks = tasks.list(30)
     return {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "by_status": by_status, "funnel": funnel, "quotas": quotas(),
+        "generated_at": utc_iso(utcnow()),
+        "by_status": by_status,
+        "funnel": funnel,
+        "quotas": quotas(),
         "activity": activity.per_day(14),
         "recent_events": list(reversed(activity.load(15))),
         "model": results["model"] if results else None,
-        "last_analysis": ({"report": results["_report"], "generated_at": results["generated_at"],
-                           "keyword": results["request"]["keyword"], "counts": results["counts"]} if results else None),
+        "last_analysis": (
+            {
+                "report": results["_report"],
+                "generated_at": results["generated_at"],
+                "keyword": results["request"]["keyword"],
+                "counts": results["counts"],
+            }
+            if results
+            else None
+        ),
         "active_tasks": [t.public(with_logs=False) for t in tasks.active()],
         "recent_tasks": [t.public(with_logs=False) for t in all_tasks[:10]],
-        "errors": [{"id": t.id, "title": t.title, "error": t.error, "at": t.finished_at}
-                   for t in all_tasks if t.status == "échec"][:5],
+        "errors": [
+            {"id": t.id, "title": t.title, "error": t.error, "at": t.finished_at}
+            for t in all_tasks
+            if t.status == "échec"
+        ][:5],
     }
 
 
@@ -409,14 +497,20 @@ def status_snapshot(tasks) -> dict:
     age = session.session_age_hours()
     email, password = config.linkedin_credentials()
     return {
-        "session": {"age_hours": round(age, 1) if age is not None else None, "ttl_hours": config.SESSION_TTL_HOURS,
-                    "valid": age is not None and age <= config.SESSION_TTL_HOURS},
+        "session": {
+            "age_hours": round(age, 1) if age is not None else None,
+            "ttl_hours": config.SESSION_TTL_HOURS,
+            "valid": age is not None and age <= config.SESSION_TTL_HOURS,
+        },
         "credentials_configured": bool(email and password),
         "smtp_configured": config.smtp_config() is not None,
         "anthropic_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
-        "interpreter": values["interpreter"], "browser": config.browser_name(), "headless": config.headless(),
+        "interpreter": values["interpreter"],
+        "browser": config.browser_name(),
+        "headless": config.headless(),
         "profile_file": pipeline.profile_mod.find_profile_file() is not None,
         "has_analysis": latest_results() is not None,
-        "quotas": quotas(), "active_tasks": len(tasks.active()), "blocked": activity.block_status(),
+        "quotas": quotas(),
+        "active_tasks": len(tasks.active()),
+        "blocked": activity.block_status(),
     }
-

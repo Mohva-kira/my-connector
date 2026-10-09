@@ -5,41 +5,67 @@ import threading
 import pytest
 
 from linkedin_market import config, contacts, outreach
-from linkedin_market.tests.browser_fixtures import FakeHooks, FIXTURES, driver, url_of, workdir  # noqa: F401
+from linkedin_market.tests.browser_fixtures import url_of
 
 CAUTION = config.Caution("test", 1, 0.0, 0.0)
 
 
 # ------------------------------------------------------------------- contacts
 def test_parse_team_and_extract_email():
-    rows = [{"slug": "jane-doe", "text": "Jane Doe • 2e\nTech Recruiter\nEnvoyer un message"},
-            {"slug": "x", "text": ""}]
+    rows = [
+        {"slug": "jane-doe", "text": "Jane Doe • 2e\nTech Recruiter\nEnvoyer un message"},
+        {"slug": "x", "text": ""},
+    ]
     parsed = contacts.parse_team(rows)
-    assert parsed[0] == {"name": "Jane Doe", "profile_url": "https://www.linkedin.com/in/jane-doe/", "email": None,
-                         "headline": "Tech Recruiter", "source": "linkedin"}
-    assert parsed[1]["name"] == "X"                                        # repli sur le slug
+    assert parsed[0] == {
+        "full_name": "Jane Doe",
+        "profile_url": "https://www.linkedin.com/in/jane-doe/",
+        "email": None,
+        "headline": "Tech Recruiter",
+        "source": "linkedin_equipe_recrutement",
+    }
+    assert parsed[1]["full_name"] == "X"  # repli sur le slug
     assert contacts.extract_email(["bad", "a@b.io"], "") == "a@b.io"
     assert contacts.extract_email([], "Écris à jane@acme.com ou au 06") == "jane@acme.com"
     assert contacts.extract_email([], "rien") is None
 
 
 def test_merge_keeps_manual_email():
-    existing = [{"name": "Jane", "profile_url": "https://www.linkedin.com/in/jane-doe/", "email": "j@acme.com", "source": "manuel"},
-                {"name": "Autre", "profile_url": "", "email": "o@x.io", "source": "manuel"}]
-    found = [{"name": "Jane Doe", "profile_url": "https://www.linkedin.com/in/jane-doe/", "email": None, "headline": "Recruiter", "source": "linkedin"}]
+    existing = [
+        {
+            "full_name": "Jane",
+            "profile_url": "https://www.linkedin.com/in/jane-doe/",
+            "email": "j@acme.com",
+            "source": "manuel",
+        },
+        {"full_name": "Autre", "profile_url": "", "email": "o@x.io", "source": "manuel"},
+    ]
+    found = [
+        {
+            "full_name": "Jane Doe",
+            "profile_url": "https://www.linkedin.com/in/jane-doe/",
+            "email": None,
+            "headline": "Recruiter",
+            "source": "linkedin_equipe_recrutement",
+        }
+    ]
     merged = contacts.merge_contacts(existing, found)
-    assert len(merged) == 2 and merged[0]["email"] == "j@acme.com" and merged[0]["name"] == "Jane Doe"
+    assert len(merged) == 2 and merged[0]["email"] == "j@acme.com" and merged[0]["full_name"] == "Jane Doe"
 
 
 def test_find_hiring_team_on_page(driver):
-    local = {"https://www.linkedin.com/in/jane-doe/": url_of("contact-jane.html"),
-             "https://www.linkedin.com/in/john-roe/": url_of("contact-john.html")}
+    local = {
+        "https://www.linkedin.com/in/jane-doe/": url_of("contact-jane.html"),
+        "https://www.linkedin.com/in/john-roe/": url_of("contact-john.html"),
+    }
     logs = []
-    found = contacts.find_hiring_team(driver, url_of("hiring_team.html"), CAUTION, log_fn=logs.append, to_overlay=lambda u: local[u])
-    assert [c["name"] for c in found] == ["Jane Doe", "John Roe"]            # « Someone Else » (autre section) exclu
+    found = contacts.find_hiring_team(
+        driver, url_of("hiring_team.html"), CAUTION, log_fn=logs.append, to_overlay=lambda u: local[u]
+    )
+    assert [c["full_name"] for c in found] == ["Jane Doe", "John Roe"]  # « Someone Else » (autre section) exclu
     assert found[0]["email"] == "jane@acme.com" and found[1]["email"] is None
     assert found[0]["headline"].startswith("Tech Recruiter")
-    assert any("email non affiché" in l for l in logs)
+    assert any("email non affiché" in line for line in logs)
 
 
 def test_no_team_block_returns_nothing(driver):
@@ -56,7 +82,9 @@ class _SMTP(socketserver.StreamRequestHandler):
             line = raw.decode()
             if in_data:
                 if line == ".\r\n":
-                    self.server.mails.append("".join(data)); in_data = False; self.wfile.write(b"250 ok\r\n")
+                    self.server.mails.append("".join(data))
+                    in_data = False
+                    self.wfile.write(b"250 ok\r\n")
                 else:
                     data.append(line)
                 continue
@@ -66,9 +94,11 @@ class _SMTP(socketserver.StreamRequestHandler):
             elif cmd in ("MAIL", "RCPT"):
                 self.wfile.write(b"250 ok\r\n")
             elif cmd == "DATA":
-                in_data = True; self.wfile.write(b"354 go\r\n")
+                in_data = True
+                self.wfile.write(b"354 go\r\n")
             elif cmd == "QUIT":
-                self.wfile.write(b"221 bye\r\n"); return
+                self.wfile.write(b"221 bye\r\n")
+                return
             else:
                 self.wfile.write(b"250 ok\r\n")
 
@@ -79,13 +109,21 @@ def smtp_server():
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield server
-    server.shutdown(); server.server_close()
+    server.shutdown()
+    server.server_close()
 
 
 def test_send_email_with_attachment(smtp_server, tmp_path):
     pdf = tmp_path / "cv.pdf"
     pdf.write_bytes(b"%PDF-1.4 x")
-    smtp = {"host": "127.0.0.1", "port": smtp_server.server_address[1], "security": "none", "user": "", "password": "", "from": "me@example.com"}
+    smtp = {
+        "host": "127.0.0.1",
+        "port": smtp_server.server_address[1],
+        "security": "none",
+        "user": "",
+        "password": "",
+        "from": "me@example.com",
+    }
     result = outreach.send_email("jane@acme.com", "Candidature — Dev", "Bonjour Jane\né", [pdf], smtp)
     assert result["to"] == "jane@acme.com" and result["attachments"] == ["cv.pdf"]
     raw = smtp_server.mails[0]
@@ -103,11 +141,13 @@ def test_email_validation_and_missing_smtp(monkeypatch):
     with pytest.raises(outreach.OutreachError, match="saut de ligne"):
         outreach.send_email("a@b.io", "s\nBcc: x@y.z", "b", smtp=smtp)
     with pytest.raises(outreach.OutreachError, match="Envoi impossible"):
-        outreach.send_email("a@b.io", "s", "b", smtp=smtp)                      # port fermé
+        outreach.send_email("a@b.io", "s", "b", smtp=smtp)  # port fermé
 
 
 def test_smtp_config_from_env(monkeypatch):
-    monkeypatch.setenv("SMTP_HOST", "smtp.x.io"); monkeypatch.setenv("SMTP_FROM", "me@x.io"); monkeypatch.setenv("SMTP_SECURITY", "ssl")
+    monkeypatch.setenv("SMTP_HOST", "smtp.x.io")
+    monkeypatch.setenv("SMTP_FROM", "me@x.io")
+    monkeypatch.setenv("SMTP_SECURITY", "ssl")
     monkeypatch.delenv("SMTP_PORT", raising=False)
     assert config.smtp_config()["port"] == 465
 
@@ -119,7 +159,9 @@ def local_profiles(monkeypatch):
 
 
 def test_linkedin_direct_message(driver, local_profiles):
-    result = outreach.send_linkedin_message(driver, url_of("profile_first_degree.html"), "Bonjour Jane,\nvoici ma candidature.", CAUTION, timeout=5)
+    result = outreach.send_linkedin_message(
+        driver, url_of("profile_first_degree.html"), "Bonjour Jane,\nvoici ma candidature.", CAUTION, timeout=5
+    )
     assert result["mode"] == "message"
     assert driver.execute_script("return window.__sent") == "Bonjour Jane,\nvoici ma candidature."
 

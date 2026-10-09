@@ -1,6 +1,7 @@
 -r requirements.txt
 # Outils de développement de linkedin_market (non installés dans l'image Docker d'email_analyzer).
-# .venv/bin/pip install -r linkedin_market/requirements-dev.txt
+# Installation (voir CLAUDE.md) : /usr/bin/python3 -m pip --python .venv/bin/python install -r linkedin_market/requirements-dev.txt
+# (ou .venv/bin/pip install -r linkedin_market/requirements-dev.txt si le .venv a pip)
 ruff>=0.16,<0.17
 pytest>=9,<10
 httpx>=0.27,<1

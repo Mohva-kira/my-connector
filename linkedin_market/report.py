@@ -1,7 +1,7 @@
-"""Rapport HTML autonome (Chart.js) + JSON de résultats.
+"""Rapport HTML autonome (Chart.js) + résultats JSON en base (``reports``, immuable : I-02).
 
-Le JSON a la même structure que les données injectées dans la page : une
-future application web pourra le consommer tel quel.
+Le JSON (``reports.summary``) a la même structure que les données injectées dans la page. Le HTML reste un
+fichier sous ``DATA_DIR/reports/`` ; la base stocke son chemin relatif à ``DATA_DIR`` (D-5).
 """
 
 from __future__ import annotations
@@ -9,10 +9,14 @@ from __future__ import annotations
 import html
 import json
 import re
-from datetime import datetime
 from pathlib import Path
 
 from . import config
+from .db import utc_iso, utcnow
+from .db.repositories import reports as reports_repo
+from .db.repositories import user_transaction
+
+_SLUG_ATTEMPTS = 5
 
 _TEMPLATE = """<!doctype html>
 <html lang="fr">
@@ -234,7 +238,7 @@ if (M.loss_history.length) {
 </script>
 </body>
 </html>
-"""
+"""  # noqa: E501
 
 
 def _slug(text: str) -> str:
@@ -242,15 +246,38 @@ def _slug(text: str) -> str:
 
 
 def write(results: dict) -> tuple[Path, Path]:
+    """Enregistre un **nouveau** rapport ; renvoie ``(fichier HTML, Path(nom du rapport))``.
+
+    Nom ``mot-cle-AAAA-MM-JJ`` (jour local), puis ``-2``, ``-3``… le même jour (C-8, E-1) ; un rapport existant
+    n'est jamais réécrit. ``generated_at`` devient l'horodatage UTC de création (C-1). Le second élément n'est
+    plus un fichier JSON : seul son ``name`` / ``stem`` (le nom du rapport) a un sens.
+    """
     config.ensure_data_dirs()
-    stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    base = config.REPORTS_DIR / f"{_slug(results['request']['keyword'])}-{stamp}"
-    json_path = base.with_suffix(".json")
-    html_path = base.with_suffix(".html")
-    payload = json.dumps(results, ensure_ascii=False, default=str)
-    json_path.write_text(json.dumps(results, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    page = (_TEMPLATE
-            .replace("__KEYWORD__", html.escape(results["request"]["keyword"]))
-            .replace("__DATA__", payload.replace("</", "<\\/")))
-    html_path.write_text(page, encoding="utf-8")
-    return html_path, json_path
+    created_at = utcnow()
+    results["generated_at"] = utc_iso(created_at)
+    keyword = results["request"]["keyword"]
+    base = f"{_slug(keyword)}-{created_at.astimezone().date().isoformat()}"
+    summary = json.loads(json.dumps(results, ensure_ascii=False, default=str))
+    used = results.get("interpreter")
+    page = _TEMPLATE.replace("__KEYWORD__", html.escape(keyword)).replace(
+        "__DATA__", json.dumps(summary, ensure_ascii=False).replace("</", "<\\/")
+    )
+    for _ in range(_SLUG_ATTEMPTS):
+        with user_transaction() as (s, uid):
+            slug = reports_repo.next_slug(s, uid, base)
+            html_path = config.REPORTS_DIR / f"{slug}.html"
+            inserted = reports_repo.insert_report(
+                s,
+                uid,
+                slug=slug,
+                keyword=keyword,
+                summary=summary,
+                interpretation=results.get("interpretation") or "",
+                interpreter_used=used if used in ("claude", "local") else "local",
+                html_path=html_path.relative_to(config.DATA_DIR).as_posix(),
+                created_at=created_at,
+            )
+            if inserted:
+                html_path.write_text(page, encoding="utf-8")
+                return html_path, Path(slug)
+    raise RuntimeError("Impossible d'attribuer un nom unique au rapport : relance l'analyse.")

@@ -31,7 +31,9 @@ def start_run(request: Request, body: RunBody) -> dict:
     overrides = body.model_dump(exclude_none=True, exclude={"scrape", "interpreter"})
     try:
         search = services.build_request(overrides)
-        interpreter_name = settings.validate_settings({"interpreter": body.interpreter or settings.load_settings()["interpreter"]})["interpreter"]
+        interpreter_name = settings.validate_settings(
+            {"interpreter": body.interpreter or settings.load_settings()["interpreter"]}
+        )["interpreter"]
     except (ValueError, settings.SettingsError) as exc:
         raise HTTPException(422, str(exc)) from exc
     if body.scrape:
@@ -40,8 +42,11 @@ def start_run(request: Request, body: RunBody) -> dict:
     else:
         title = f"Analyse de l'historique — {search.keyword}"
     task = tasks.submit(
-        "run", title, lambda ctx: services.run_analysis(ctx, search, scrape=body.scrape, interpreter_name=interpreter_name),
-        browser=body.scrape)
+        "run",
+        title,
+        lambda ctx: services.run_analysis(ctx, search, scrape=body.scrape, interpreter_name=interpreter_name),
+        browser=body.scrape,
+    )
     return task.public()
 
 
@@ -78,8 +83,14 @@ def list_jobs(min_score: float = 0, label: str | None = None, status: str | None
         rows = [r for r in rows if needle in nlp.normalize(f"{r['title']} {r['company']} {r['location']}")]
     for row in rows:
         row.pop("summary", None)
-    return {"report": results["_report"], "generated_at": results["generated_at"], "keyword": results["request"]["keyword"],
-            "model": results["model"], "min_labels": results.get("min_labels", matching.MIN_LABELS), "jobs": rows}
+    return {
+        "report": results["_report"],
+        "generated_at": results["generated_at"],
+        "keyword": results["request"]["keyword"],
+        "model": results["model"],
+        "min_labels": results.get("min_labels", matching.MIN_LABELS),
+        "jobs": rows,
+    }
 
 
 @router.get("/jobs/{job_id}")
@@ -104,13 +115,10 @@ class LabelBody(BaseModel):
 def set_label(job_id: str, body: LabelBody) -> dict:
     if body.value not in (0, 1, None):
         raise HTTPException(422, "value doit valoir 1, 0 ou null.")
-    labels = storage.load_labels()
-    if body.value is None:
-        labels.pop(job_id, None)
-    else:
-        labels[job_id] = body.value
-    storage.save_labels(labels)
-    return {"id": job_id, "label": body.value, "n_labels": len(labels), "min_labels": matching.MIN_LABELS}
+    n_labels = storage.set_label(job_id, body.value)
+    if n_labels is None:
+        raise HTTPException(404, "Cette offre n'est plus dans l'historique : annotation impossible.")
+    return {"id": job_id, "label": body.value, "n_labels": n_labels, "min_labels": matching.MIN_LABELS}
 
 
 @router.post("/model/train", status_code=202)
@@ -137,5 +145,9 @@ def prepare(request: Request, job_id: str) -> dict:
     job = services.find_job(results, job_id)
     if job is None:
         raise HTTPException(404, "Offre introuvable.")
-    return tasks.submit("prepare", f"Préparer : {job['title']}", lambda ctx: services.prepare_application(ctx, job_id),
-                        meta={"key": job_id, "job_id": job_id}).public()
+    return tasks.submit(
+        "prepare",
+        f"Préparer : {job['title']}",
+        lambda ctx: services.prepare_application(ctx, job_id),
+        meta={"key": job_id, "job_id": job_id},
+    ).public()

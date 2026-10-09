@@ -95,7 +95,7 @@ sequenceDiagram
         SEL->>SEL: human_pause(min_delay..max_delay)
         alt Blocage détecté
             TM->>DB: activity_events(kind="blocked", where="collecte")
-            TM-->>SPA: statut échec "LinkedIn a interrompu la navigation…"
+            TM->>TM: arrêt immédiat de la collecte (aucune relance), analyse sur les éléments déjà collectés
         end
     end
     TM->>FT: GET /offresdemploi/v2/offres/search?motsCles=… (Bearer)
@@ -111,8 +111,13 @@ sequenceDiagram
     end
     TM->>DB: Rapport immuable (JSON + HTML) + activity_events(kind="run")
     SPA->>API: GET /api/tasks/a1b2c3d4e5f6 (polling)
-    API-->>SPA: 200 {"status":"terminée","result":{"report":"data-engineer-2026-10-08"}}
+    API-->>SPA: 200 {"status":"terminée","result":{"report":"data-engineer-2026-10-08","blocked":false,…}}
 ```
+
+Décision E-4 (2026-10-08, option A) : un blocage pendant la collecte n'empêche pas le rapport. La tâche finit
+`terminée` avec un **rapport partiel** (données déjà collectées + historique de 30 jours) et
+`result.blocked = true`, `result.blocked_where = "collecte"` ; l'interface affiche « Collecte interrompue par
+LinkedIn ». I-06 reste entier : arrêt immédiat, événement `blocked`, repos de 6 h, aucune relance.
 
 ## 4. Flux Critique 4 : Candidature Simplifiée (`kind="apply"`)
 
@@ -212,5 +217,5 @@ quotidiens et aux périodes de repos. Un événement = `{at, kind, ...data}`.
 | Claude indisponible / erreur | Bascule automatique sur `LocalInterpreter` ; le rapport indique `interpreter_used="local"`. |
 | API France Travail | Timeout 10 s, 3 tentatives avec backoff exponentiel (1 s, 2 s, 4 s) sur `429` / `5xx` ; respect de `Retry-After` ; en échec, l'analyse continue avec les autres sources. `[CIBLE]` |
 | SMTP | Timeout 25 s (`SMTP_TIMEOUT`), **aucune** relance automatique (éviter les doublons) ; statut `échec` et nouvel envoi manuel. |
-| Arrêt de l'application pendant une tâche | Aujourd'hui : seules les tâches finales sont écrites dans `tasks.jsonl`, une tâche en cours est perdue. `[CIBLE]` : au redémarrage, les tâches non finales de la table `tasks` sont marquées `échec` (« interrompue par l'arrêt de l'application »). |
+| Arrêt de l'application pendant une tâche | `[ACTUEL]` (vague 1) : au redémarrage, les tâches non finales de la table `tasks` sont marquées `échec` (« Tâche interrompue par l'arrêt de l'application. »). |
 | Annulation | `POST /api/tasks/{id}/cancel` ; vérifiée entre deux sources / deux étapes (`Cancelled`). |

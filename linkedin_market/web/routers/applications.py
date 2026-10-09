@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
-from typing import Literal
-
 from pydantic import BaseModel, field_validator
 
 from ... import activity, application, config, outreach, settings
@@ -48,11 +47,13 @@ def get_application(job_id: str) -> dict:
 
 
 class Contact(BaseModel):
-    name: str = ""
+    """Contact d'entreprise (C-4 : ``full_name`` ; ``name`` n'est plus lu ; C-5 : sources)."""
+
+    full_name: str = ""
     profile_url: str = ""
     email: str | None = None
     headline: str = ""
-    source: str = "manuel"
+    source: Literal["linkedin_equipe_recrutement", "manuel"] = "manuel"
 
     @field_validator("email")
     @classmethod
@@ -86,7 +87,7 @@ def patch_application(job_id: str, body: ApplicationPatch) -> dict:
         if body.status not in application.STATUSES:
             raise HTTPException(422, f"Statut inconnu. Valeurs : {', '.join(application.STATUSES)}.")
         application.set_status(job_id, body.status)
-        application.add_history(job_id, "statut", status=body.status)
+        application.add_history(job_id, "status", status=body.status)
     if body.contacts is not None:
         application.update_application(job_id, contacts=[c.model_dump() for c in body.contacts])
     if any(v is not None for v in (body.cv, body.message, body.advice)):
@@ -100,8 +101,11 @@ def cv_html(job_id: str):
     if not path.is_file():
         raise HTTPException(404, "CV introuvable.")
     # Sandbox : la page charge marked/DOMPurify depuis un CDN, elle ne doit pas toucher l'origine de l'API.
-    return FileResponse(path, media_type="text/html",
-                        headers={"Content-Security-Policy": "sandbox allow-scripts allow-modals allow-popups"})
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={"Content-Security-Policy": "sandbox allow-scripts allow-modals allow-popups"},
+    )
 
 
 @router.post("/applications/{job_id}/apply", status_code=202)
@@ -114,8 +118,13 @@ def apply(request: Request, job_id: str) -> dict:
         raise HTTPException(409, f"Cette candidature est déjà au statut « {entry['status']} ».")
     require_browser_ready(("apply",), settings.load_settings()["apply_daily_max"], "candidatures")
     title = tidy(entry.get("title", ""), 80)
-    return tasks.submit("apply", f"Postuler : {title}", lambda ctx: services.apply_job(ctx, job_id), browser=True,
-                        meta={"key": job_id, "job_id": job_id}).public()
+    return tasks.submit(
+        "apply",
+        f"Postuler : {title}",
+        lambda ctx: services.apply_job(ctx, job_id),
+        browser=True,
+        meta={"key": job_id, "job_id": job_id},
+    ).public()
 
 
 @router.post("/applications/{job_id}/contacts/lookup", status_code=202)
@@ -125,8 +134,13 @@ def lookup_contacts(request: Request, job_id: str) -> dict:
     if tasks.has_active("contacts", job_id):
         raise HTTPException(409, "Une recherche de contacts est déjà en cours pour cette offre.")
     require_browser_ready()
-    return tasks.submit("contacts", "Chercher les recruteurs de l'offre", lambda ctx: services.lookup_contacts(ctx, job_id),
-                        browser=True, meta={"key": job_id, "job_id": job_id}).public()
+    return tasks.submit(
+        "contacts",
+        "Chercher les recruteurs de l'offre",
+        lambda ctx: services.lookup_contacts(ctx, job_id),
+        browser=True,
+        meta={"key": job_id, "job_id": job_id},
+    ).public()
 
 
 @router.get("/applications/{job_id}/message-draft")
@@ -171,9 +185,20 @@ def send_message(request: Request, job_id: str, body: MessageBody) -> dict:
         raise HTTPException(409, "Un envoi est déjà en cours pour cette candidature.")
     label = "email" if body.channel == "email" else "message LinkedIn"
     return tasks.submit(
-        "message", f"Envoyer un {label}", lambda ctx: services.send_message(
-            ctx, job_id, channel=body.channel, to=body.to.strip(), subject=body.subject, body=body.body, attach_cv=body.attach_cv),
-        browser=body.channel == "linkedin", meta={"key": job_id, "job_id": job_id}).public()
+        "message",
+        f"Envoyer un {label}",
+        lambda ctx: services.send_message(
+            ctx,
+            job_id,
+            channel=body.channel,
+            to=body.to.strip(),
+            subject=body.subject,
+            body=body.body,
+            attach_cv=body.attach_cv,
+        ),
+        browser=body.channel == "linkedin",
+        meta={"key": job_id, "job_id": job_id},
+    ).public()
 
 
 class TestMail(BaseModel):

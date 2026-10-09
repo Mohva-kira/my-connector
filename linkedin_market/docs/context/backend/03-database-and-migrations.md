@@ -1,6 +1,8 @@
 # Base de Données, Modélisation & Migrations
 
-> Tout ce document est `[CIBLE]` sauf mention `[ACTUEL]`. Le schéma de référence est
+> **Statut (acceptation de la vague 1, 2026-10-09)** : §§ 1 à 4 et 8 `[ACTUEL]` sauf mention `[CIBLE]` ; § 5
+> (transactions par cas d'usage, vague 2), § 6 (purge, vague 6) et la sauvegarde automatique du § 7 restent
+> `[CIBLE]`. Le schéma de référence est
 > `schemas-architecture/03-database-erd.md` (tables, colonnes, contraintes, rétention, correspondance des
 > fichiers). Ce document fixe **comment** l'implémenter.
 
@@ -10,23 +12,23 @@
 | :--- | :--- | :--- |
 | SGBD | **PostgreSQL 18** | Paquet système ou `docker compose up -d db` (`compose.yaml` du lot 1, publié sur `127.0.0.1:5432` uniquement). `uuidv7()` est natif depuis la 18. |
 | ORM | **SQLAlchemy 2.1.x** (stable 2.1.4 au 2026-10-07), style déclaratif typé `Mapped[]` / `mapped_column()` | Borne `sqlalchemy>=2.0,<2.2` (lot 1). API 2.0 uniquement (`select()`, `Session.execute`), jamais `Query`. |
-| Driver | **psycopg 3** (`psycopg[binary]`, stable 3.3.6) | URL `postgresql+psycopg://…` (`DATABASE_URL`). |
+| Driver | **psycopg 3** (`psycopg[binary]`, stable 3.3.6) | URL `postgresql+psycopg://…` (`LM_DATABASE_URL`, décidé le 2026-10-08 : `DATABASE_URL` est déjà lu par email_analyzer dans le même `.env` racine). |
 | Migrations | **Alembic** (stable 1.20.0) | Borne `alembic>=1.18,<2`. |
 | Chiffrement applicatif | `cryptography` (Fernet) | Colonne `platform_sessions.cookies_encrypted` (cf. `04`). |
-| Existant `[ACTUEL]` | Fichiers JSON/JSONL dans `linkedin_market_data/` | Remplacés par l'import JSON (`db/import_json.py`, au démarrage). |
+| Anciens fichiers | JSON/JSONL de `linkedin_market_data/` | Importés une fois au démarrage (`db/import_json.py`, § 3.4) puis renommés `*.migrated`. |
 
 Moteur et sessions (`linkedin_market/db/session.py`) :
 
 ```python
-engine = create_engine(config.database_url(), pool_pre_ping=True, pool_size=5, max_overflow=2)
-# Nom de la variable : en arbitrage (P-1, brief vague 1) — `DATABASE_URL` entre en collision avec
-# email_analyzer, qui lit le même .env racine ; recommandé : `LM_DATABASE_URL`.
-SessionLocal = sessionmaker(engine, expire_on_commit=False)
+# Moteur paresseux : créé au premier usage (le CLI sans base et les tests le pilotent), libéré par dispose_engine().
+def get_engine() -> Engine:            # create_engine(config.database_url(), pool_pre_ping=True, pool_size=5, max_overflow=2)
+def dispose_engine() -> None: ...
+# config.database_url() lit LM_DATABASE_URL (message français si absente).
 ```
 
-- `pool_size=5` ≥ `TaskManager(max_workers=4)` + requêtes HTTP : une session **par requête** (dépendance FastAPI
-  `get_db`) et **par tâche** (ouverte dans la fonction de tâche) ; une `Session` n'est jamais partagée entre
-  threads.
+- `pool_size=5` ≥ `TaskManager(max_workers=4)` + requêtes HTTP. `[ACTUEL]` une transaction courte par appel de
+  façade (`db.session.transaction()`, `db.repositories.user_transaction()` qui résout aussi `user_id`) ; une
+  `Session` n'est jamais partagée entre threads. `[CIBLE]` dépendance FastAPI `get_db` (vague 2).
 - Le CLI ouvre ses propres sessions via les mêmes services.
 - Au démarrage (`db/bootstrap.py::prepare_database()`, appelé par le CLI et par `python -m linkedin_market.web`) :
   `alembic upgrade head` (programmatique), puis l'import JSON s'il reste des fichiers non suffixés `.migrated`,
@@ -35,7 +37,7 @@ SessionLocal = sessionmaker(engine, expire_on_commit=False)
   fichiers** (PostgreSQL est obligatoire après la vague 1).
 
 ### 1.1 Transition de la vague 1 (décision d'architecte, 2026-10-08)
-Pour ne pas réécrire tous les appelants en une vague, les modules de persistance actuels (`storage.py`,
+`[ACTUEL]` Pour ne pas réécrire tous les appelants en une vague, les modules de persistance actuels (`storage.py`,
 `application.py` (suivi), `activity.py`, `settings.py`, `session.py`, `report.py` (écriture), le chargement/
 sauvegarde de `matching.MatchingModel`, `TaskManager`) **gardent leurs signatures publiques** et deviennent des
 façades : chaque fonction ouvre une transaction courte (`with db.session.transaction() as s:`), résout
@@ -165,7 +167,7 @@ index sont ceux de l'ERD § 1–2.
 ### 3.1 Organisation
 ```
 linkedin_market/migrations/
-├── env.py                     # target_metadata = Base.metadata, compare_type=True, URL depuis DATABASE_URL
+├── env.py                     # target_metadata = Base.metadata, compare_type=True, URL depuis LM_DATABASE_URL
 ├── script.py.mako
 └── versions/
     ├── 0001_initial.py        # schéma complet + données de référence sources + trigger d'immuabilité
@@ -179,6 +181,7 @@ linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_ma
   modèles ↔ migrations).
 - Les migrations sont appliquées **automatiquement au lancement** de l'application et du CLI. Elles doivent donc
   être sûres sans intervention : pas de question, pas de suppression de données sans sauvegarde préalable.
+- `[ACTUEL]` `alembic check` passe sur `0001_initial` (modèles == migration) ; à relancer pour chaque révision.
 
 ### 3.2 Compatibilité
 - Les utilisateurs mettent à jour par `git pull` et peuvent revenir à la version précédente : chaque migration
@@ -186,20 +189,22 @@ linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_ma
   l'écrire, puis rendre `NOT NULL` / supprimer l'ancienne dans la version suivante).
 - `downgrade()` est implémenté pour les migrations de schéma. L'import JSON n'a pas de retour arrière : les
   fichiers d'origine sont conservés en `*.migrated` (§ 3.4).
-- Avant toute migration qui supprime ou réécrit des données, l'application exécute un `pg_dump` automatique dans
-  `linkedin_market_data/backups/avant-<rev>.dump` (§ 7).
+- `[CIBLE]` Avant toute migration qui supprime ou réécrit des données, l'application exécute un `pg_dump`
+  automatique dans `linkedin_market_data/backups/avant-<rev>.dump` (§ 7). Aucune migration destructive à ce jour.
 
 ### 3.3 `0001_initial`
 - Crée toutes les tables de l'ERD, contraintes et index (§ 2 de l'ERD).
 - Insère les sources :
 
-| `code` | `label` | `access_mode` | `risk_version` |
-| :--- | :--- | :--- | :--- |
-| `linkedin` | LinkedIn | `navigateur` | `2026-10` |
-| `malt` | Malt | `navigateur` | `2026-10` |
-| `wttj` | Welcome to the Jungle | `navigateur` | `2026-10` |
-| `france_travail` | France Travail | `api_officielle` | `NULL` |
-| `indeed` | Indeed | `import_manuel` | `NULL` |
+| `code` | `label` | `access_mode` | `risk_version` | `enabled` |
+| :--- | :--- | :--- | :--- | :--- |
+| `linkedin` | LinkedIn | `navigateur` | `2026-10` | `true` |
+| `malt` | Malt | `navigateur` | `2026-10` | `false` |
+| `wttj` | Welcome to the Jungle | `navigateur` | `2026-10` | `false` |
+| `france_travail` | France Travail | `api_officielle` | `NULL` | `false` |
+| `indeed` | Indeed | `import_manuel` | `NULL` | `false` |
+
+  Une source passe à `enabled = true` par la révision qui livre son intégration (vague 5).
 
   Un changement de texte de risques = une migration `UPDATE sources SET risk_version = '…'` (I-16).
 - Crée le trigger d'immuabilité (I-02) :
@@ -208,6 +213,12 @@ linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_ma
 op.execute("""
 CREATE FUNCTION reports_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  -- Seule exception : task_id non nul -> NULL (FK ON DELETE SET NULL lors de la purge des tâches à 12 mois),
+  -- toutes les autres colonnes identiques. Tout autre UPDATE lève.
+  IF OLD.task_id IS NOT NULL AND NEW.task_id IS NULL
+     AND (to_jsonb(NEW) - 'task_id') = (to_jsonb(OLD) - 'task_id') THEN
+    RETURN NEW;
+  END IF;
   RAISE EXCEPTION 'Un rapport est immuable (I-02).';
 END $$;
 CREATE TRIGGER trg_reports_immutable BEFORE UPDATE ON reports
@@ -215,30 +226,70 @@ CREATE TRIGGER trg_reports_immutable BEFORE UPDATE ON reports
 """)
 ```
 
+### 3.3 bis Précisions de schéma validées (vague 1, 2026-10-08)
+- `CHECK` sur **tous** les champs énumérés, y compris `tasks.kind` : un nouveau type de tâche (ex. `purge`, vague 6)
+  exige une révision `0002_…` **et** l'entrée au glossaire avant le code.
+- `CHECK` « chemin relatif » sur `reports.html_path` et `applications.folder_path` (ni `/` initial, ni `..`).
+- Textes `NOT NULL DEFAULT ''` sauf `collected_items.text`, `company_contacts.email`, `outreach_messages.error`,
+  `outreach_messages.smtp_message_id`, `tasks.error` (NULL = absent). `tasks.params` / `tasks.meta` `NOT NULL
+  DEFAULT '{}'` ; `tasks.id DEFAULT uuidv7()` en secours (Python fournit `uuid.uuid7()`).
+- `company_contacts.purge_after NOT NULL DEFAULT now() + interval '3 years'` (recalculé à chaque contact).
+- Index sur les clés étrangères parcourues par les jointures, cascades et `SET NULL` :
+  `application_events (application_id)`, `company_contacts (user_id, application_id)`,
+  `outreach_messages (application_id)`, `reports (task_id) WHERE task_id IS NOT NULL`,
+  `collected_items (task_id) WHERE task_id IS NOT NULL`, `labels (user_id)`.
+- Utilisateur unique : `ensure_user(email)` seulement quand `users` est vide (premier lancement / import) ; ensuite
+  `current_user_id()`, qui lève si la table contient zéro ou plusieurs lignes (une instance = un utilisateur). Un
+  changement de `LINKEDIN_EMAIL` ne crée pas de second utilisateur.
+- Classe ORM de `matching_models` : `MatchingModelRecord` (évite la collision avec `matching.MatchingModel`).
+  `weights` (jsonb) = `{"weights": [8 floats], "bias", "mean": [8], "std": [8], "train_accuracy", "loss_history"}` ;
+  `feature_names` (jsonb) = liste des 8 critères ; une version dont `feature_names` diffère de `matching.FEATURES`
+  est ignorée (poids a priori).
+- `collected_items.keywords text[]` (remplace `keyword`) : mots-clés de collecte normalisés `lower(trim())`, sans
+  doublon, dans l'ordre d'apparition ; à la recollecte (`ON CONFLICT … DO UPDATE`), les nouveaux mots-clés sont
+  **ajoutés** aux anciens. Index `GIN (keywords)` + `(user_id, collected_at DESC)`. Le GIN n'a pas `user_id` en tête
+  (il faudrait l'extension `btree_gin`) : écart assumé, une instance = un utilisateur ; chaque requête garde son
+  filtre `user_id` (I-01). `Item.keyword` (domaine) = mot-clé **demandé** à la lecture (`storage.load_items`).
+- `legacy_imports (user_id, file_name, sha256, imported_at)`, `PRIMARY KEY (user_id, file_name, sha256)` : nom
+  relatif et empreinte de chaque fichier historique importé (§ 3.4). Décidé par l'utilisateur le 2026-10-09
+  (option B) : un contenu identique sous un autre nom est un fichier distinct (ex. deux `reports/*.json` identiques
+  ⇒ deux rapports).
+- `updated_at` peut être `NULL` (jamais modifié) là où C-2 l'expose ainsi (`01` § 1.1).
+- `compose.yaml` avec `healthcheck` (`pg_isready`) ; lancement depuis la racine :
+  `docker compose --env-file .env -f linkedin_market/compose.yaml up -d db` (le `.env` est à la racine du dépôt).
+
 ### 3.4 Import JSON (`db/import_json.py`, idempotent)
 Ce n'est **pas** une révision Alembic (décision d'architecte, vague 1) : une révision ne s'exécute qu'une fois et
 tourne dans la transaction d'Alembic, ce qui empêche le renommage après `COMMIT` et la reprise de fichiers
 ajoutés plus tard. `import_legacy_files(data_dir) -> dict[str, int]` (nombre de lignes importées par table) est
 appelé par `prepare_database()` après `upgrade head`. Règles de l'ERD § 4, précisées :
 1. Crée l'utilisateur unique (`users`, email = `LINKEDIN_EMAIL` en minuscules, sinon `local@localhost`) s'il
-   n'existe pas, et sa ligne `user_settings`.
-2. Lit chaque fichier présent **et non suffixé** `.migrated` ; tout est inséré dans **une seule transaction** ;
-   chaque `INSERT` utilise `ON CONFLICT DO NOTHING` sur la contrainte d'unicité de la table, ce qui rend la
-   relance sans effet.
+   n'existe pas, et sa ligne `user_settings` (valeurs par défaut).
+2. Lit chaque fichier présent **et non suffixé** `.migrated` et calcule son empreinte SHA-256. Un fichier dont
+   le couple (nom relatif à `DATA_DIR`, empreinte) figure déjà dans `legacy_imports` (renommage interrompu après un `COMMIT` précédent) n'est **pas**
+   réimporté : il est seulement renommé (compteur `already_imported_files`). Tout le reste est inséré dans **une
+   seule transaction**, qui inscrit aussi chaque fichier importé dans `legacy_imports (user_id, file_name relatif à
+   DATA_DIR, sha256)` ; chaque `INSERT` de données utilise `ON CONFLICT DO NOTHING`. `labels.json` et
+   `applications.json` sont relus même déjà importés (protection de la purge, comptes du modèle).
 3. Conversions :
 
 | Source | Transformation |
 | :--- | :--- |
-| `settings.json` | `interpreter = 'none'` → `local` ; `max_items` > plafond de la prudence → `NULL` (E-3) ; `answers` → `memorized_answers`. |
-| `history.jsonl` | `Item.source` → `kind` ; `id` `job:123` / `post:…` / `person:<slug>` → `external_id` sans préfixe ; `source_code = 'linkedin'` ; `scraped_at` → `collected_at` ; `person` : `text = NULL`, compétences extraites par `nlp` ; dernière version d'un `id` gagnante ; `purge_after` calculé (§ 6) et lignes déjà expirées ignorées. |
+| `settings.json` | `UPDATE` de la ligne `user_settings` créée à l'étape 1 (champs invalides ignorés) ; `interpreter = 'none'` → `local` ; `max_items` > plafond de la prudence → `NULL` (E-3) ; `answers` → `memorized_answers`. |
+| `history.jsonl` | `Item.source` → `kind` ; `id` `job:123` / `post:…` / `person:<slug>` → `external_id` sans préfixe ; `source_code = 'linkedin'` ; `scraped_at` → `collected_at` ; `person` : `text = NULL`, compétences extraites par `nlp` ; dernière version d'un `id` gagnante ; `keyword` de **toutes** les lignes d'un même `id` fusionnés dans `keywords` ; `purge_after` calculé (§ 6), `NULL` pour une offre annotée ou candidatée, lignes déjà expirées ignorées. |
 | `labels.json` | jointure sur `external_id` ; libellé orphelin ignoré. |
 | `applications.json` | `item_id` par `external_id` (offre absente de l'historique : création d'un `collected_items` minimal `job` avec titre/entreprise/url) ; `history` → `application_events` avec `statut`→`status`, `candidature`→`apply` ; `contacts` → `company_contacts` (`name`→`full_name`, `source` `linkedin`→`linkedin_equipe_recrutement`, `legal_basis = 'interet_legitime'`). |
 | `session.json` | chiffré Fernet → `platform_sessions('linkedin')` ; ignoré si `logged_in_at` > 72 h. |
-| `activity.jsonl`, `tasks.jsonl` | dates locales naïves → `timestamptz` avec le fuseau de la machine (`datetime.astimezone()`) ; tâches : 100 dernières. |
+| `activity.jsonl`, `tasks.jsonl` | dates locales naïves → `timestamptz` avec le fuseau de la machine (`datetime.astimezone()`) ; tâches : 100 dernières, `id = uuid5(espace de noms fixe, ancien id)` (relance sans doublon). |
+| `matching_model.json` | version 1 active ; `n_positive` / `n_negative` = nombre de 1 et de 0 de `labels.json` (à défaut, des `labels` déjà en base). |
 | `reports/*.json` | slug = nom de fichier ; `interpreter_used = 'none'` → `local` sans texte (rapport historique conservé tel quel). |
 
-4. Après `COMMIT` seulement : renommage de chaque fichier importé en `<nom>.migrated` (jamais supprimé). Les
-   dossiers `reports/` (HTML) et `applications/` restent en place ; leurs chemins sont stockés.
+4. Après `COMMIT` seulement : renommage de chaque fichier importé (ou reconnu) en `<nom>.migrated` (jamais
+   supprimé). Les dossiers `reports/` (HTML) et `applications/` restent en place ; leurs chemins sont stockés.
+   Aucun JSON de rapport n'est plus écrit sur disque.
+5. Une erreur annule tout : aucune ligne insérée, aucun fichier renommé. Tests : `tests/test_import_json.py`
+   (idempotence, erreur simulée, crash entre `COMMIT` et renommages, conversions, rapports identiques sous deux noms
+   importés tous deux).
 
 ### 3.5 Index
 Ceux de l'ERD § 2. Règle : toute colonne de `WHERE`/`JOIN` fréquente a un index dont `user_id` est la première
@@ -258,9 +309,11 @@ SELECT at, data FROM activity_events
 WHERE user_id = :uid AND kind IN ('blocked', 'unblocked')
 ORDER BY at DESC LIMIT 1;          -- en cours si kind = 'blocked' AND at > now() - interval '6 hours'
 
--- Fenêtre de 30 jours des tendances
+-- Fenêtre de 30 jours des tendances (db/repositories/items.py::window_items) : GIN sur keywords
 SELECT * FROM collected_items
-WHERE user_id = :uid AND keyword ILIKE :kw AND coalesce(posted_at, collected_at::date) >= current_date - 30;
+WHERE user_id = :uid AND keywords @> ARRAY[lower(trim(:kw))]
+  AND coalesce(posted_at, collected_at::date) >= current_date - 30
+ORDER BY collected_at, id;
 ```
 
 Les messages `confirmé` comptent dans le plafond : un envoi réservé puis échoué libère sa place
@@ -295,8 +348,8 @@ COMMIT;
 | Changement de statut manuel | `FOR UPDATE` sur `applications` + `UPDATE` + `INSERT application_events(kind='status')`. |
 | Candidature soumise | `FOR UPDATE` sur `user_settings` + contrôle `count(apply du jour)` au **démarrage** de la tâche ; à la fin : statut + `apply_state` + `labels` (valeur 1) + `activity_events('apply')`. |
 | Consentement | `UPDATE source_consents SET revoked_at = now() WHERE … AND revoked_at IS NULL` + `INSERT`. |
-| Activation d'un modèle | `UPDATE matching_models SET is_active = false WHERE user_id = :uid AND is_active` + `INSERT … (version = max+1, is_active = true)`. |
-| Collecte | insertion par lots de 100 (`ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE SET title, text, skills, collected_at`) — une transaction par lot pour ne pas perdre une collecte interrompue. |
+| Activation d'un modèle `[ACTUEL]` | `FOR UPDATE` sur `user_settings` + `UPDATE matching_models SET is_active = false WHERE user_id = :uid AND is_active` + `INSERT … (version = max+1, is_active = true)`. |
+| Collecte `[ACTUEL]` | insertion par lots de 100 (`ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE SET title, text, skills, keywords = anciens ∪ nouveaux, collected_at, purge_after` — ce dernier reste `NULL` s'il l'était) — une transaction par lot pour ne pas perdre une collecte interrompue. |
 
 Niveau d'isolation : `READ COMMITTED` (défaut) ; les verrous explicites ci-dessus suffisent.
 
@@ -347,8 +400,9 @@ Le nombre de lignes supprimées par table est journalisé (sans contenu).
 ## 8. Tests
 
 - `pytest` utilise une base PostgreSQL 18 jetable (`LM_TEST_DATABASE_URL`, service `postgres:18` en CI,
-  lot 1 `04` § 6) ; le nom de la base **doit finir par `_test`**, sinon la session pytest s'arrête (protection
-  de la vraie base). Schéma : `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` puis `alembic upgrade head`
+  lot 1 `04` § 6) ; le nom de la base **doit finir par `_test`** et l'URL **différer de `LM_DATABASE_URL`**,
+  sinon la session pytest s'arrête (protection de la vraie base). `LM_SECRET_KEY` éphémère générée par la
+  fixture ; l'écriture d'une clé dans `.env` est refusée sous pytest. Schéma : `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` puis `alembic upgrade head`
   une fois par session (teste aussi `0001`). Isolation : avant chaque test marqué `db`, `TRUNCATE` de toutes les
   tables sauf `sources` et `alembic_version` (`RESTART IDENTITY CASCADE`) puis création de l'utilisateur de test.
   Pas de transaction annulée : les tâches tournent dans des threads du `TaskManager`, qui ouvrent leurs propres

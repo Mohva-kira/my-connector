@@ -4,11 +4,11 @@
 > **Source de vérité** : `docs/context/schemas-architecture/00` à `04` (lot 1). Les identifiants du glossaire,
 > les invariants **I-01…I-16** et les risques **R-1…R-8** y sont définis ; ce document précise **où et comment**
 > le backend les applique.
-> **Marqueurs** : `[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, non implémenté (PostgreSQL 18,
-> sources France Travail / Malt / WTTJ / Indeed, popup de risques, liste d'opposition).
+> **Marqueurs** : `[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, non implémenté (sources
+> France Travail / Malt / WTTJ / Indeed, popup de risques, liste d'opposition).
 >
 > **Modèle de déploiement** : une instance = un utilisateur, sur son poste. Il n'y a ni organisation ni
-> *tenant* : l'isolation se fait par la machine. La colonne `user_id` (I-01) existe en cible pour garder un modèle
+> *tenant* : l'isolation se fait par la machine. La colonne `user_id` (I-01) existe (PostgreSQL 18, vague 1) pour garder un modèle
 > propre et permettre l'import/export, pas pour un mode SaaS (exclu).
 
 ## 1. Concepts Métier du Domaine (Core Domain Entities)
@@ -20,30 +20,33 @@
   `profile_skill` (cf. `05-queues-and-integrations.md` § 1.3).
 - **Cycle de vie** : `en_attente → en_cours ⇄ attente_saisie | attente_verification_manuelle → terminée | échec | annulée`
   (constantes `PENDING…CANCELLED` de `web/tasks.py`). Finaux : `terminée`, `échec`, `annulée` (`FINAL`).
-- **Appartenance** : `[ACTUEL]` en mémoire dans `TaskManager._tasks`, états finaux ajoutés à `tasks.jsonl`.
-  `[CIBLE]` table `tasks` (`user_id NOT NULL`).
-- **Identifiant** : `uuid.uuid4().hex[:12]` (12 caractères hexadécimaux) `[ACTUEL]` ; `uuid` (uuidv7) `[CIBLE]`.
+- **Appartenance** `[ACTUEL]` : table `tasks` (`user_id NOT NULL`) ; l'exécution reste en mémoire
+  (`TaskManager`). Au démarrage, les tâches non finales passent en `échec` (« Tâche interrompue par l'arrêt de
+  l'application. »). Les anciennes tâches de `tasks.jsonl` sont importées avec un `id` `uuid5` stable.
+- **Identifiant** `[ACTUEL]` : UUID v7 généré par Python (`uuid.uuid7()`), chaîne opaque côté API (C-7).
 
 ### Élément collecté (`Item` / `collected_items`) et Offre (`Item(kind="job")`)
-- **Définition** : unité récupérée sur une source. `[ACTUEL]` dataclass `models.Item` dont le champ `source`
-  vaut `job`, `post` ou `person` et dont l'`id` est préfixé (`job:4012345678`, `person:<slug>`). `[CIBLE]` ce champ
-  devient `kind` et `source_code` désigne la plateforme (cf. ERD § 3).
-- **Statuts** : aucun ; un élément est **ajouté** à l'historique (`history.jsonl`, append-only) puis **purgé**
-  (`purge_after`, I-10 `[CIBLE]`). La dernière version d'un même `id` gagne à la lecture (`storage.load_items`).
-- **Règles** : un profil tiers (`person`) ne conserve que son titre et ses compétences (I-09). `[ACTUEL]` écart :
-  `scraper.people()` stocke encore le texte de la carte (`text=_clean(card)`) — à filtrer à l'ingestion.
+- **Définition** : unité récupérée sur une source. `[ACTUEL]` dataclass `models.Item` (champ `kind` : `job`,
+  `post` ou `person` ; `id` préfixé `job:4012345678`, `person:<slug>`) ; en base `collected_items` avec `kind`,
+  `external_id` et `source_code` (plateforme, `linkedin` seule en vague 1). `Item.keyword` = mot-clé demandé à la
+  lecture ; la base garde tous les mots-clés de collecte dans `keywords` (cf. ERD).
+- **Statuts** : aucun ; un élément est **inséré ou mis à jour** (`ON CONFLICT (user_id, source_code, kind,
+  external_id) DO UPDATE`, mots-clés fusionnés) puis **purgé** (`purge_after` posé à l'ingestion `[ACTUEL]`, tâche
+  `purge` `[CIBLE]` vague 6, I-10).
+- **Règles** `[ACTUEL]` : un profil tiers (`person`) ne conserve que son titre et ses compétences (I-09) : le dépôt
+  met `text` à `NULL` à l'ingestion et la base l'impose (`CHECK`).
 
 ### Rapport (`reports`)
 - **Définition** : instantané d'une analyse (agrégats, offres scorées, modèle, interprétation) en JSON + HTML.
 - **Statuts** : aucun ; **immuable** dès l'écriture (I-02). `rescore` et `train` produisent un **nouveau** rapport.
-- **Nom** `[ACTUEL]` : `<slug du mot-clé>-AAAAMMJJ-HHMM` (`report.write`, ex. `data-engineer-20261008-1432`).
-  Deux rapports produits dans la même minute pour le même mot-clé s'écrasent : violation de I-02, corrigée en
-  cible par le suffixe `-n` et la contrainte `UNIQUE (slug)` (cf. ERD).
+- **Nom** `[ACTUEL]` : `<slug du mot-clé>-AAAA-MM-JJ`, puis `-2`, `-3`… le même jour local
+  (ex. `data-engineer-2026-10-08`), contrainte `UNIQUE (user_id, slug)` ; les rapports importés gardent leur nom.
+  Le contenu est en base (`reports.summary`) ; seul le HTML reste un fichier (`html_path`).
 
 ### Candidature (`applications`) et Dossier de candidature (`Application`)
 - **Définition** : suivi d'une offre pour laquelle un dossier a été préparé (`cv.md`, `cv.html`, `message.txt`,
   `conseils.md`, `offre.txt`, `cv.pdf` à la demande) dans `linkedin_market_data/applications/<AAAAMMJJ>-<entreprise>-<titre>/`.
-- **Clé** `[ACTUEL]` : l'`id` de l'offre (`job:…`) dans `applications.json`. `[CIBLE]` : `UNIQUE (user_id, item_id)`.
+- **Clé** `[ACTUEL]` : `UNIQUE (user_id, item_id)` ; l'API garde l'`id` de l'offre (`job:…`) comme identifiant.
 - **Statuts (`status`)** : `préparée`, `contactée`, `postulée`, `entretien`, `refusée`, `abandonnée`, `externe`,
   `échec` (`application.STATUSES`). Rang de progression (`_PROGRESS`, I-03) : `préparée`/`externe`/`échec` = 0,
   `contactée` = 1, `postulée` = 2, `entretien` = 3 ; `refusée` et `abandonnée` ne sont posés que manuellement.
@@ -84,19 +87,20 @@ un rang égal) ; un message envoyé sur une candidature `postulée` la laisse `p
 
 ### Contact entreprise (`company_contacts`)
 - **Définition** : recruteur affiché dans « Rencontrez l'équipe de recrutement » (3 au plus, `contacts.MAX_CONTACTS`)
-  ou saisi à la main. `[ACTUEL]` liste `contacts` dans l'entrée de `applications.json`, champs `name`,
-  `profile_url`, `email`, `headline`, `source` (`linkedin` ou `manuel`).
+  ou saisi à la main. `[ACTUEL]` table `company_contacts` rattachée à la candidature, champs `full_name`,
+  `profile_url`, `email`, `headline`, `source` (`linkedin_equipe_recrutement` ou `manuel`), `legal_basis`.
 - **Règles** : email conservé seulement s'il est **affiché** par LinkedIn (`contacts.extract_email`) ou saisi par
   l'utilisateur ; un email saisi à la main n'est jamais écrasé (`merge_contacts`). Base légale `interet_legitime`
-  et purge à 3 ans (I-13, I-14) `[CIBLE]`.
-- **Écart de nommage** : le code écrit `source="linkedin"` et `name` ; l'ERD cible attend
-  `source="linkedin_equipe_recrutement"` et `full_name`. L'import JSON (`db/import_json.py`) fait la conversion.
+  et `purge_after` (collecte + 3 ans) posés en base `[ACTUEL]` ; mise à jour au dernier contact et purge `[CIBLE]`
+  (I-13, I-14).
+- **Nommage** `[ACTUEL]` (E-15 résolu) : `full_name` et `source="linkedin_equipe_recrutement"` partout ; l'import JSON
+  (`db/import_json.py`) convertit les anciens `name` / `source="linkedin"`.
 
 ### Message de prospection (`outreach_messages`)
 - **Définition** : email (SMTP de l'utilisateur) ou message LinkedIn (message direct ou demande de connexion avec
   note ≤ 300 caractères) envoyé à un contact au sujet d'une offre.
-- **Statuts** `[CIBLE]` : `confirmé → envoyé | échec`. `[ACTUEL]` aucun objet dédié : l'envoi est tracé par
-  `activity.jsonl` (`message_email` / `message_linkedin`) et l'historique de la candidature (`kind="message"`).
+- **Statuts** `[CIBLE]` : `confirmé → envoyé | échec`. `[ACTUEL]` table créée mais non alimentée : l'envoi est tracé
+  par `activity_events` (`message_email` / `message_linkedin`) et l'historique de la candidature (`kind="message"`).
 
 ### Consentement aux risques (`source_consents`) `[CIBLE]`
 - **Définition** : acceptation, pour une source en mode `navigateur` (`linkedin`, `malt`, `wttj`), de la version
@@ -114,14 +118,15 @@ un rang égal) ; un message envoyé sur une candidature `postulée` la laisse `p
 - **Définition** : régression logistique sur 8 critères (`matching.FEATURES` : `couverture_competences`,
   `similarite_texte`, `similarite_titre`, `seniorite`, `experience`, `teletravail`, `localisation_compatible`,
   `freelance`). Poids *a priori* `PRIOR_WEIGHTS` tant que `MIN_LABELS = 6` annotations des deux classes ne sont
-  pas réunies. `[ACTUEL]` `matching_model.json` ; un fichier dont la liste `features` diffère est ignoré.
+  pas réunies. `[ACTUEL]` table `matching_models` (versions, une seule active ; `weights` jsonb = poids, biais, normalisation,
+  précision, historique de perte) ; une version dont `feature_names` diffère est ignorée (poids a priori).
 
 ### Réglages (`user_settings`) et Profil candidat (`candidate_profiles`)
-- **Réglages** `[ACTUEL]` `settings.json`, valeurs par défaut `settings.DEFAULT_SETTINGS` ; bornes validées par
+- **Réglages** `[ACTUEL]` table `user_settings` (+ `memorized_answers`), valeurs par défaut `settings.DEFAULT_SETTINGS` ; bornes validées par
   `settings.validate_settings()` (cf. `01-api-contracts.md` § 5.2).
 - **Profil** : construit à chaque usage par `pipeline.build_profile()` à partir de `profil.*`/`cv.pdf` à la racine
-  ou du cache `linkedin_profile.txt`, puis surcharges `profile_settings.json` appliquées par-dessus — le fichier
-  source n'est jamais réécrit.
+  ou du cache `candidate_profiles.text`, puis surcharges (`candidate_profiles`, `profile_skill_overrides`)
+  appliquées par-dessus — le fichier source n'est jamais réécrit.
 
 ## 2. Invariants & Règles Métier Strictes
 
@@ -129,21 +134,21 @@ Les invariants sont ceux du lot 1. Ce tableau indique leur **point d'application
 
 | ID | Point d'application backend | État |
 | :--- | :--- | :--- |
-| I-01 | Repositories : filtre `user_id` systématique, FK `NOT NULL`. | `[CIBLE]` (fichiers locaux aujourd'hui) |
-| I-02 | Aucune route d'écriture sur `/api/reports`. `report.write()` crée un fichier par minute. | `[ACTUEL]` partiel — collision possible dans la même minute ; trigger `BEFORE UPDATE` `[CIBLE]` |
+| I-01 | Repositories (`db/repositories/*`) : filtre `user_id` systématique, FK `NOT NULL` ; utilisateur unique créé au démarrage. | `[ACTUEL]` (vague 1, `test_filtre_user_id`) |
+| I-02 | Aucune route d'écriture sur `/api/reports` ; slug unique `-n` ; trigger `trg_reports_immutable` (`BEFORE UPDATE`, seul `task_id → NULL` admis). | `[ACTUEL]` (vague 1) |
 | I-03 | `application.advance_status()` pour toute transition automatique ; `set_status()` réservé à `PATCH /api/applications/{id}`. | `[ACTUEL]` |
 | I-04 | Candidature : `TaskContext.ask(..., "confirm_submit", ["Soumettre", "Annuler"], review=…)` dans `apply_bot._steps` ; seule la réponse exacte `Soumettre` clique. Message : `MessageBody.confirm` sinon 422. Les champs `confirm*` ne sont jamais mémorisés (`answer_task`). | `[ACTUEL]` |
 | I-05 | `EasyApply._auto_answer()` : `contact_email`, `contact_phone`, `settings.find_answer()` ; tout le reste passe par `ask()`. Cases à cocher jamais cochées. | `[ACTUEL]` |
 | I-06 | `activity.guard_not_blocked()` avant chaque action navigateur (routeurs via `require_browser_ready`, services en début de tâche) ; `BlockedError` / `PermissionError` ⇒ `activity.record("blocked", where=…)`. | `[ACTUEL]` partiel — voir écarts § 5 de `05-queues-and-integrations.md` |
-| I-07 | `activity.check_quota()` (API **et** début de tâche) ; volumes de collecte = `Caution.max_items`. | `[ACTUEL]` partiel — `max_items` jusqu'à 200 contourne le plafond de prudence ; correction décidée : `max_items` ≤ plafond de la prudence, prudence par défaut `prudent` (cf. écart E-3, `02-business-logic-services.md` § 4) |
+| I-07 | `activity.check_quota()` (API **et** début de tâche) ; volumes de collecte = `Caution.max_items`. | `[ACTUEL]` partiel — en base `CHECK max_items ≤ plafond de la prudence` et défaut `prudent` (vague 1) ; contrôle 422 à l'API et `min()` dans `pipeline` restent à livrer (E-3, vague 2) |
 | I-08 | Un seul couple `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` lu dans `.env` (`config.linkedin_credentials`). | `[ACTUEL]` |
-| I-09 | Filtre à l'ingestion de `person` (texte mis à `NULL`, compétences seules). | `[CIBLE]` |
-| I-10 | `RetentionService` quotidien (cf. `03-database-and-migrations.md` § 6). | `[CIBLE]` (aujourd'hui seule la fenêtre de lecture de 30 j s'applique) |
-| I-11 | `interpreter.interpret()` bascule sur `LocalInterpreter` si Claude est absent ou échoue ; `pipeline.summary_for_interpreter()` n'envoie que des agrégats. | `[ACTUEL]` partiel — `interpreter="none"` produit encore un rapport sans interprétation ; la génération de CV envoie le texte de l'offre à Claude (cf. écart E-6, `02-business-logic-services.md` § 4) |
+| I-09 | Filtre à l'ingestion de `person` (texte mis à `NULL`, compétences seules) + `CHECK (kind <> 'person' OR text IS NULL)`. | `[ACTUEL]` (vague 1, E-16) |
+| I-10 | `RetentionService` quotidien (cf. `03-database-and-migrations.md` § 6). | `[ACTUEL]` partiel — `purge_after` posé à l'ingestion (`NULL` pour une offre annotée ou candidatée) ; la tâche `purge` est `[CIBLE]` (vague 6) |
+| I-11 | `interpreter.interpret()` bascule sur `LocalInterpreter` si Claude est absent ou échoue ; `pipeline.summary_for_interpreter()` n'envoie que des agrégats. | `[ACTUEL]` partiel — `interpreter="none"` produit encore un rapport sans interprétation ; la génération de CV envoie le texte de l'offre à Claude ; E-6 tranchée (option A) : retrait des tiers par `nlp.redact_third_parties` avant envoi `[CIBLE]` vague 6 |
 | I-12 | Gabarit imposé : mention d'origine de l'adresse + désinscription ajoutées par le backend et vérifiées avant envoi. | `[CIBLE]` |
 | I-13 | Contrôle `suppression_list` dans la transaction d'envoi ⇒ 409. | `[CIBLE]` |
 | I-14 | `company_contacts.purge_after = last_contacted_at + 3 ans`. | `[CIBLE]` |
-| I-15 | `.env` hors Git ; `session.json` en `chmod 0o600` `[ACTUEL]` ; cookies chiffrés Fernet en base `[CIBLE]`. TTL 72 h (`SESSION_TTL_HOURS`). | `[ACTUEL]` partiel |
+| I-15 | `.env` hors Git ; cookies chiffrés Fernet (`LM_SECRET_KEY`, générée dans le `.env` en `0o600` si absente) dans `platform_sessions` ; mot de passe de la base masqué dans les messages. TTL 72 h (`SESSION_TTL_HOURS`). | `[ACTUEL]` (vague 1) |
 | I-16 | `SourceConsentService.require(source_code)` avant toute tâche `browser=True` sur une source `navigateur` ⇒ 428. | `[CIBLE]` |
 
 Règles complémentaires vérifiées dans le code `[ACTUEL]` :
@@ -165,10 +170,10 @@ Règles complémentaires vérifiées dans le code `[ACTUEL]` :
 - **Exécution** (tâche `run`, `browser=scrape`) : `pipeline.scrape()` (jobs, posts, profils jusqu'à `max_items`
   chacun, `human_pause` de la prudence) → `pipeline.build_profile()` → `pipeline.analyse()` (fenêtre 30 j,
   TF-IDF, tendances, scoring) → `interpreter.interpret()` → `report.write()`.
-  `[CIBLE]` : insertion des éléments en `INSERT … ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE`
-  par lot, puis rapport + événement dans **une** transaction.
+  `[ACTUEL]` : insertion des éléments en `INSERT … ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE`
+  par lot (une transaction par lot) ; `[CIBLE]` rapport + événement dans **une** transaction.
 - **Effets de bord autorisés** : événement `activity_events(kind="run", keyword, scrape, jobs)` ; en cas de blocage
-  `kind="blocked", where="collecte"` ; écriture de `linkedin_profile.txt` si le profil LinkedIn a été lu.
+  `kind="blocked", where="collecte"` ; mise à jour de `candidate_profiles.text` si le profil LinkedIn a été lu.
 
 ### Cas d'Usage : `PostulerEasyApply` (`POST /api/applications/{job_id}/apply`)
 - **Conditions préalables** : candidature existante (404) ; pas déjà `postulée`/`entretien` (409) ; aucune tâche
@@ -187,7 +192,7 @@ Règles complémentaires vérifiées dans le code `[ACTUEL]` :
   | `incertaine` | inchangé | `incertaine` | l'utilisateur vérifie sur LinkedIn |
   | exception (`ApplyError`, `BlockedError`, délai…) | inchangé | `échec` | `BlockedError` ⇒ `activity "blocked", where="candidature"` |
 
-  Chaque passage ajoute une entrée d'historique `kind="candidature"` (sauf exception).
+  Chaque passage ajoute une entrée d'historique `kind="apply"` (sauf exception ; C-6).
 - **Effets de bord autorisés** : un événement `apply` par candidature réellement soumise (base du plafond).
 
 ### Cas d'Usage : `EnvoyerMessage` (`POST /api/applications/{job_id}/messages`)
@@ -222,24 +227,24 @@ Règles complémentaires vérifiées dans le code `[ACTUEL]` :
 - **Exécution** : `activity.record("unblocked")` ; `block_status()` ignore tout `blocked` antérieur.
 
 ### Cas d'Usage : `AnnoterOffre` / `EntrainerModele`
-- `PUT /api/jobs/{id}/label` : `value ∈ {1, 0, null}` (422 sinon) ; `null` retire l'annotation.
+- `PUT /api/jobs/{id}/label` : `value ∈ {1, 0, null}` (422 sinon) ; `null` retire l'annotation ; élément absent de
+  l'historique (purgé, inconnu) ⇒ 404, rien n'est écrit. Annoter une offre lève sa purge (`purge_after = NULL`).
 - `POST /api/model/train` : exige une analyse (409) ; la tâche lève `ValueError` « Pas encore assez
   d'annotations (min. 6, des deux types) » si `matching.train_from_labels` renvoie `None` ⇒ tâche `échec`.
-  En succès : nouveau modèle `[CIBLE]` `matching_models(version+1, is_active)` puis `rescore` ⇒ nouveau rapport.
+  En succès : nouveau modèle `[ACTUEL]` `matching_models(version+1, is_active)` puis `rescore` ⇒ nouveau rapport.
 
 ## 4. Résultats Finaux Attendus
 
 - **Persistance** :
-  - `[ACTUEL]` fichiers JSON/JSONL ; écriture atomique (`tmp` + `os.replace`) **uniquement** pour `settings.json` et
-    `profile_settings.json`. `applications.json`, `labels.json`, rapports et `session.json` sont écrits directement
-    (risque de fichier tronqué en cas d'arrêt brutal, et de mise à jour perdue entre deux tâches concurrentes).
-  - `[CIBLE]` une transaction PostgreSQL par cas d'usage, dates `timestamptz` UTC (`now()`), auteur implicite
-    `user_id`, traçabilité par `task_id` dans `activity_events.data` et `application_events`.
+  - `[ACTUEL]` PostgreSQL 18 : une transaction par appel de dépôt (`user_transaction()`), dates `timestamptz` UTC,
+    auteur implicite `user_id` ; restent sur disque les rapports HTML et les dossiers de candidature (E-8 résolu).
+  - `[CIBLE]` une transaction par cas d'usage complet (collecte + rapport + événement ; envoi de message, § 5 de
+    `03`) et traçabilité par `task_id` dans `activity_events.data` et `application_events`.
 - **Idempotence** : pas d'en-tête `Idempotency-Key` (instance mono-utilisateur, aucun client réseau qui rejoue).
   Elle est garantie par :
   - le refus des doublons de tâche (`has_active(kind, key)` ⇒ 409) ;
-  - les contraintes `UNIQUE` cibles (`collected_items`, `applications`, `suppression_list`, `source_consents`) et
-    `ON CONFLICT DO NOTHING` dans l'import JSON ;
+  - les contraintes `UNIQUE` (`collected_items`, `applications`, `reports`, `suppression_list`, `source_consents`) et
+    `ON CONFLICT DO NOTHING` dans l'import JSON, plus `legacy_imports` (empreinte SHA-256 des fichiers importés) ;
   - l'**absence de relance automatique** de tout envoi (SMTP, message LinkedIn, Easy Apply) : un échec ou un état
     `incertaine` est rendu à l'utilisateur qui vérifie avant de réessayer.
 - **Réponse HTTP** : la ressource ou la tâche elle-même, sans enveloppe (`01-api-contracts.md` § 2). Une action

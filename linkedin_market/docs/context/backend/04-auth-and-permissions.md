@@ -40,7 +40,7 @@
 | **Traversée de chemin** | `GET /api/reports/../../.env`, dossier de candidature modifié à la main. | `storage.load_report` refuse `/`, `\`, `.` initial ; `application.folder_of` refuse un dossier hors `applications/` (500) ; route SPA : fichier servi seulement s'il est **dans** `dist/` après `resolve()`. | — |
 | **Injection d'en-tête SMTP** | Objet `"a\nBcc: x@y.z"`. | 422 « Objet requis, sur une seule ligne. » + `OutreachError` dans `build_email` ; destinataire sans `,;<>`. | — |
 | **Exposition réseau** | Accès depuis le LAN. | Écoute `127.0.0.1` uniquement ; PostgreSQL publié sur `127.0.0.1:5432` (`compose.yaml`). | — |
-| **Autre utilisateur du même poste** | Session système différente. | Hors périmètre de l'API ; `session.json` en `chmod 0o600`. | Droits `0700` sur `linkedin_market_data/` ; cookies chiffrés (§ 1.4). |
+| **Autre utilisateur du même poste** | Session système différente. | Hors périmètre de l'API ; cookies chiffrés Fernet en base (§ 1.4) ; `.env` en `0600` quand l'application y ajoute `LM_SECRET_KEY`. | Droits `0700` sur `linkedin_market_data/`. |
 | **Logiciel malveillant du même compte** | Lit `.env`, la base, les fichiers. | Hors périmètre (aucune défense applicative possible). | Documenté dans le README. |
 
 ### 1.4 Secrets (I-15)
@@ -48,15 +48,15 @@
 | Secret | Stockage `[ACTUEL]` | Stockage `[CIBLE]` | Jamais |
 | :--- | :--- | :--- | :--- |
 | `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` | `.env` (hors Git), lus par `config.linkedin_credentials()` ; en CLI sans `.env`, saisis via `getpass` | inchangé | journalisés, renvoyés par l'API (`/api/status` n'expose que `credentials_configured`) |
-| Cookies LinkedIn | `linkedin_market_data/session.json` en clair, `chmod 0o600`, `logged_in_at` UTC, supprimé après 72 h | `platform_sessions.cookies_encrypted` = `Fernet(LM_SECRET_KEY).encrypt(json(cookies))`, `expires_at = last_login_at + 72 h` ; la réutilisation ne prolonge pas la session | versionnés, journalisés, renvoyés par l'API |
+| Cookies LinkedIn | `platform_sessions.cookies_encrypted` = `Fernet(LM_SECRET_KEY).encrypt(json(cookies))`, `expires_at = last_login_at + 72 h` ; la réutilisation ne prolonge pas la session ; ligne supprimée à l'expiration (vague 1 ; l'ancien `session.json` est importé chiffré s'il a moins de 72 h) | inchangé | versionnés, journalisés, renvoyés par l'API |
 | `SMTP_USER` / `SMTP_PASSWORD` | `.env` | inchangé | journalisés (seul `smtp_configured` est exposé) |
 | `ANTHROPIC_API_KEY` | `.env`, lu par le SDK `anthropic` | inchangé | envoyés ailleurs qu'à `api.anthropic.com` |
 | `FRANCE_TRAVAIL_CLIENT_ID` / `_SECRET` | — | `.env` ; jeton d'accès en **mémoire** seulement (jamais en base) | journalisés |
-| `LM_SECRET_KEY` | — | `.env` ; si absente au premier lancement, `Fernet.generate_key()` est ajoutée à `.env` (droits `0600`) avec un message invitant à la sauvegarder | dans la base ou les sauvegardes `pg_dump` |
-| `DATABASE_URL` / `LM_DB_PASSWORD` | — | `.env` | journalisés (masquer le mot de passe dans tout message d'erreur de connexion) |
+| `LM_SECRET_KEY` | `.env` ; si absente au premier lancement, `Fernet.generate_key()` est ajoutée à `.env` (droits `0600`) avec un message invitant à la sauvegarder (`db/crypto.py`, refusé sous pytest) | inchangé | dans la base ou les sauvegardes `pg_dump` |
+| `LM_DATABASE_URL` / `LM_DB_PASSWORD` | `.env` racine (`LM_DB_PASSWORD` lu par `compose.yaml`) ; mot de passe masqué dans le message « Base PostgreSQL injoignable » (`db/bootstrap.py`) | inchangé | journalisés (masquer le mot de passe dans tout message d'erreur de connexion) |
 | Jeton local | mémoire du processus (`app.state.token`) | inchangé | écrit sur disque (sauf choix explicite `LINKEDIN_UI_TOKEN`) |
 
-Rotation de `LM_SECRET_KEY` : `MultiFernet([nouvelle, ancienne])` pendant une version, réchiffrement des lignes
+Rotation de `LM_SECRET_KEY` `[CIBLE]` : `MultiFernet([nouvelle, ancienne])` pendant une version, réchiffrement des lignes
 `platform_sessions` au démarrage, puis retrait de l'ancienne. Une clé perdue ne fait perdre que les cookies (nouvelle
 connexion LinkedIn). Cookies expirés (> 72 h) : ligne supprimée à la lecture et par la purge.
 

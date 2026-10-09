@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from selenium.common.exceptions import WebDriverException
 
@@ -19,8 +19,13 @@ from .browser import human_pause
 log = logging.getLogger(__name__)
 
 MAX_CONTACTS = 3
-TEAM_HEADINGS = ("meet the hiring team", "rencontrez l'équipe de recrutement", "rencontrez l’équipe de recrutement",
-                 "people you can reach out to", "personnes que vous pouvez contacter")
+TEAM_HEADINGS = (
+    "meet the hiring team",
+    "rencontrez l'équipe de recrutement",
+    "rencontrez l’équipe de recrutement",
+    "people you can reach out to",
+    "personnes que vous pouvez contacter",
+)
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _SLUG = re.compile(r"linkedin\.com/in/([^/?#]+)")
 _DEGREE = re.compile(r"\s*[•·]\s*(?:1er|1st|2e|2nd|3e|3rd|\d+\w*)\+?.*$", re.IGNORECASE)
@@ -49,27 +54,42 @@ for (const a of scope.querySelectorAll('a[href*="/in/"]')) {
   out.push({slug: m[1], text: (card.innerText || a.innerText || '').trim()});
 }
 return out;
-"""
+"""  # noqa: E501
 
 _JS_OVERLAY = """
 const dialog = document.querySelector('[role="dialog"], .artdeco-modal') || document.querySelector('main') || document.body;
 const mails = Array.from(dialog.querySelectorAll('a[href^="mailto:"]')).map(a => a.getAttribute('href').replace(/^mailto:/i, '').split('?')[0]);
 return {mails, text: dialog.innerText || ''};
-"""
+"""  # noqa: E501
 
 
 def parse_team(raw: list[dict]) -> list[dict]:
-    """[{slug, text}] -> contacts {name, profile_url, headline, source}."""
+    """[{slug, text}] -> contacts {full_name, profile_url, email, headline, source} (C-4, C-5)."""
     contacts = []
     for row in raw[:MAX_CONTACTS]:
-        lines = [l.strip() for l in (row.get("text") or "").splitlines() if l.strip()]
+        lines = [line.strip() for line in (row.get("text") or "").splitlines() if line.strip()]
         name = _DEGREE.sub("", lines[0]).strip() if lines else ""
-        headline = next((l for l in lines[1:] if not re.match(r"^[•·]?\s*(1er|1st|2e|2nd|3e|3rd)\b", l, re.IGNORECASE)
-                         and "message" not in l.lower() and len(l) > 3), "")
+        headline = next(
+            (
+                line
+                for line in lines[1:]
+                if not re.match(r"^[•·]?\s*(1er|1st|2e|2nd|3e|3rd)\b", line, re.IGNORECASE)
+                and "message" not in line.lower()
+                and len(line) > 3
+            ),
+            "",
+        )
         if not name or len(name) > 80:
             name = row["slug"].replace("-", " ").title()
-        contacts.append({"name": name, "profile_url": f"https://www.linkedin.com/in/{row['slug']}/", "email": None,
-                         "headline": headline[:160], "source": "linkedin"})
+        contacts.append(
+            {
+                "full_name": name,
+                "profile_url": f"https://www.linkedin.com/in/{row['slug']}/",
+                "email": None,
+                "headline": headline[:160],
+                "source": "linkedin_equipe_recrutement",
+            }
+        )
     return contacts
 
 
@@ -85,10 +105,15 @@ def overlay_url(profile_url: str) -> str:
     return profile_url.rstrip("/") + "/overlay/contact-info/"
 
 
-def find_hiring_team(driver, job_url: str, caution: config.Caution, *,
-                     check: Callable[[], None] = lambda: None,
-                     log_fn: Callable[[str], None] = log.info,
-                     to_overlay: Callable[[str], str] = overlay_url) -> list[dict]:
+def find_hiring_team(
+    driver,
+    job_url: str,
+    caution: config.Caution,
+    *,
+    check: Callable[[], None] = lambda: None,
+    log_fn: Callable[[str], None] = log.info,
+    to_overlay: Callable[[str], str] = overlay_url,
+) -> list[dict]:
     """Recruteurs de l'offre avec leur email quand LinkedIn l'affiche."""
     driver.get(job_url)
     human_pause(caution, 0.6)
@@ -113,8 +138,8 @@ def find_hiring_team(driver, job_url: str, caution: config.Caution, *,
             data = driver.execute_script(_JS_OVERLAY) or {}
             contact["email"] = extract_email(data.get("mails", []), data.get("text", ""))
         except WebDriverException as exc:
-            log_fn(f"Coordonnées illisibles pour {contact['name']} : {exc.msg}")
-        log_fn(f"{contact['name']} : " + (contact["email"] or "email non affiché par LinkedIn"))
+            log_fn(f"Coordonnées illisibles pour {contact['full_name']} : {exc.msg}")
+        log_fn(f"{contact['full_name']} : " + (contact["email"] or "email non affiché par LinkedIn"))
     return contacts
 
 
@@ -126,7 +151,11 @@ def merge_contacts(existing: list[dict], found: list[dict]) -> list[dict]:
         if key in merged:
             old = merged[key]
             # Un email saisi à la main reste prioritaire ; sinon le plus récent affiché par LinkedIn.
-            email = old.get("email") if old.get("source") == "manuel" and old.get("email") else contact["email"] or old.get("email")
+            email = (
+                old.get("email")
+                if old.get("source") == "manuel" and old.get("email")
+                else contact["email"] or old.get("email")
+            )
             merged[key] = {**old, **{k: v for k, v in contact.items() if v and k != "source"}, "email": email}
         else:
             merged[key] = contact

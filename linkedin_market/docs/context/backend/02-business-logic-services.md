@@ -24,14 +24,14 @@ Fonctions de cas d'usage, toutes de signature `(ctx: TaskContext, …) -> dict` 
 
 | Fonction | Cas d'usage | Préconditions revérifiées dans la tâche | Écritures |
 | :--- | :--- | :--- | :--- |
-| `run_analysis(ctx, request, scrape, interpreter_name)` | `LancerAnalyse` / `ReanalyserHistorique` | `guard_not_blocked()` (dans `pipeline.scrape`) | `history.jsonl`, `linkedin_profile.txt`, rapport, `activity run` |
+| `run_analysis(ctx, request, scrape, interpreter_name)` | `LancerAnalyse` / `ReanalyserHistorique` | `guard_not_blocked()` (dans `pipeline.scrape`) | `collected_items`, `candidate_profiles.text`, `reports` (+ HTML), `activity run` |
 | `rescore(ctx)` | `RecalculerScores` | analyse existante | nouveau rapport (reprend l'interprétation précédente) |
-| `train_model(ctx)` | `EntrainerModele` | ≥ 6 annotations, deux classes | `matching_model.json`, nouveau rapport |
-| `prepare_application(ctx, job_id)` | `PreparerCandidature` | offre dans le dernier rapport **et** dans l'historique | dossier, `applications.json` |
-| `apply_job(ctx, job_id)` | `PostulerEasyApply` | plafond `apply`, blocage | `cv.pdf`, `applications.json`, `labels.json`, `activity apply` |
-| `lookup_contacts(ctx, job_id)` | `ChercherRecruteurs` | blocage | `contacts` fusionnés, historique |
+| `train_model(ctx)` | `EntrainerModele` | ≥ 6 annotations, deux classes | `matching_models` (version + 1, active), nouveau rapport |
+| `prepare_application(ctx, job_id)` | `PreparerCandidature` | offre dans le dernier rapport **et** dans l'historique | dossier, `applications` |
+| `apply_job(ctx, job_id)` | `PostulerEasyApply` | plafond `apply`, blocage | `cv.pdf`, `applications` + `application_events`, `labels`, `activity apply` |
+| `lookup_contacts(ctx, job_id)` | `ChercherRecruteurs` | blocage | `company_contacts` fusionnés, historique |
 | `send_message(ctx, job_id, …)` | `EnvoyerMessage` | plafond messages ; blocage (canal LinkedIn) | `activity message_*`, historique, statut `contactée` |
-| `import_linkedin_profile(ctx)` | `ImporterProfilLinkedIn` | blocage | `linkedin_profile.txt` |
+| `import_linkedin_profile(ctx)` | `ImporterProfilLinkedIn` | blocage | `candidate_profiles.text` |
 | `sync_skill_to_linkedin(ctx, skill)` | `ModifierProfil` (volet LinkedIn) | blocage | `activity profile_skill` si `ajoutée` |
 | `status_snapshot()`, `monitor_snapshot()`, `effective_profile()`, `jobs_overview()` | lectures | — | — |
 
@@ -91,14 +91,15 @@ qui enregistre l'événement `blocked` puis lève.
 | Toute exception **dans une tâche** | — | tâche `échec`, `error = str(exc)` (3 lignes de traceback dans `logs`) |
 
 ### 1.6 Repository / Data Access Layer
-- `[ACTUEL]` `storage.py` (historique, annotations, rapports), `application.py` (suivi + fichiers), `settings.py`,
-  `activity.py`, `session.py`, `TaskManager._save_final`. Seuls ces modules lisent/écrivent `DATA_DIR`.
-- `[CIBLE]` `linkedin_market/db/` (`models.py`, `session.py`, `users.py`, `bootstrap.py`, `import_json.py`) et
-  `linkedin_market/db/repositories/` : un repository
-  par agrégat (`ItemRepository`, `ApplicationRepository`, `OutreachRepository`, `ActivityRepository`,
-  `TaskRepository`, `ConsentRepository`, `SettingsRepository`). Chaque méthode prend `user_id` en premier argument
-  (I-01) ; aucune requête SQL hors de ces modules. Les fichiers produits (rapports HTML, dossiers de candidature)
-  restent sur disque, seuls leurs chemins sont en base.
+- `[ACTUEL]` (vague 1) façades inchangées pour `pipeline.py` : `storage.py` (historique, annotations, rapports),
+  `application.py` (suivi + fichiers), `settings.py`, `activity.py`, `session.py`, `matching.py` (persistance du
+  modèle), `TaskManager` ; elles ouvrent `user_transaction()` et délèguent à `linkedin_market/db/` (`models.py`,
+  `session.py`, `users.py`, `bootstrap.py`, `import_json.py`, `crypto.py`) et `linkedin_market/db/repositories/`
+  (modules de fonctions par agrégat : `items`, `applications`, `activity`, `tasks`, `settings`, `profile`, `reports`,
+  `models`, `platform_sessions`). Chaque fonction prend `session, user_id` en premiers arguments (I-01) ; aucune
+  requête SQL hors de ces modules. Les fichiers produits (rapports HTML, dossiers de candidature) restent sur
+  disque, seuls leurs chemins relatifs sont en base.
+- `[CIBLE]` dépôts `outreach` (vague 4) et `consents` (vague 3).
 
 ## 2. Gestion des Transactions & Verrous
 
@@ -107,13 +108,11 @@ qui enregistre l'événement `blocked` puis lève.
 | :--- | :--- | :--- |
 | `TaskManager._lock` (`RLock`) | état des tâches en mémoire | — |
 | `TaskManager._browser_lock` (`Lock`) | un seul Selenium à la fois ; attente par tranches de 0,5 s avec `ctx.check()` (annulable) | — |
-| `activity._LOCK` | ajout d'une ligne à `activity.jsonl` | ne couvre pas le couple « compter puis enregistrer » |
-| `settings._write` | `tmp` + `os.replace` (atomique) | seulement `settings.json`, `profile_settings.json` |
+| Transaction PostgreSQL par appel de façade (`user_transaction()`) | chaque lecture / écriture | une transaction par cas d'usage complet reste `[CIBLE]` (§ 2.2) |
+| `SELECT … FOR UPDATE` sur la candidature (`application.py`) et sur `user_settings` (`db/repositories/settings.py`, `models.py`) | mise à jour d'une candidature ; nouvelle version du modèle | le couple « compter puis enregistrer » des plafonds n'est pas encore sérialisé (E-11) |
 | `has_active(kind, key)` | une tâche par type et par offre | vérifié puis `submit()` sans verrou commun : deux requêtes simultanées peuvent passer (fenêtre de quelques ms, acceptable en local) |
 
-Conséquences : mises à jour perdues possibles sur `applications.json` (lecture-modification-écriture sans
-verrou, ex. `lookup_contacts` et `PATCH contacts` simultanés) et dépassement possible du plafond de messages email
-(E-11).
+Conséquence restante : dépassement possible du plafond de messages email (E-11, vague 2).
 
 ### 2.2 Cible `[CIBLE]`
 - **Une transaction par cas d'usage**, ouverte par le service (`with session.begin():`), jamais par le routeur ni
@@ -160,8 +159,8 @@ def reserve_message(db: Session, user_id: UUID, application_id: UUID, req: Messa
   `web/__main__.py` : `%(asctime)s - %(levelname)s - %(message)s` ; Uvicorn en `warning`.
 - `_TaskLogHandler` recopie dans `Task.logs` les messages émis **par le thread de la tâche**
   (`record.thread`), préfixés `HH:MM:SS`, 400 lignes maximum ; `ctx.log()` écrit directement. Ces logs sont
-  visibles dans l'interface et **persistés** dans `tasks.jsonl` avec l'état final.
-- Le journal d'activité (`activity.jsonl`) est un journal **métier** (plafonds, repos, monitoring), distinct des
+  visibles dans l'interface et **persistés** dans `tasks.logs` (table `tasks`).
+- Le journal d'activité (`activity_events`) est un journal **métier** (plafonds, repos, monitoring), distinct des
   logs techniques.
 
 ### 3.2 Règles
@@ -175,33 +174,30 @@ def reserve_message(db: Session, user_id: UUID, application_id: UUID, req: Messa
   `ANTHROPIC_API_KEY`, `FRANCE_TRAVAIL_CLIENT_SECRET`, jeton d'accès France Travail, cookies, jeton local,
   `LM_SECRET_KEY`, corps complet d'un message, texte d'un profil tiers.
 - **Données de tiers dans les logs** : aujourd'hui `services.send_message` journalise l'adresse du destinataire
-  et `contacts.find_hiring_team` le nom et l'email des recruteurs ; ces lignes sont persistées dans `tasks.jsonl`
+  et `contacts.find_hiring_team` le nom et l'email des recruteurs ; ces lignes sont persistées dans `tasks.logs`
   (E-12). `[CIBLE]` : masquer (`j***@acme.com`, initiales) dans les logs ; l'information complète reste dans
   `outreach_messages` / `company_contacts`, soumis à la rétention (I-14).
-- **Rétention des logs** : avec la table `tasks`, purge à 12 mois (lot 1 ERD § 3) ; `tasks.jsonl` actuel grossit
-  sans limite (seules les 100 dernières lignes sont rechargées).
+- **Rétention des logs** : table `tasks` `[ACTUEL]` ; purge à 12 mois (lot 1 ERD § 3) `[CIBLE]` (tâche `purge`,
+  vague 6).
 
 ## 4. Écarts Code ↔ Documentation (constatés le 2026-10-08)
 
+Résolus et retirés à l'acceptation de la vague 1 (2026-10-09) : E-1, E-2 (slug `mot-cle-AAAA-MM-JJ[-n]`,
+`UNIQUE (user_id, slug)`), E-8 (écritures en base), E-9 (`timestamptz` UTC, C-1), E-15 (noms de l'ERD), E-16
+(`person` sans texte, `CHECK`), E-19 (404 sur HTML absent). Les numéros ne sont pas réattribués.
+
 | # | Écart | Référence | Correction proposée |
 | :--- | :--- | :--- | :--- |
-| E-1 | Nom de rapport `<slug>-AAAAMMJJ-HHMM` : deux rapports du même mot-clé dans la même minute s'écrasent (ex. `rescore` juste après `run`). | I-02 | Suffixe `-n` si le fichier existe ; en cible `UNIQUE (slug)` + slug `mot-cle-AAAA-MM-JJ[-n]`. |
-| E-2 | L'exemple du lot 1 (`02` flux 3) montre `"report":"data-engineer-2026-10-08"`, format cible ; le code produit `data-engineer-20261008-1432`. | lot 1 `02` § 3 | Documenté ici ; le format change à la migration. |
-| E-3 | `max_items` (réglage ou `RunBody`) accepte 1–200 et **remplace** `Caution.max_items` : 200 éléments par type en `prudent`. | I-07, R-2 | **Décidé (2026-10-08)** : `max_items` ≤ `CAUTION_LEVELS[caution].max_items` (422 au-delà côté API/réglages, `min()` défensif dans `pipeline`) ; `DEFAULT_CAUTION = "prudent"`. |
-| E-4 | Blocage pendant la collecte : `scraper._blocked()` arrête la collecte et `pipeline.scrape` enregistre `blocked`, mais l'analyse continue et la tâche finit `terminée` (rapport partiel). Le lot 1 (`02` flux 3) décrit un `échec`. | I-06 | Lever `BlockedError` après l'enregistrement ; ou garder le rapport partiel mais renvoyer `result.blocked = true`. Décision à prendre. |
+| E-3 | `max_items` (réglage ou `RunBody`) accepte 1–200 et **remplace** `Caution.max_items` : 200 éléments par type en `prudent`. | I-07, R-2 | **Décidé (2026-10-08)** : `max_items` ≤ `CAUTION_LEVELS[caution].max_items` (422 au-delà côté API/réglages, `min()` défensif dans `pipeline`) ; `DEFAULT_CAUTION = "prudent"`. **Partiellement livré en vague 1** : `DEFAULT_CAUTION = "prudent"`, contrôle dans `settings.validate_settings` (message `max_items ne peut pas dépasser N en prudence « … ».`), `CHECK` en base, import qui ramène une valeur hors plafond à `NULL`. **Reste en vague 2** : `RunBody` (422) et `min()` défensif dans `pipeline`. |
+| E-4 | Blocage pendant la collecte : la tâche finit `terminée` sans signaler le blocage. | I-06 | **Tranchée le 2026-10-08 (option A)** : rapport partiel conservé, tâche `terminée`, `result` = `{report, jobs, counts, blocked: true, blocked_where: "collecte"}` (`blocked: false` sans blocage) ; bandeau « Collecte interrompue par LinkedIn » ; lot 1 `02` flux 3 corrigé. À livrer en vague 2. |
 | E-5 | Vérification à la connexion : `session._login_with_password` attend 180 s (`MANUAL_CHECK_TIMEOUT`) puis lève `TimeoutException` **sans** événement `blocked` ; la reprise de session par cookies ne détecte pas de checkpoint. | I-06 | Enregistrer `blocked(where="connexion")` sur délai dépassé. |
-| E-6 | La génération de CV par Claude envoie le **profil source complet** et le **texte intégral de l'offre** (`application._generate_with_claude`). Le lot 1 (I-11) dit « Claude ne reçoit que des agrégats (jamais un élément brut) ». | I-11 | Préciser I-11 : « jamais de donnée de tiers identifiable » ; l'offre (publication d'entreprise) et le profil de l'utilisateur sont admis, après retrait des noms/emails de personnes trouvés dans le texte. À valider. |
-| E-7 | `interpreter="none"` accepté (réglages, CLI `--interpreter none`, `LINKEDIN_INTERPRETER`) et produit un rapport **sans** interprétation. | I-11 | Refuser `none` à l'écriture (422), le lire comme `local`. |
-| E-8 | `applications.json`, `labels.json`, `session.json` et rapports écrits sans `tmp` + `os.replace` ; lecture-modification-écriture sans verrou entre threads. | lot 1 `01` § 1 (« écriture atomique ») | Helper `_write_atomic` commun + verrou de module, en attendant PostgreSQL. |
-| E-9 | Dates locales naïves partout (`datetime.now().isoformat()`), sauf `session.json` (UTC avec fuseau) ; `count_today()` compare des préfixes de date locale. | lot 1 `00` § 4 | `timestamptz` UTC ; « aujourd'hui » des plafonds = jour **local** de l'utilisateur, calculé explicitement (`AT TIME ZONE`). |
+| E-6 | La génération de CV par Claude envoie le **profil source complet** et le **texte intégral de l'offre** (`application._generate_with_claude`), qui peut contenir des noms de personnes. | I-11 | **Tranchée le 2026-10-09 (option A)** : I-11 = « jamais de donnée de tiers identifiable » ; profil de l'utilisateur admis ; texte de l'offre passé par `nlp.redact_third_parties(text, known_names)` avant envoi (emails, téléphones, URL `linkedin.com/in/…`, noms des contacts de la candidature, motifs LinkedIn « X et des millions… », « relations travaillent ici » ⇒ `[personne]`). Pas de nouvelle version de la popup de risques. À livrer en vague 6. |
+| E-7 | `interpreter="none"` accepté (réglages, CLI `--interpreter none`, `LINKEDIN_INTERPRETER`) et produit un rapport **sans** interprétation. | I-11 | Refuser `none` à l'écriture (422), le lire comme `local`. **Partiellement livré en vague 1** : réglages limités à `claude`/`local` (`CHECK` en base), `none` lu comme `local` (`settings.py`), import `none` ⇒ `local`. **Reste en vague 2** : `RunBody` (422), CLI `--interpreter none`, `LINKEDIN_INTERPRETER=none`, branche `none` de `interpreter.py`. |
 | E-10 | Messages de validation Pydantic en anglais (`Input should be …`). | Convention française | Gestionnaire `RequestValidationError` (§ 2 de `01`). |
 | E-11 | Plafond de messages email : tâches `message` email non `browser` ⇒ jusqu'à 4 en parallèle (`max_workers=4`) ; le compteur n'est incrémenté qu'après l'envoi ⇒ dépassement possible de 3. | I-07 | Réservation transactionnelle (§ 2.2). |
 | E-12 | Destinataires, noms et emails de recruteurs écrits dans les logs de tâche persistés. | I-15, RGPD art. 5(1)(c) | Masquage (§ 3.2). |
-| E-15 | Nommage : contacts `name` / `source="linkedin"` vs ERD `full_name` / `linkedin_equipe_recrutement` ; historique `statut` / `candidature` vs ERD `status` / `apply`. | ERD § 1 | Conversion dans `0002_import_json` ; le code adopte les noms de l'ERD à la migration. |
-| E-16 | `scraper.people()` stocke le texte de la carte du profil tiers (`text=_clean(card)`). | I-09 | Ne garder que `title` + compétences extraites. |
 | E-17 | Le brouillon de message (`message_draft`) n'ajoute ni origine de l'adresse ni mention de désinscription ; aucune `suppression_list`. | I-12, I-13 | Pied de message imposé + contrôle (cf. `05` § 2.4). |
 | E-18 | Les prompts (`interpreter.SYSTEM_PROMPT`, `application.CV_SYSTEM_PROMPT`), les libellés (`FEATURE_LABELS`) et le CV local codent en dur « freelance basé à Abidjan », « GMT ». | Outil open source multi-utilisateurs | Réglages `home_location` / `timezone` injectés dans les prompts. |
-| E-19 | `GET /api/reports/{name}/html` : si le JSON existe mais pas le HTML, `FileResponse` échoue (500). | — | Tester l'existence ⇒ 404 « Rapport introuvable. ». |
-| E-20 | `SMTP_SECURITY` autre que `ssl`/`starttls` ⇒ port 25 **sans chiffrement** (utilisé par les tests avec `none`). | RGPD art. 32 | Refuser hors tests, ou avertir dans `/api/status`. |
+| E-20 | `SMTP_SECURITY` autre que `ssl`/`starttls` ⇒ port 25 **sans chiffrement** (utilisé par les tests avec `none`). | RGPD art. 32 | **Tranchée le 2026-10-08** : `none` admis seulement si `SMTP_HOST` ∈ `127.0.0.1`, `localhost`, `::1` ; sinon `503` (message `01` § 1.2 G-5), à l'API et au début de la tâche. À livrer en vague 2. |
 | E-21 | Lot 1 `02` § 6 : l'événement `blocked` porterait `until` ; le code n'enregistre que `where` (+ `job`) et calcule `until` à la lecture. | lot 1 `02` § 6 | Corriger la table du lot 1 (calcul à la lecture conservé). |
 | E-22 | Annulation pendant la collecte : `pipeline.scrape` lève `pipeline.Cancelled` (`RuntimeError`), pas `TaskCancelled` ⇒ la tâche finit `échec` (« Collecte annulée. ») au lieu de `annulée` ; l'annulation n'est testée qu'entre deux types d'éléments. | Statuts de tâche (lot 1 `02`) | Lever `TaskCancelled` (ou l'intercepter dans `TaskManager._run`) ; tester `should_stop` à chaque page. |

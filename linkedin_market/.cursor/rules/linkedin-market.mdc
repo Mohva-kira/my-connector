@@ -37,16 +37,19 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
   et au début de la tâche. `max_items` ≤ plafond de la prudence choisie ; prudence par défaut `prudent` (E-3).
 - I-08 : uniquement le compte personnel de l'utilisateur.
 - I-09, I-10 : pour un profil tiers, garder titre + compétences seulement ; purge 30 j (posts/profils), 90 j (offres).
-- I-11 : aucune donnée de tiers identifiable envoyée à Claude ; l'interprète local produit toujours un texte.
+- I-11 : aucune donnée de tiers identifiable envoyée à Claude ; l'interprète local produit toujours un texte ;
+  CV par Claude : profil de l'utilisateur + offre après `nlp.redact_third_parties` (E-6).
 - I-12, I-13, I-14 : prospection B2B conforme CPCE L.34-5 / CNIL (objet lié à l'offre, origine de l'adresse,
   désinscription) ; `suppression_list` bloque tout envoi ; contacts purgés à 3 ans.
 - I-15 : aucun secret, cookie ou jeton versionné ou journalisé.
 - I-16 : aucune action sur une source `navigateur` sans consentement à la version courante de la popup de risques.
-- I-01, I-02, I-03 : `user_id` partout (cible) ; rapports immuables ; pas de régression automatique de statut.
+- I-01, I-02, I-03 : `user_id` sur chaque table et dans chaque requête (PostgreSQL 18) ; rapports immuables
+  (trigger `trg_reports_immutable`) ; pas de régression automatique de statut.
 
-## Ne pas trancher seul (en arbitrage, voir les docs)
-Issue d'un `run` bloqué (E-4), mécanisme de désinscription (STOP / List-Unsubscribe),
-formulation d'I-11 pour les CV (E-6). Demande la décision si la tâche en dépend.
+E-4 tranché (option A) : `run` bloqué ⇒ `terminée`, rapport partiel, `result.blocked = true`.
+
+## Ne pas trancher seul
+Aucun point en arbitrage au 2026-10-09. Tout nouveau point touchant un invariant ou un risque : demande la décision.
 
 ## Interdictions
 - Aucune technique de dissimulation ou de contournement : pas de résolution de CAPTCHA, pas de maquillage
@@ -62,14 +65,17 @@ formulation d'I-11 pour les CV (E-6). Demande la décision si la tâche en dépe
 - Couches : Entrées → Orchestration → Domaine / Intégrations → Persistance. Le domaine n'importe ni FastAPI ni
   Selenium ; aucun routeur n'importe Selenium ni ne porte de règle métier.
 - Noms du glossaire uniquement (`job`, `application`, `source_code`, `caution`…) ; jamais `offer`, `candidate`.
-- Nouvelles dates en UTC avec fuseau (cible `timestamptz`).
+- Dates en UTC `timestamptz` ; à l'API, ISO 8601 UTC suffixé `Z` via `db.utc_iso` (C-1).
+- Persistance : PostgreSQL 18 (SQLAlchemy 2.x, psycopg 3, Alembic) ; accès à la base uniquement par `db/repositories/*`
+  (appelés par `storage.py` & co.) ; toute évolution de schéma = révision Alembic sous `migrations/versions/`.
 - Front : TypeScript strict sans `any`, TanStack Query pour l'état serveur, jetons Tailwind existants (aucune
   couleur brute), interface en français, relecture avant tout envoi.
 
 ## Tests et vérifications (depuis la racine du dépôt)
 - Tout changement de comportement : test pytest, hors ligne (fixtures HTML, aucun appel réel à LinkedIn,
-  France Travail, Claude ou SMTP). `.venv/bin/python -m pytest linkedin_market/tests`
-- Front : `npx tsc --noEmit` ou `npm run build` dans `linkedin_market/web/frontend`. `npm run lint` (ESLint 9, 0 erreur exigée ; 9 avertissements de dette, frontend/04 § 4.3).
+  France Travail, Claude ou SMTP). `LM_TEST_DATABASE_URL=<base _test> .venv/bin/python -m pytest linkedin_market/tests`
+  (0 test ignoré exigé). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`, réservé à email_analyzer).
+- Front : `npx tsc --noEmit` ou `npm run build` dans `linkedin_market/web/frontend`. `npm run lint` (ESLint 9, 0 erreur et 0 avertissement exigés).
 
 ## Maintenance
 Si un changement modifie l'architecture, un contrat, un schéma, un invariant ou une convention, mets à jour le

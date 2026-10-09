@@ -1,7 +1,9 @@
 # Schéma Entité-Relation (ERD)
 
-> **Statut** : schéma **cible PostgreSQL 18** (SQLAlchemy 2.x + Alembic). La section 4 indique, pour chaque
-> table, le fichier JSON/JSONL de `linkedin_market_data/` qu'elle remplace et la règle de migration.
+> **Statut** : schéma **PostgreSQL 18** `[ACTUEL]` depuis la vague 1 (SQLAlchemy 2.x + Alembic, révision
+> `migrations/versions/0001_initial.py`, modèles `db/models.py`). La section 4 indique, pour chaque table, le fichier
+> JSON/JSONL de `linkedin_market_data/` qu'elle remplace et la règle d'import (`db/import_json.py`). Colonnes et
+> tables annoncées pour une vague ultérieure : marquées `[CIBLE]`.
 
 Conventions :
 - Clés primaires `uuid` générées par `uuidv7()` (PostgreSQL 18, ordonnées dans le temps) sauf mention contraire.
@@ -39,6 +41,7 @@ erDiagram
     COMPANY_CONTACTS |o--o{ OUTREACH_MESSAGES : "destinataire"
     USERS ||--o{ SUPPRESSION_LIST : "respecte"
     USERS ||--o{ ACTIVITY_EVENTS : "journalise"
+    USERS ||--o{ LEGACY_IMPORTS : "a importé"
 
     USERS {
         uuid id PK
@@ -99,7 +102,7 @@ erDiagram
         text label
         text access_mode "api_officielle|navigateur|import_manuel"
         text risk_version "ex. 2026-10, NULL si sans popup"
-        boolean enabled
+        boolean enabled "seule linkedin à true en vague 1"
     }
 
     SOURCE_CONSENTS {
@@ -148,7 +151,7 @@ erDiagram
         text title
         text text "NULL pour person (I-09)"
         text_array skills "extraites à l'ingestion"
-        text keyword
+        text_array keywords "mots-clés de collecte, lower(trim), sans doublon, fusionnés à la recollecte"
         text company
         text location
         date posted_at "approximée depuis il y a 3 j"
@@ -167,7 +170,7 @@ erDiagram
         uuid id PK
         uuid user_id FK
         int version "incrémental par utilisateur"
-        jsonb weights "8 poids + biais"
+        jsonb weights "{weights[8], bias, mean[8], std[8], train_accuracy, loss_history}"
         jsonb feature_names
         int n_positive
         int n_negative
@@ -223,6 +226,7 @@ erDiagram
         timestamptz collected_at
         timestamptz last_contacted_at
         timestamptz purge_after "dernier contact + 3 ans (I-14)"
+        timestamptz opposed_at "NULL = pas d'opposition ; email/URL effacés à l'opposition (vague 4, révision 0002)"
     }
 
     OUTREACH_MESSAGES {
@@ -257,6 +261,13 @@ erDiagram
         jsonb data
         timestamptz at
     }
+
+    LEGACY_IMPORTS {
+        uuid user_id PK,FK
+        text file_name PK "relatif à DATA_DIR, ex. reports/x.json"
+        text sha256 PK "empreinte hexadécimale du contenu du fichier"
+        timestamptz imported_at
+    }
 ```
 
 ## 2. Contraintes & Index
@@ -264,13 +275,14 @@ erDiagram
 | Table | Contrainte / index | Raison |
 | :--- | :--- | :--- |
 | `collected_items` | `UNIQUE (user_id, source_code, kind, external_id)` | Dédoublonnage de l'historique entre exécutions. |
-| `collected_items` | `INDEX (user_id, keyword, collected_at DESC)` | Fenêtre de 30 jours des tendances. |
-| `collected_items` | `INDEX (purge_after) WHERE purge_after IS NOT NULL` | Purge quotidienne (I-10). |
+| `collected_items` | `INDEX GIN (keywords)` + `INDEX (user_id, collected_at DESC)` | Fenêtre de 30 jours des tendances : `keywords @> ARRAY[lower(trim(:kw))]`. GIN sans `user_id` en tête (instance mono-utilisateur, pas d'extension `btree_gin`) ; le filtre `user_id` reste dans chaque requête (I-01). |
+| `collected_items` | `INDEX (purge_after) WHERE purge_after IS NOT NULL` | Purge quotidienne (I-10) : colonne et index `[ACTUEL]`, tâche `purge` `[CIBLE]` (vague 6). |
 | `collected_items` | `CHECK (kind <> 'person' OR text IS NULL)` | Minimisation des profils tiers (I-09). |
 | `labels` | `CHECK (value IN (0, 1))` | Annotation binaire. |
 | `matching_models` | `UNIQUE (user_id) WHERE is_active` (index partiel) | Un seul modèle actif. |
 | `matching_models` | `UNIQUE (user_id, version)` | Versions monotones. |
-| `reports` | Trigger `BEFORE UPDATE` qui lève une exception | Immuabilité (I-02). |
+| `reports` | Trigger `BEFORE UPDATE` qui lève une exception, sauf `task_id` → `NULL` seul (FK `ON DELETE SET NULL`, purge des tâches) | Immuabilité (I-02). |
+| FK de jointure | `application_events (application_id)`, `company_contacts (user_id, application_id)`, `outreach_messages (application_id)`, `reports (task_id)` et `collected_items (task_id)` partiels, `labels (user_id)` | Jointures, cascades, `SET NULL` (cf. `backend/03` § 3.3 bis). |
 | `reports` | `UNIQUE (user_id, slug)` | Nom de rapport unique (E-1) ; `user_id` en tête (I-01). |
 | `applications` | `UNIQUE (user_id, item_id)` | Une candidature par offre. |
 | `source_consents` | `UNIQUE (user_id, source_code) WHERE revoked_at IS NULL` | Un consentement actif par source. |
@@ -278,6 +290,7 @@ erDiagram
 | `outreach_messages` | `INDEX (user_id, sent_at)` | Plafond `message_daily_max`. |
 | `activity_events` | `INDEX (user_id, kind, at DESC)` | Plafonds quotidiens, dernier blocage. |
 | `tasks` | `INDEX (user_id, status) WHERE status NOT IN ('terminée','échec','annulée')` | Tâches actives, reprise au démarrage. |
+| `legacy_imports` | `PRIMARY KEY (user_id, file_name, sha256)` | Fichier historique reconnu à la relance de l'import (renommage `.migrated` interrompu après le `COMMIT`) par le couple (nom relatif, empreinte) ; un contenu identique sous un autre nom est un fichier distinct (décision utilisateur 2026-10-09, option B). |
 | `user_settings` | `CHECK (apply_min_score BETWEEN 0 AND 100)`, `CHECK (apply_daily_max BETWEEN 0 AND 200)`, `CHECK (message_daily_max BETWEEN 0 AND 200)`, `CHECK (max_items IS NULL OR max_items BETWEEN 1 AND CASE caution WHEN 'prudent' THEN 15 WHEN 'normal' THEN 30 ELSE 60 END)` | Bornes de `settings.py` ; `max_items` plafonné par la prudence (I-07, E-3). |
 
 ## 3. Énumérations & Dictionnaire de Données
@@ -316,13 +329,15 @@ erDiagram
 | `profile_settings.json` | `candidate_profiles`, `profile_skill_overrides` | `added_skills` / `removed_skills` → `action`. |
 | `linkedin_profile.txt` | `candidate_profiles.text` (origin `linkedin`) | |
 | `session.json` | `platform_sessions` (`linkedin`) | Chiffré à l'import ; ignoré si plus vieux que 72 h. |
-| `history.jsonl` | `collected_items` | `source` → `kind`, `source_code = 'linkedin'` ; `person` : `text` mis à `NULL`, compétences extraites ; lignes hors rétention ignorées. |
+| `history.jsonl` | `collected_items` | `source` → `kind`, `source_code = 'linkedin'` ; `person` : `text` mis à `NULL`, compétences extraites ; lignes hors rétention ignorées sauf offre annotée ou candidatée ; `keyword` de toutes les lignes d'un même `id` fusionnés dans `keywords`. |
 | `labels.json` | `labels` | Clé = `id` de l'élément. |
-| `matching_model.json` | `matching_models` (version 1, actif) | |
-| `reports/*.json` (+ `.html`) | `reports` | Le HTML reste un fichier ; `html_path` pointe dessus. |
+| `matching_model.json` | `matching_models` (version 1, actif) | `n_positive` / `n_negative` = nombre de 1 et de 0 de `labels.json`. |
+| `reports/*.json` (+ `.html`) | `reports` | Le HTML reste un fichier ; `html_path` pointe dessus. Aucun JSON de rapport n'est plus écrit sur disque. |
 | `applications.json` + `applications/<dossier>/` | `applications`, `application_events`, `company_contacts` | `history` → `application_events` ; dossiers conservés sur disque. |
 | `activity.jsonl` | `activity_events` | Dates locales converties en UTC (fuseau de la machine). |
-| `tasks.jsonl` | `tasks` | Uniquement les 100 dernières (comme `_load_history`). |
+| `tasks.jsonl` | `tasks` | Uniquement les 100 dernières ; `id` = `uuid5` (espace de noms fixe) de l'ancien identifiant. |
 
-L'import est idempotent (contraintes `UNIQUE` + `ON CONFLICT DO NOTHING`) et ne supprime jamais les fichiers
-d'origine : ils sont renommés en `*.migrated` après succès.
+L'import est idempotent (contraintes `UNIQUE` + `ON CONFLICT DO NOTHING`), tient en **une transaction** qui
+inscrit aussi chaque fichier dans `legacy_imports`, et ne supprime jamais les fichiers d'origine : ils sont renommés
+en `*.migrated` après le `COMMIT`. Un fichier resté sous son nom dont le couple (nom relatif, empreinte) figure dans `legacy_imports`
+est seulement renommé (compteur `already_imported_files`). `[ACTUEL]`

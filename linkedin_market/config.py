@@ -47,8 +47,15 @@ TREND_WINDOW_DAYS = 30
 
 # Fichiers de profil recherchés à la racine du projet, par ordre de priorité.
 PROFILE_FILE_CANDIDATES = (
-    "profil.json", "profile.json", "profil.md", "profile.md",
-    "profil.txt", "profile.txt", "cv.pdf", "CV.pdf", "profil.pdf",
+    "profil.json",
+    "profile.json",
+    "profil.md",
+    "profile.md",
+    "profil.txt",
+    "profile.txt",
+    "cv.pdf",
+    "CV.pdf",
+    "profil.pdf",
 )
 
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
@@ -59,8 +66,8 @@ class Caution:
     """Volume et rythme du scraping, à ajuster selon les signes de blocage."""
 
     name: str
-    max_items: int          # par source (offres, posts, profils)
-    min_delay: float        # pause aléatoire entre deux pages (secondes)
+    max_items: int  # par source (offres, posts, profils)
+    min_delay: float  # pause aléatoire entre deux pages (secondes)
     max_delay: float
 
 
@@ -69,7 +76,7 @@ CAUTION_LEVELS = {
     "normal": Caution("normal", 30, 4.0, 9.0),
     "agressif": Caution("agressif", 60, 2.5, 6.0),
 }
-DEFAULT_CAUTION = "normal"
+DEFAULT_CAUTION = "prudent"  # E-3
 
 
 def linkedin_credentials() -> tuple[str | None, str | None]:
@@ -107,10 +114,39 @@ def smtp_config() -> dict | None:
     security = (os.environ.get("SMTP_SECURITY") or "starttls").strip().lower()
     default_port = {"ssl": 465, "starttls": 587}.get(security, 25)
     return {
-        "host": host, "port": int(os.environ.get("SMTP_PORT") or default_port), "security": security,
-        "user": os.environ.get("SMTP_USER") or "", "password": os.environ.get("SMTP_PASSWORD") or "",
+        "host": host,
+        "port": int(os.environ.get("SMTP_PORT") or default_port),
+        "security": security,
+        "user": os.environ.get("SMTP_USER") or "",
+        "password": os.environ.get("SMTP_PASSWORD") or "",
         "from": sender,
     }
+
+
+DATABASE_URL_VAR = "LM_DATABASE_URL"
+
+
+class DatabaseConfigError(RuntimeError):
+    """Connexion PostgreSQL non configurée (message lisible)."""
+
+
+def database_url() -> str:
+    """URL SQLAlchemy de la base PostgreSQL 18 (``LM_DATABASE_URL``, jamais ``DATABASE_URL`` d'email_analyzer).
+
+    ``postgresql://`` et ``postgres://`` sont acceptés et convertis vers le driver psycopg 3.
+    """
+    url = (os.environ.get(DATABASE_URL_VAR) or "").strip()
+    if not url:
+        raise DatabaseConfigError(
+            f"{DATABASE_URL_VAR} n'est pas définie : ajoute dans le .env à la racine du dépôt une ligne "
+            f"{DATABASE_URL_VAR}=postgresql+psycopg://linkedin_market:<mot de passe>@127.0.0.1:5432/linkedin_market "
+            "(PostgreSQL 18 : paquet système ou "
+            "« docker compose --env-file .env -f linkedin_market/compose.yaml up -d db »)."
+        )
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url.removeprefix(prefix)
+    return url
 
 
 def ensure_data_dirs() -> None:

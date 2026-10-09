@@ -1,0 +1,3 @@
+Alex Exemple
+Data Engineer
+Python, Spark, SQL, AWS

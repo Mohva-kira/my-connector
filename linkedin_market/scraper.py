@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote_plus
 
 from selenium.common.exceptions import WebDriverException
@@ -25,12 +25,16 @@ PEOPLE_PER_PAGE = 10
 MAX_POST_SCROLLS = 12
 
 _UNIT_DAYS = [
-    (r"min(?:ute)?s?", 0), (r"h(?:eures?|ours?|rs?)?", 0),
-    (r"j(?:ours?)?|d(?:ays?)?", 1), (r"sem(?:aines?|\.)?|w(?:eeks?)?", 7),
-    (r"mois|mo(?:nths?)?", 30), (r"ans?|y(?:ears?|rs?)?", 365),
+    (r"min(?:ute)?s?", 0),
+    (r"h(?:eures?|ours?|rs?)?", 0),
+    (r"j(?:ours?)?|d(?:ays?)?", 1),
+    (r"sem(?:aines?|\.)?|w(?:eeks?)?", 7),
+    (r"mois|mo(?:nths?)?", 30),
+    (r"ans?|y(?:ears?|rs?)?", 365),
 ]
 _RELATIVE_LONG = re.compile(
-    r"(?:il y a\s+)?(\d+)\s*(minutes?|heures?|hours?|jours?|days?|semaines?|weeks?|mois|months?|ans?|years?)(?:\s+ago)?",
+    r"(?:il y a\s+)?(\d+)\s*"
+    r"(minutes?|heures?|hours?|jours?|days?|semaines?|weeks?|mois|months?|ans?|years?)(?:\s+ago)?",
     re.IGNORECASE,
 )
 _RELATIVE_SHORT = re.compile(r"^\s*(\d+)\s*(min|h|j|d|sem\.?|w|mo|mois|an|y|yr)\b", re.IGNORECASE)
@@ -38,7 +42,7 @@ _RELATIVE_SHORT = re.compile(r"^\s*(\d+)\s*(min|h|j|d|sem\.?|w|mo|mois|an|y|yr)\
 
 def parse_relative_date(text: str, now: datetime | None = None) -> str:
     """« il y a 2 semaines », « 3 j », « 1mo ago »… -> date ISO approximative."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     match = _RELATIVE_LONG.search(text or "") or _RELATIVE_SHORT.search(text or "")
     if not match:
         return ""
@@ -81,7 +85,7 @@ for (const n of nodes) {
   });
 }
 return out;
-"""
+"""  # noqa: E501
 
 _JS_PEOPLE = """
 const out = {};
@@ -95,7 +99,9 @@ return out;
 """
 
 
-_HIRING = re.compile(r"^(?P<company>.+?)\s+(?:hiring|recrute|recherche)\s+(?P<title>.+?)(?:\s+(?:in|à|a)\s+.+)?$", re.IGNORECASE)
+_HIRING = re.compile(
+    r"^(?P<company>.+?)\s+(?:hiring|recrute|recherche)\s+(?P<title>.+?)(?:\s+(?:in|à|a)\s+.+)?$", re.IGNORECASE
+)
 
 
 def parse_job_page_title(page_title: str) -> tuple[str, str]:
@@ -117,7 +123,7 @@ def parse_job_page_title(page_title: str) -> tuple[str, str]:
 
 def _short(text: str, limit: int) -> str:
     """Première ligne non vide, ou chaîne vide si elle dépasse ``limit`` (texte de page brut)."""
-    first = next((l.strip() for l in (text or "").splitlines() if l.strip()), "")
+    first = next((line.strip() for line in (text or "").splitlines() if line.strip()), "")
     return first if len(first) <= limit else ""
 
 
@@ -143,13 +149,16 @@ class LinkedInScraper:
         self.driver = driver
         self.request = request
         self.caution = config.CAUTION_LEVELS.get(request.caution, config.CAUTION_LEVELS[config.DEFAULT_CAUTION])
-        self.now = datetime.now(timezone.utc)
+        self.now = datetime.now(UTC)
 
     def _blocked(self) -> bool:
         url = self.driver.current_url
         if "/checkpoint" in url or "/authwall" in url or "/login" in url:
-            log.error("LinkedIn a interrompu la navigation (%s). Arrêt de la collecte : "
-                      "relance plus tard avec le niveau « prudent ».", url)
+            log.error(
+                "LinkedIn a interrompu la navigation (%s). Arrêt de la collecte : "
+                "relance plus tard avec le niveau « prudent ».",
+                url,
+            )
             return True
         return False
 
@@ -192,35 +201,57 @@ class LinkedInScraper:
             if not self._get(url):
                 break
             h1 = _text(self.driver, ["h1"])
-            description = _text(self.driver, [
-                ".jobs-description__content", "#job-details", ".jobs-box__html-content",
-                ".jobs-description", "article",
-            ])
-            top_card = _text(self.driver, [
-                ".job-details-jobs-unified-top-card__primary-description-container",
-                ".job-details-jobs-unified-top-card__tertiary-description-container",
-                ".jobs-unified-top-card",
-            ])
-            company = _text(self.driver, [
-                ".job-details-jobs-unified-top-card__company-name", ".jobs-unified-top-card__company-name",
-            ])
+            description = _text(
+                self.driver,
+                [
+                    ".jobs-description__content",
+                    "#job-details",
+                    ".jobs-box__html-content",
+                    ".jobs-description",
+                    "article",
+                ],
+            )
+            top_card = _text(
+                self.driver,
+                [
+                    ".job-details-jobs-unified-top-card__primary-description-container",
+                    ".job-details-jobs-unified-top-card__tertiary-description-container",
+                    ".jobs-unified-top-card",
+                ],
+            )
+            company = _text(
+                self.driver,
+                [
+                    ".job-details-jobs-unified-top-card__company-name",
+                    ".jobs-unified-top-card__company-name",
+                ],
+            )
             title, page_company = parse_job_page_title(self.driver.title)
             title = title or _short(h1, 150)
             company = page_company or _short(company, 100)
-            items.append(Item(
-                source="job", id=f"job:{job_id}", url=url, title=_clean(title),
-                text=nlp.strip_linkedin_chrome(description), keyword=self.request.keyword,
-                company=_clean(company), location=_clean(top_card.split("·")[0])[:120],
-                posted_at=parse_relative_date(top_card[:400], self.now) or self.now.date().isoformat(),
-                scraped_at=self.now.isoformat(),
-            ))
+            items.append(
+                Item(
+                    kind="job",
+                    id=f"job:{job_id}",
+                    url=url,
+                    title=_clean(title),
+                    text=nlp.strip_linkedin_chrome(description),
+                    keyword=self.request.keyword,
+                    company=_clean(company),
+                    location=_clean(top_card.split("·")[0])[:120],
+                    posted_at=parse_relative_date(top_card[:400], self.now) or self.now.date().isoformat(),
+                    scraped_at=self.now.isoformat(),
+                )
+            )
         return items
 
     # ------------------------------------------------------------ posts
     def posts(self) -> list[Item]:
         keyword = quote_plus(self.request.keyword)
-        url = (f"https://www.linkedin.com/search/results/content/?keywords={keyword}"
-               "&datePosted=%22past-month%22&sortBy=%22date_posted%22")
+        url = (
+            f"https://www.linkedin.com/search/results/content/?keywords={keyword}"
+            "&datePosted=%22past-month%22&sortBy=%22date_posted%22"
+        )
         if not self._get(url):
             return []
         raw: dict[str, dict] = {}
@@ -239,15 +270,19 @@ class LinkedInScraper:
         items = []
         for key, post in list(raw.items())[: self.request.max_items]:
             urn = post.get("urn", "")
-            items.append(Item(
-                source="post", id=f"post:{urn or abs(hash(key))}",
-                url=f"https://www.linkedin.com/feed/update/{urn}/" if urn else url,
-                title=_clean(post.get("headline") or post.get("author", "")),
-                text=post["text"], keyword=self.request.keyword,
-                company=_clean(post.get("author", "")),
-                posted_at=parse_relative_date(post.get("when", ""), self.now) or self.now.date().isoformat(),
-                scraped_at=self.now.isoformat(),
-            ))
+            items.append(
+                Item(
+                    kind="post",
+                    id=f"post:{urn or abs(hash(key))}",
+                    url=f"https://www.linkedin.com/feed/update/{urn}/" if urn else url,
+                    title=_clean(post.get("headline") or post.get("author", "")),
+                    text=post["text"],
+                    keyword=self.request.keyword,
+                    company=_clean(post.get("author", "")),
+                    posted_at=parse_relative_date(post.get("when", ""), self.now) or self.now.date().isoformat(),
+                    scraped_at=self.now.isoformat(),
+                )
+            )
         return items
 
     # ---------------------------------------------------------- profils
@@ -268,14 +303,21 @@ class LinkedInScraper:
 
         items = []
         for slug, card in list(cards.items())[: self.request.max_items]:
-            lines = [l.strip() for l in card.split("\n") if l.strip()]
+            lines = [line.strip() for line in card.split("\n") if line.strip()]
             # Carte type : nom, (degré), titre/headline, localisation, ...
-            headline = next((l for l in lines[1:] if len(l) > 15 and "•" not in l), "")
-            items.append(Item(
-                source="person", id=f"person:{slug}", url=f"https://www.linkedin.com/in/{slug}/",
-                title=headline, text=_clean(card), keyword=self.request.keyword,
-                posted_at=self.now.date().isoformat(), scraped_at=self.now.isoformat(),
-            ))
+            headline = next((line for line in lines[1:] if len(line) > 15 and "•" not in line), "")
+            items.append(
+                Item(
+                    kind="person",
+                    id=f"person:{slug}",
+                    url=f"https://www.linkedin.com/in/{slug}/",
+                    title=headline,
+                    text=_clean(card),
+                    keyword=self.request.keyword,
+                    posted_at=self.now.date().isoformat(),
+                    scraped_at=self.now.isoformat(),
+                )
+            )
         return items
 
     # ----------------------------------------------- profil utilisateur

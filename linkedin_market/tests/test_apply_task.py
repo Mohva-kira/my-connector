@@ -5,10 +5,13 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from linkedin_market import activity, application, browser, config, session, settings, storage
-from linkedin_market.tests.browser_fixtures import url_of, workdir  # noqa: F401
+from linkedin_market import activity, application, config, session, settings, storage
+from linkedin_market.models import Item
+from linkedin_market.tests.browser_fixtures import url_of
 from linkedin_market.web.app import create_app
 from linkedin_market.web.tasks import TaskManager
+
+pytestmark = pytest.mark.db  # réglages, historique et rapports en PostgreSQL (vague 1)
 
 
 @pytest.fixture
@@ -28,8 +31,34 @@ def prepare_entry(workdir, monkeypatch, url, status="préparée"):
     (folder / "cv.md").write_text("# Dev Python\n\n## Compétences\n\n- Python\n- FastAPI\n", encoding="utf-8")
     (folder / "message.txt").write_text("Bonjour", encoding="utf-8")
     monkeypatch.setattr(config, "APPLICATIONS_DIR", apps_dir)
-    application.save_applications({"job:1": {"title": "Senior Python Developer", "company": "Acme", "url": url, "score": 90,
-                                             "folder": str(folder), "generator": "local", "status": status, "prepared_at": "2026-10-07T10:00:00"}})
+    # L'offre doit être dans l'historique pour pouvoir être annotée (labels -> collected_items).
+    storage.append_items(
+        [
+            Item(
+                kind="job",
+                id="job:1",
+                url=url,
+                title="Senior Python Developer",
+                text="Python",
+                keyword="python",
+                company="Acme",
+            )
+        ]
+    )
+    application.save_applications(
+        {
+            "job:1": {
+                "title": "Senior Python Developer",
+                "company": "Acme",
+                "url": url,
+                "score": 90,
+                "folder": str(folder),
+                "generator": "local",
+                "status": status,
+                "prepared_at": "2026-10-07T10:00:00",
+            }
+        }
+    )
     return folder
 
 
@@ -46,11 +75,11 @@ def wait_task(client, task_id, until, timeout=60):
 def test_guards_before_launching(client, monkeypatch, workdir):
     prepare_entry(workdir, monkeypatch, "https://www.linkedin.com/jobs/view/1/")
     monkeypatch.delenv("LINKEDIN_EMAIL")
-    assert client.post("/api/applications/job:1/apply").status_code == 409            # identifiants absents
+    assert client.post("/api/applications/job:1/apply").status_code == 409  # identifiants absents
     monkeypatch.setenv("LINKEDIN_EMAIL", "me@example.com")
     settings.save_settings({"apply_daily_max": 1})
     activity.record("apply", job="job:x")
-    assert client.post("/api/applications/job:1/apply").status_code == 429            # plafond du jour
+    assert client.post("/api/applications/job:1/apply").status_code == 429  # plafond du jour
     settings.save_settings({"apply_daily_max": 5})
     activity.record("blocked", where="collecte")
     blocked = client.post("/api/applications/job:1/apply")
@@ -59,32 +88,37 @@ def test_guards_before_launching(client, monkeypatch, workdir):
     client.post("/api/block/clear")
     assert client.get("/api/status").json()["blocked"] is None
     application.set_status("job:1", "postulée")
-    assert client.post("/api/applications/job:1/apply").status_code == 409            # déjà postulée
+    assert client.post("/api/applications/job:1/apply").status_code == 409  # déjà postulée
     assert client.post("/api/applications/job:404/apply").status_code == 404
 
 
 def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir):
     import os
+
     os.environ["LINKEDIN_HEADLESS"] = "1"
     os.environ.setdefault("LINKEDIN_BROWSER", "firefox")
     prepare_entry(workdir, monkeypatch, url_of("easy_apply.html"))
     settings.save_settings({"contact_email": "me@example.com", "contact_phone": "+2250102030405", "caution": "prudent"})
     monkeypatch.setattr(session, "login", lambda *a, **k: None)
-    monkeypatch.setattr(config, "CAUTION_LEVELS", {**config.CAUTION_LEVELS, "prudent": config.Caution("prudent", 1, 0.0, 0.0)})
+    monkeypatch.setattr(
+        config, "CAUTION_LEVELS", {**config.CAUTION_LEVELS, "prudent": config.Caution("prudent", 1, 0.0, 0.0)}
+    )
 
     task = client.post("/api/applications/job:1/apply").json()
-    assert client.post("/api/applications/job:1/apply").status_code == 409            # déjà en cours
+    assert client.post("/api/applications/job:1/apply").status_code == 409  # déjà en cours
 
     asked = []
     while True:
-        task = wait_task(client, task["id"], lambda t: t["needs_input"] or t["status"] in ("terminée", "échec", "annulée"))
+        task = wait_task(
+            client, task["id"], lambda t: t["needs_input"] or t["status"] in ("terminée", "échec", "annulée")
+        )
         if not task["needs_input"]:
             break
         question = task["needs_input"]
         asked.append(question["field"] if question["field"] == "confirm_submit" else question["question"])
         if question["field"] == "confirm_submit":
             assert "Years: 12" in question["review"]
-            assert application.get_application("job:1")["status"] == "préparée"      # rien n'est parti avant le clic
+            assert application.get_application("job:1")["status"] == "préparée"  # rien n'est parti avant le clic
             answer = "Soumettre"
         else:
             answer = "12" if "years" in question["question"] else "Yes"
@@ -95,7 +129,7 @@ def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir):
     assert task["result"]["state"] == "postulée"
     entry = application.get_application("job:1")
     assert entry["status"] == "postulée" and entry["apply_state"] == "postulée"
-    assert entry["history"][-1]["kind"] == "candidature"
+    assert entry["history"][-1]["kind"] == "apply"
     assert storage.load_labels()["job:1"] == 1
     assert activity.count_today("apply") == 1
     # la réponse aux questions est mémorisée, la confirmation d'envoi ne l'est pas
@@ -106,6 +140,7 @@ def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir):
 
 def test_decline_confirmation_keeps_status(client, monkeypatch, workdir):
     import os
+
     os.environ["LINKEDIN_HEADLESS"] = "1"
     os.environ.setdefault("LINKEDIN_BROWSER", "firefox")
     prepare_entry(workdir, monkeypatch, url_of("easy_apply.html"))
@@ -113,7 +148,9 @@ def test_decline_confirmation_keeps_status(client, monkeypatch, workdir):
     settings.remember_answer("How many years of experience do you have with Python?", "9")
     settings.remember_answer("Are you legally authorized to work remotely? *", "Yes")
     monkeypatch.setattr(session, "login", lambda *a, **k: None)
-    monkeypatch.setattr(config, "CAUTION_LEVELS", {**config.CAUTION_LEVELS, "normal": config.Caution("normal", 1, 0.0, 0.0)})
+    monkeypatch.setattr(
+        config, "CAUTION_LEVELS", {**config.CAUTION_LEVELS, "prudent": config.Caution("prudent", 1, 0.0, 0.0)}
+    )
     task = client.post("/api/applications/job:1/apply").json()
     task = wait_task(client, task["id"], lambda t: t["needs_input"])
     assert client.post(f"/api/tasks/{task['id']}/answer", json={"value": "Annuler"}).status_code == 200

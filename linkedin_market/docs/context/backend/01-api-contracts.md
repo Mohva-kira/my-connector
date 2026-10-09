@@ -13,13 +13,15 @@
 | URLs | Noms de ressources au pluriel et en anglais (`/runs`, `/jobs`, `/applications`, `/tasks`, `/reports`), segments composés en **kebab-case** (`/message-draft`, `/reset-overrides`, `/import-linkedin`, `/contacts/lookup`). Identifiants d'offre avec préfixe (`job:4012345678`) passés tels quels dans le chemin. | `[ACTUEL]` |
 | Clés JSON | **snake_case**, identiques aux noms Python et aux colonnes de l'ERD (`apply_daily_max`, `needs_input`, `created_at`). Pas de camelCase : le glossaire impose un seul nom par concept (lot 1 `00` § 1). | `[ACTUEL]` |
 | Valeurs d'énumération | En français, sans majuscule, accents conservés (`en_attente`, `terminée`, `postulée`, `déjà_postulée`). | Identiques aux constantes du code et aux `CHECK` de l'ERD |
-| Dates | `[ACTUEL]` ISO 8601 **local sans fuseau** à la seconde (`2026-10-08T14:32:05`) ; `generated_at` d'un rapport en microsecondes. `[CIBLE]` ISO 8601 UTC avec décalage (`2026-10-08T12:32:05Z`), sérialisé depuis `timestamptz`. | Écart E-9 (§ 4 de `02`) |
+| Dates | ISO 8601 **UTC suffixé `Z`** à la seconde (`2026-10-08T12:32:05Z`), sérialisé depuis `timestamptz` par `db.utc_iso()` ; horodatage absent = `null`. Dates sans heure (`posted_at`, `per_day`) en `AAAA-MM-JJ`. | `[ACTUEL]` depuis la vague 1 (C-1 à C-3) |
 | Documentation | OpenAPI/Swagger uniquement avec `--dev` (`/api/docs`, `/api/openapi.json`) ; désactivée sinon. | Surface minimale |
 
-### 1.1 Changements de contrat figés pour la vague 1 (PostgreSQL) `[CIBLE]`
-Seuls ces points changent ; routes, corps de requête, codes et messages `detail` sont inchangés.
+### 1.1 Changements de contrat figés pour la vague 1 (PostgreSQL) `[ACTUEL]`
+Livrés en vague 1 (vérifiés par les tests, dont `test_api.py::test_monitor_and_status_shape` pour C-1). Seuls ces points
+ont changé ; routes, corps de requête, codes et messages `detail` sont inchangés, à une exception près : `PUT
+/api/jobs/{job_id}/label` renvoie désormais `404` sur un élément absent de l'historique (§ 5.6).
 
-| # | Champ / ressource | Avant `[ACTUEL]` | Après la vague 1 |
+| # | Champ / ressource | Avant `[ACTUEL]` | Depuis la vague 1 |
 | :--- | :--- | :--- | :--- |
 | C-1 | **Tout horodatage** (`created_at`, `started_at`, `finished_at`, `prepared_at`, `updated_at`, `generated_at`, `trained_at`, `at` des historiques, d'`activity`, de `blocked`, `blocked.until`, `errors[].at`, `recent_events[].at`, `last_analysis.generated_at`, `GET /api/reports[].generated_at`) | ISO local naïf (`2026-10-08T14:32:05`, parfois µs) | ISO 8601 **UTC avec suffixe `Z`**, à la seconde : `2026-10-08T12:32:05Z` (helper unique `db.utc_iso()` côté serveur). Les rapports **importés** gardent leur `generated_at` d'origine dans le JSON (I-02), mais la liste `GET /api/reports` expose `created_at` de la base converti en UTC. |
 | C-2 | Horodatage absent (`started_at`, `finished_at` d'une tâche non démarrée / non finie, `updated_at` jamais modifié) | `""` | `null` |
@@ -35,6 +37,23 @@ Seuls ces points changent ; routes, corps de requête, codes et messages `detail
 Les identifiants d'élément gardent la forme `<kind>:<external_id>` (`job:4012345678`) : la base stocke
 `kind` + `external_id` et le dépôt recompose l'identifiant ; la question de l'unicité entre sources est reportée à
 la vague 5.
+
+### 1.2 Changements de contrat figés pour la vague 2 (garde-fous) `[CIBLE]`
+
+| # | Point | Contrat |
+| :--- | :--- | :--- |
+| G-1 (E-10) | Erreur de validation Pydantic | Toujours `422 {"detail": "<champ> : <message>"}` (chaîne) ; plusieurs erreurs jointes par « ; ». `<champ>` = dernier élément de `loc` hors `body`/`query`/`path`. Messages : `missing` → « champ requis » ; `literal_error` / `enum` → « doit être l'un de : a, b » ; `int_parsing`/`int_type` → « doit être un entier » ; `float_parsing` → « doit être un nombre » ; `bool_parsing` → « doit valoir true ou false » ; `string_type` → « doit être un texte » ; `greater_than_equal` / `less_than_equal` → « doit être ≥ N » / « ≤ N » ; `value_error` → message du validateur sans le préfixe « Value error, » ; `json_invalid` → `Corps JSON invalide.` (sans champ) ; autre → « valeur invalide ». Le frontend accepte encore une liste (compatibilité). |
+| G-2 | `429` (plafonds `apply`, `message_*`) | `detail` inchangé + en-tête `Retry-After: <secondes jusqu'à minuit, heure locale de la machine>` (entier ≥ 1). |
+| G-3 (E-3) | `RunBody.max_items` et `PUT /api/settings` | `422 max_items ne peut pas dépasser 15 en prudence « prudent ».` (30 / 60 selon la prudence) ; `SearchRequest.caution` par défaut `prudent` ; `min()` défensif dans `pipeline`. |
+| G-4 (E-7) | Interprète `none` | API : `422 interpreter doit être l'un de : claude, local.` (réglages et `RunBody`) ; CLI : `--interpreter` ∈ `claude`, `local` ; `LINKEDIN_INTERPRETER=none` lu comme `local` avec un avertissement de log. |
+| G-5 (E-20) | `SMTP_SECURITY=none` | **Confirmé le 2026-10-08.** Admis **uniquement** si `SMTP_HOST` ∈ `127.0.0.1`, `localhost`, `::1` (relais local, tests). Sinon `503 SMTP_SECURITY=none n'est permis que vers un serveur SMTP local (127.0.0.1) : choisis starttls ou ssl dans le fichier .env.` sur `POST …/messages` (canal email, à l'étape « SMTP non configuré ») et `POST /api/smtp/test` ; revérifié au début de la tâche. |
+| G-6 (E-11) | Plafond de messages | Réservation transactionnelle de `backend/03` § 5.1 (sans la ligne `suppression_list`, ajoutée en vague 4) : le `429` est décidé **dans** la transaction ; message inchangé. Plafond `apply` : `FOR UPDATE` sur `user_settings` + comptage au **début** de la tâche (§ 5.2). |
+| G-7 (E-5) | Vérification non terminée à la connexion | Événement `blocked` (`where = "connexion"`) puis tâche `échec`, `error` = `LinkedIn demande une vérification que tu n'as pas terminée à temps : les actions navigateur sont suspendues 6 h. Termine-la sur LinkedIn puis lève le blocage depuis le tableau de bord.` ; reprise par cookies tombant sur un checkpoint : même traitement. |
+| G-8 (E-22) | Annulation pendant la collecte | `should_stop` testé à chaque page ; la tâche finit `annulée`, `error = "Tâche annulée."` ; les éléments déjà enregistrés sont conservés. |
+| G-9 (E-12) | Journaux de tâche | Adresses masquées `j***@acme.com`, noms de tiers en initiales (`J. D.`), URL de profil `linkedin.com/in/j***` ; ni corps de message ni texte de profil. L'historique de candidature (`history`) garde l'information complète. |
+| G-10 (E-4) | Run bloqué pendant la collecte | **Décidé (option A, 2026-10-08)** : tâche `terminée`, rapport partiel. `result` de toute tâche `run` : `{"report": "data-engineer-2026-10-08", "jobs": 12, "counts": {"job": 12, "post": 0, "person": 0}, "blocked": true, "blocked_where": "collecte"}` ; sans blocage `"blocked": false` et **pas** de `blocked_where`. Types : `blocked: bool` toujours présent, `blocked_where: "collecte"` présent seulement si `blocked`. Le frontend affiche le bandeau « Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées. » |
+| G-11 (E-3) | Minimum de `max_items` (réglages, `RunBody`) | `422 max_items doit être au moins 1.` ; remplace `max_items doit être compris entre 1 et 200.` (supprimé). |
+| G-12 | `contact_email` (`PUT /api/settings`) | Vide admis ; sinon même expression que `outreach._EMAIL`, refus `422 contact_email doit être une adresse email valide.` |
 
 ## 2. Format Standard des Réponses
 
@@ -77,7 +96,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 
 ```json
 {
-  "id": "a1b2c3d4e5f6",
+  "id": "0199c4a2-7b1e-7c3d-9f00-1a2b3c4d5e6f",
   "kind": "apply",
   "title": "Postuler : Senior Python Developer",
   "status": "attente_saisie",
@@ -89,8 +108,8 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
                   "options": [], "suggestion": "10", "review": ""},
   "meta": {"key": "job:4012345678", "job_id": "job:4012345678"},
   "browser": true,
-  "created_at": "2026-10-08T14:32:04",
-  "started_at": "2026-10-08T14:32:04",
+  "created_at": "2026-10-08T14:32:04Z",
+  "started_at": "2026-10-08T14:32:04Z",
   "finished_at": ""
 }
 ```
@@ -166,7 +185,7 @@ Notation : **Corps** = modèle Pydantic ou type ; **Erreurs** = code et `detail`
   "has_analysis": true,
   "quotas": {"apply": {"used": 2, "limit": 10}, "messages": {"used": 0, "limit": 15}},
   "active_tasks": 1,
-  "blocked": {"at": "2026-10-08T09:14:02", "where": "collecte", "until": "2026-10-08T15:14"}
+  "blocked": {"at": "2026-10-08T09:14:02Z", "where": "collecte", "until": "2026-10-08T15:14:02Z"}
 }
 ```
 `session.age_hours` vaut `null` sans session enregistrée ; `blocked` vaut `null` hors période de repos. Aucun
@@ -176,19 +195,19 @@ secret n'est exposé (test `test_monitor_and_status_shape`). `[CIBLE]` ajout de
 `GET /api/monitor` :
 ```json
 {
-  "generated_at": "2026-10-08T14:40:00",
+  "generated_at": "2026-10-08T14:40:00Z",
   "by_status": {"préparée": 3, "postulée": 2, "contactée": 1},
   "funnel": [{"step": "Offres analysées", "count": 30}, {"step": "Jugées pertinentes", "count": 7},
              {"step": "Candidatures préparées", "count": 6}, {"step": "Postulées", "count": 2},
              {"step": "Entretiens", "count": 0}],
   "quotas": {"apply": {"used": 2, "limit": 10}, "messages": {"used": 0, "limit": 15}},
   "activity": [{"date": "2026-09-25"}, {"date": "2026-10-08", "run": 1, "apply": 2}],
-  "recent_events": [{"at": "2026-10-08T14:20:11", "kind": "apply", "job": "job:4012345678", "title": "Senior Python Developer"}],
-  "model": {"trained": true, "n_labels": 14, "train_accuracy": 0.86, "importance": [{"feature": "couverture_competences", "weight": 1.92}], "loss_history": [0.69, 0.41], "trained_at": "2026-10-07T18:02:44"},
-  "last_analysis": {"report": "data-engineer-20261008-1432", "generated_at": "2026-10-08T14:32:58.120331", "keyword": "Data Engineer", "counts": {"job": 30, "post": 30, "person": 30}},
+  "recent_events": [{"at": "2026-10-08T14:20:11Z", "kind": "apply", "job": "job:4012345678", "title": "Senior Python Developer"}],
+  "model": {"trained": true, "n_labels": 14, "train_accuracy": 0.86, "importance": [{"feature": "couverture_competences", "weight": 1.92}], "loss_history": [0.69, 0.41], "trained_at": "2026-10-07T18:02:44Z"},
+  "last_analysis": {"report": "data-engineer-2026-10-08", "generated_at": "2026-10-08T14:32:58Z", "keyword": "Data Engineer", "counts": {"job": 30, "post": 30, "person": 30}},
   "active_tasks": [],
   "recent_tasks": [],
-  "errors": [{"id": "0f9e8d7c6b5a", "title": "Collecte et analyse — Data Engineer", "error": "Aucun navigateur utilisable (LINKEDIN_BROWSER=auto) : …", "at": "2026-10-07T21:03:10"}]
+  "errors": [{"id": "0199c3f0-2d4a-7e11-8b22-3c4d5e6f7a8b", "title": "Collecte et analyse — Data Engineer", "error": "Aucun navigateur utilisable (LINKEDIN_BROWSER=auto) : …", "at": "2026-10-07T21:03:10Z"}]
 }
 ```
 `activity` contient 14 jours (jours vides inclus) ; `recent_events` les 15 derniers événements, du plus récent au
@@ -266,9 +285,9 @@ Sans profil : `{"available": false, "message": "Aucun profil : dépose profil.md
 
 | Méthode & chemin | Succès | Erreurs |
 | :--- | :--- | :--- |
-| `GET /api/reports` | `200 [{"name": "data-engineer-20261008-1432", "keyword": "Data Engineer", "generated_at": "2026-10-08T14:32:58.120331", "jobs": 30, "html": true}]` (plus récent d'abord) | — |
+| `GET /api/reports` | `200 [{"name": "data-engineer-2026-10-08", "keyword": "Data Engineer", "generated_at": "2026-10-08T14:32:58Z", "jobs": 30, "html": true}]` (plus récent d'abord) | — |
 | `GET /api/reports/{name}` | `200` contenu JSON du rapport + `top_jobs` enrichis (`label`, `application_status`, identité réparée) + `is_latest` | `404 Rapport introuvable.` (nom contenant `/`, `\` ou commençant par `.` refusé) |
-| `GET /api/reports/{name}/html` | `200 text/html` sandboxé | `404 Rapport introuvable.` |
+| `GET /api/reports/{name}/html` | `200 text/html` sandboxé | `404 Rapport introuvable.` (aussi si le rapport existe en base mais que son fichier HTML manque : E-19 livré en vague 1) |
 
 Clés d'un rapport : `generated_at`, `window_days` (30), `request`, `profile`, `counts`, `top_terms`, `skill_demand`,
 `rising`, `weekly`, `gap`, `top_jobs`, `model`, `min_labels`, `interpretation`, `interpreter` (`claude` \| `local`
@@ -296,7 +315,7 @@ ne peut pas être annulée (pas de contexte) ⇒ 409.
 | `POST /api/runs/rescore` | — | `202` tâche `rescore` | `409 Un recalcul est déjà en cours.` ; `409 Aucune analyse disponible : lance d'abord une analyse.` |
 | `GET /api/jobs` | `min_score: float = 0`, `label: pertinente\|non_pertinente\|non_annotee`, `status: aucune\|<statut>`, `q: str` (recherche normalisée dans titre, entreprise, lieu) | `200` voir ci-dessous ; sans analyse `{"report": null, "jobs": []}` | — |
 | `GET /api/jobs/{job_id}` | — | `200` ligne d'offre + `text` (8 000 caractères max) + `owned_skills` | `404 Aucune analyse disponible : lance d'abord une analyse.` ; `404 Offre introuvable.` |
-| `PUT /api/jobs/{job_id}/label` | `LabelBody {value: int \| null}` (champ requis) | `200 {"id", "label", "n_labels", "min_labels"}` | `422 value doit valoir 1, 0 ou null.` |
+| `PUT /api/jobs/{job_id}/label` | `LabelBody {value: int \| null}` (champ requis) | `200 {"id", "label", "n_labels", "min_labels"}` | `422 value doit valoir 1, 0 ou null.` ; `404 Cette offre n'est plus dans l'historique : annotation impossible.` (élément purgé ou inconnu, y compris `value: null` ; rien n'est écrit) |
 | `POST /api/model/train` | — | `202` tâche `train` | `409 Un entraînement est déjà en cours.` ; `409` aucune analyse |
 | `POST /api/jobs/{job_id}/prepare` | — | `202` tâche `prepare` (`meta.key = job_id`) | `409 La préparation de cette offre est déjà en cours.` ; `409` aucune analyse ; `404 Offre introuvable.` |
 
@@ -323,17 +342,17 @@ Content-Type: application/json
 {"keyword": "Data Engineer", "caution": "prudent", "scrape": true}
 ```
 ```json
-{"id": "a1b2c3d4e5f6", "kind": "run", "title": "Collecte et analyse — Data Engineer", "status": "en_attente",
+{"id": "0199c4a2-7b1e-7c3d-9f00-1a2b3c4d5e6f", "kind": "run", "title": "Collecte et analyse — Data Engineer", "status": "en_attente",
  "logs": [], "result": null, "error": "", "needs_input": null, "meta": {}, "browser": true,
- "created_at": "2026-10-08T14:30:01", "started_at": "", "finished_at": ""}
+ "created_at": "2026-10-08T14:30:01Z", "started_at": null, "finished_at": null}
 ```
-Résultat final : `{"report": "data-engineer-20261008-1432", "jobs": 30, "counts": {"job": 30, "post": 30, "person": 30}}`.
+Résultat final : `{"report": "data-engineer-2026-10-08", "jobs": 30, "counts": {"job": 30, "post": 30, "person": 30}}`.
 
 `GET /api/jobs` :
 ```json
 {
-  "report": "data-engineer-20261008-1432",
-  "generated_at": "2026-10-08T14:32:58.120331",
+  "report": "data-engineer-2026-10-08",
+  "generated_at": "2026-10-08T14:32:58Z",
   "keyword": "Data Engineer",
   "model": {"trained": false, "n_labels": 3, "train_accuracy": null, "importance": [], "loss_history": [], "trained_at": null},
   "min_labels": 6,
@@ -371,11 +390,11 @@ remplie (409).
 
 `ApplicationPatch` (tous facultatifs) : `cv`, `message`, `advice` (`str`, réécrivent `cv.md`/`message.txt`/
 `conseils.md` ; changer `cv` régénère `cv.html` et supprime `cv.pdf`), `status` (statut libre, **seule** voie de
-régression, I-03 ; ajoute un historique `kind="statut"`), `contacts: list[Contact]` (remplace la liste).
+régression, I-03 ; ajoute un historique `kind="status"`), `contacts: list[Contact]` (remplace la liste).
 
-`Contact` (`[CIBLE]` vague 1 : `full_name`, cf. § 1.1 C-4/C-5) : `name: str = ""`, `profile_url: str = ""` (vide ou `^https://([a-z]{2,3}\.)?linkedin\.com/in/[^/?#\s]+`,
+`Contact` (C-4/C-5, vague 1) : `full_name: str = ""`, `profile_url: str = ""` (vide ou `^https://([a-z]{2,3}\.)?linkedin\.com/in/[^/?#\s]+`,
 sinon « L'URL doit être un profil LinkedIn (https://www.linkedin.com/in/...). »), `email: str | null`
-(`^[^@\s]+@[^@\s]+\.[^@\s]+$`, sinon « Adresse email invalide. »), `headline: str = ""`, `source: str = "manuel"`.
+(`^[^@\s]+@[^@\s]+\.[^@\s]+$`, sinon « Adresse email invalide. »), `headline: str = ""`, `source: "linkedin_equipe_recrutement" | "manuel" = "manuel"` (autre valeur ⇒ 422).
 
 `MessageBody` :
 
@@ -408,14 +427,62 @@ Entrée de candidature (`GET /api/applications`) :
   "url": "https://www.linkedin.com/jobs/view/4012345678/", "score": 82.4,
   "folder": "/home/me/linkedin_market_data/applications/20261008-acme-senior-python-developer",
   "generator": "claude", "status": "contactée", "apply_state": "",
-  "prepared_at": "2026-10-08T14:35:12", "updated_at": "2026-10-08T15:02:40",
-  "contacts": [{"name": "Jane Doe", "profile_url": "https://www.linkedin.com/in/jane-doe/", "email": "jane@acme.com",
-                "headline": "Talent Acquisition Lead", "source": "linkedin"}],
-  "history": [{"at": "2026-10-08T15:02:40", "kind": "message", "channel": "email", "to": "jane@acme.com", "extrait": "Bonjour Jane, …"}]
+  "prepared_at": "2026-10-08T14:35:12Z", "updated_at": "2026-10-08T15:02:40Z",
+  "contacts": [{"full_name": "Jane Doe", "profile_url": "https://www.linkedin.com/in/jane-doe/", "email": "jane@acme.com",
+                "headline": "Talent Acquisition Lead", "source": "linkedin_equipe_recrutement"}],
+  "history": [{"at": "2026-10-08T15:02:40Z", "kind": "message", "channel": "email", "to": "jane@acme.com", "extrait": "Bonjour Jane, …"}]
 }
 ```
 Types d'historique écrits par le code : `statut`, `candidature`, `contacts`, `message` (l'ERD cible les renomme
 `status`, `apply`, `contacts`, `message` — conversion par l'import JSON, cf. § 1.1 C-6).
+
+#### 5.7.1 Contrat figé pour la vague 4 (prospection conforme, brief du 2026-10-09)
+- **`GET /api/applications/{job_id}/message-draft?to=<adresse ou URL>`** (paramètre facultatif) ⇒
+  `200 {"subject", "body", "footer", "origin", "opposed"}`. `footer` = pied imposé **exact** que le serveur
+  ajoutera (selon canal et origine) ; `origin` ∈ `linkedin_equipe_recrutement` | `manuel` (contact de la
+  candidature dont l'email ou l'URL correspond à `to`, sinon `manuel`) ; `opposed: bool` (empreinte de `to` dans
+  `suppression_list`). `body` ne contient plus le pied. Canal déduit de `to` (email ⇒ `email`, URL ⇒ `linkedin`).
+- **Pied imposé** (ajouté par le serveur après `body`, jamais exigé dans `body`, non modifiable) :
+  - email : « Je vous contacte au sujet de votre offre « {titre} » ; votre adresse provient de {origine}. Pour ne
+    plus recevoir de message de ma part, répondez « STOP » ou écrivez à {expéditeur} : votre demande sera prise en
+    compte immédiatement. » avec {origine} = « l'équipe de recrutement affichée sur l'offre LinkedIn » ou « une
+    saisie manuelle à partir d'informations publiques » ;
+  - LinkedIn (court, compté dans les 300 caractères d'une note de connexion ; le corps est tronqué avant le pied) :
+    « Au sujet de votre offre « {titre ≤ 60} ». Pour ne plus être contacté(e), répondez STOP. »
+  - **texte final (P-5, option A, décidé le 2026-10-09)** : les deux pieds ci-dessus tels quels ; chaque email porte
+    en plus l'en-tête `List-Unsubscribe: <mailto:{expéditeur}?subject=STOP>` (pas de `List-Unsubscribe-Post`) ;
+    l'opposition est saisie par l'utilisateur via `POST /api/suppressions`, aucune lecture automatique de boîte.
+- **`POST /api/applications/{job_id}/messages`** : `409 Ce destinataire a demandé à ne plus être contacté.` décidé
+  **dans** la transaction de réservation (`backend/03` § 5.1), avant le contrôle du plafond ; aussi revérifié au
+  début de la tâche. Après envoi : `company_contacts.last_contacted_at = now()`, `purge_after = now() + 3 ans`
+  (I-14).
+- **`POST /api/suppressions`** `{"recipient": str, "reason": "désinscription" | "refus_oral" | "plainte"}` ⇒
+  `201 {"ok": true}` (idempotent : une opposition déjà enregistrée répond aussi `201`). `422 recipient : adresse
+  email ou URL de profil LinkedIn attendue.` Effet, dans la même transaction : insertion de l'empreinte
+  `sha256` normalisée (`backend/03` § 5.1) ; pour chaque `company_contacts` de l'utilisateur dont l'email ou l'URL
+  correspond : `opposed_at = now()`, `email = NULL`, `profile_url = ''` (minimisation) ; `application_events`
+  `kind = "contacts"` `{"opposition": true}`. Aucune route ne supprime une opposition.
+- **Précisions figées le 2026-10-09 (revue du frontend, V4-1…V4-4)** :
+  - **V4-1 — coordonnées liées** : `POST /api/suppressions` insère l'empreinte de `recipient` **et**, pour chaque
+    `company_contacts` correspondant, celles de **toutes** ses coordonnées (email et URL de profil) **avant** la
+    minimisation, dans la même transaction. Une seule requête suffit donc pour un contact qui a email + profil ; le
+    frontend peut en envoyer une par coordonnée (idempotent, `201` à chaque fois). Ainsi un échec réseau entre deux
+    requêtes ne laisse jamais une coordonnée effacée mais non bloquée.
+  - **V4-2 — message de `reason`** (G-1, `literal_error`) : `422 reason : doit être l'un de : désinscription,
+    refus_oral, plainte` (sans point final, comme tous les messages Pydantic traduits par G-1).
+  - **V4-3 — validation de `recipient`** (après `strip()`) : email = `outreach._EMAIL`
+    (`^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$`) **ou** URL = `outreach._PROFILE_URL`
+    (`^https://([a-z]{2,3}\.)?linkedin\.com/in/[^/?#\s]+`, correspondance de préfixe `re.match`) ; sinon le `422`
+    ci-dessus. Mêmes expressions côté frontend (`schemas.ts` : `EMAIL_RE`, `LINKEDIN_PROFILE_RE`).
+  - **V4-4 — assemblage corps + pied** : séparateur **`"\n\n"`** (2 caractères) sur les deux canaux :
+    `texte = body.rstrip() + "\n\n" + footer`. Note de connexion LinkedIn (`LINKEDIN_NOTE_MAX = 300`, comptés en
+    caractères Unicode = `len()` Python) : si `len(body.rstrip()) + 2 + len(footer) > 300`, le corps est tronqué à
+    `300 − 2 − len(footer)` caractères (puis `rstrip()`), le pied est toujours conservé entier, `result.truncated =
+    true`. Message direct (relation de 1er degré) : aucune troncature. Le frontend compte de la même façon
+    (`Array.from(s).length`, pas `s.length`).
+- **`Contact`** (lecture) ajoute `opposed: bool` (`opposed_at IS NOT NULL`) et `collected_at` (UTC `Z`), pour la
+  ligne « Origine de l'adresse » ; `PATCH contacts` ignore `opposed` et ne peut pas réécrire l'email ni l'URL d'un
+  contact opposé (`422 Ce contact s'est opposé à tout contact : ses coordonnées ne peuvent plus être saisies.`).
 
 ### 5.8 Sources et consentements `[CIBLE]`
 
@@ -449,6 +516,38 @@ Réponse `428` (sur `POST /api/runs` avec `scrape=true`, `/apply`, `/contacts/lo
 {"detail": "Accepte d'abord les risques liés à LinkedIn (version 2026-10) avant toute action dans le navigateur.", "source": "linkedin", "risk_version": "2026-10"}
 ```
 Pour `POST /api/profile/skills`, l'absence de consentement ne lève pas d'erreur : `linkedin_sync.status = "unavailable"`.
+
+#### 5.8.1 Contrat figé pour la vague 3 (brief du 2026-10-09)
+- **`GET /api/sources`** : chaque élément ajoute `blocked: {"at": "…Z", "where": "collecte", "until": "…Z"} | null`
+  (repos de 6 h **par source**). `enabled = false` ⇒ source pas encore disponible dans cette version (en vague 3,
+  seule `linkedin` est `enabled`).
+- **`POST /api/sources/{code}/consent`** `{"risk_version": "2026-10", "accepted": true}` ⇒ `201` + l'élément de
+  `GET /api/sources` à jour. Erreurs dans cet ordre : `404 Source inconnue.` ; `422 Cette source ne demande pas de
+  consentement.` ; `409 La source « Malt » n'est pas encore disponible.` (`enabled = false`) ;
+  `422 Accepte explicitement les risques (accepted: true).` ; `409 Le texte des risques a changé : relis la nouvelle
+  version.` (`risk_version` ≠ version courante). Un consentement actif à la même version est remplacé (révocation +
+  insertion, `backend/03` § 5.2).
+- **`DELETE /api/sources/{code}/consent`** ⇒ `204` ; `404 Source inconnue.` ; `404 Aucun consentement actif pour
+  cette source.`
+- **`428`** : corps `{"detail": "Accepte d'abord les risques liés à {label} (version {v}) avant toute action dans le
+  navigateur.", "source": "<code>", "risk_version": "<v>"}` (exception `SourceConsentRequired` + gestionnaire dans
+  `web/app.py`). Ordre des contrôles d'une action navigateur : `404` → `422` (corps, G-1) → **`428`** → `409`
+  identifiants → `409` blocage (de la source) → `429` plafond. **Revérifié au début de la tâche** : consentement
+  révoqué entre-temps ⇒ tâche `échec` avec le même texte que `detail`.
+- **Repos par source** : l'événement `blocked` porte `data.source` (absent ⇒ `linkedin`, compatibilité) ;
+  `guard_not_blocked(source)`. `POST /api/block/clear` accepte un corps facultatif `{"source": "linkedin"}`
+  (défaut `linkedin`) ⇒ `200 {"ok": true}` ; `404 Source inconnue.` `/api/status.blocked` reste le blocage de
+  LinkedIn (compatibilité) ; le frontend lit les blocages dans `GET /api/sources`.
+- **`RunBody.sources`** : `list[str]`, défaut `["linkedin"]`, au moins un, doublons retirés ; ignoré si
+  `scrape = false`. Erreurs `422` : `sources : source inconnue « x ».` ;
+  `sources : Indeed s'importe à la main, elle ne se collecte pas.` ;
+  `sources : la source « Malt » n'est pas encore disponible.` Puis `428` pour la **première** source `navigateur`
+  sans consentement à jour (ordre de la liste).
+- **CLI (P-3, décidé le 2026-10-09, option A)** : `python -m linkedin_market` **avec collecte** refuse de démarrer
+  sans consentement à jour (même contrôle `SourceConsentService.require`) et s'arrête avec : « Accepte d'abord les
+  risques liés à LinkedIn (version 2026-10) dans l'interface web : Paramètres → Sources et consentements. » ;
+  `--no-scrape` reste utilisable sans consentement. Le texte des risques n'existe qu'à un seul endroit
+  (`src/content/risks.ts`).
 
 ### 5.9 Route SPA
 

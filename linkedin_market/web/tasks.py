@@ -3,7 +3,8 @@
 Chaque tâche tourne dans un thread. Les tâches qui pilotent le navigateur (``browser=True``)
 se partagent un verrou : un seul Selenium à la fois, les autres restent « en_attente ».
 Les logs du package ``linkedin_market`` émis par le thread de la tâche sont capturés pour
-l'affichage en direct. Seuls les états finaux sont écrits dans ``tasks.jsonl``.
+l'affichage en direct. Persistance PostgreSQL (``tasks``) : la tâche est insérée à la soumission puis mise à jour
+à chaque changement d'état et à la fin (journal compris). Horodatages UTC ``…Z`` ; ``null`` si absents (C-1, C-2).
 """
 
 from __future__ import annotations
@@ -13,15 +14,27 @@ import logging
 import threading
 import traceback
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 
-from .. import config
+from ..db import utc_iso, utcnow
+from ..db.repositories import tasks as tasks_repo
+from ..db.repositories import user_transaction
+
+log = logging.getLogger(__name__)
 
 PENDING, RUNNING, MANUAL, INPUT, DONE, FAILED, CANCELLED = (
-    "en_attente", "en_cours", "attente_verification_manuelle", "attente_saisie", "terminée", "échec", "annulée")
+    "en_attente",
+    "en_cours",
+    "attente_verification_manuelle",
+    "attente_saisie",
+    "terminée",
+    "échec",
+    "annulée",
+)
 FINAL = (DONE, FAILED, CANCELLED)
 MAX_LOG_LINES = 400
 INPUT_TIMEOUT_SECONDS = 600
@@ -43,9 +56,9 @@ class Task:
     needs_input: dict | None = None
     meta: dict = field(default_factory=dict)
     browser: bool = False
-    created_at: str = ""
-    started_at: str = ""
-    finished_at: str = ""
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
 
     def public(self, with_logs: bool = True) -> dict:
         data = asdict(self)
@@ -57,7 +70,7 @@ class Task:
 class TaskContext:
     """Passé à la fonction de la tâche : journal, annulation, saisie utilisateur."""
 
-    def __init__(self, manager: "TaskManager", task: Task):
+    def __init__(self, manager: TaskManager, task: Task):
         self._manager, self.task = manager, task
         self._cancel = threading.Event()
         self._answer: str | None = None
@@ -76,14 +89,22 @@ class TaskContext:
     def set_status(self, status: str) -> None:
         with self._manager._lock:
             self.task.status = status
+        self._manager._save(self.task)
 
     def manual_check(self, message: str) -> None:
         """LinkedIn réclame une vérification (captcha, 2FA) : l'utilisateur la fait dans le navigateur."""
         self.log(message)
         self.set_status(MANUAL)
 
-    def ask(self, question: str, field_id: str = "", options: list[str] | None = None, *,
-            suggestion: str = "", review: str = "") -> str:
+    def ask(
+        self,
+        question: str,
+        field_id: str = "",
+        options: list[str] | None = None,
+        *,
+        suggestion: str = "",
+        review: str = "",
+    ) -> str:
         """Bloque jusqu'à la réponse de l'utilisateur (``POST /api/tasks/{id}/answer``).
 
         ``review`` : texte à relire avant une action irréversible (champ ``confirm_*``).
@@ -92,13 +113,20 @@ class TaskContext:
         self._answer = None
         with self._manager._lock:
             self.task.status = INPUT
-            self.task.needs_input = {"question": question, "field": field_id, "options": options or [],
-                                     "suggestion": suggestion, "review": review}
+            self.task.needs_input = {
+                "question": question,
+                "field": field_id,
+                "options": options or [],
+                "suggestion": suggestion,
+                "review": review,
+            }
         self.log(f"Question : {question}")
+        self._manager._save(self.task)
         deadline_reached = not self._answered.wait(INPUT_TIMEOUT_SECONDS)
         with self._manager._lock:
             self.task.needs_input = None
             self.task.status = RUNNING
+        self._manager._save(self.task)
         self.check()
         if deadline_reached or self._answer is None:
             raise TimeoutError("Aucune réponse reçue à temps : la tâche est interrompue.")
@@ -108,7 +136,7 @@ class TaskContext:
 class _TaskLogHandler(logging.Handler):
     """Copie les logs ``linkedin_market`` du thread d'une tâche dans son journal."""
 
-    def __init__(self, manager: "TaskManager"):
+    def __init__(self, manager: TaskManager):
         super().__init__(level=logging.INFO)
         self._manager = manager
 
@@ -127,6 +155,7 @@ class TaskManager:
         self._contexts: dict[str, TaskContext] = {}
         self._threads: dict[int | None, TaskContext] = {}
         self._persist = persist
+        self._persist_lock = threading.Lock()
         handler = _TaskLogHandler(self)
         logging.getLogger("linkedin_market").addHandler(handler)
         logging.getLogger("linkedin_market").setLevel(logging.INFO)
@@ -135,11 +164,20 @@ class TaskManager:
             self._load_history()
 
     # ------------------------------------------------------------ cycle
-    def submit(self, kind: str, title: str, fn: Callable[[TaskContext], Any], *,
-               browser: bool = False, meta: dict | None = None) -> Task:
-        task = Task(id=uuid.uuid4().hex[:12], kind=kind, title=title, browser=browser, meta=meta or {},
-                    created_at=datetime.now().isoformat(timespec="seconds"))
+    def submit(
+        self,
+        kind: str,
+        title: str,
+        fn: Callable[[TaskContext], Any],
+        *,
+        browser: bool = False,
+        meta: dict | None = None,
+    ) -> Task:
+        task = Task(
+            id=str(uuid.uuid7()), kind=kind, title=title, browser=browser, meta=meta or {}, created_at=utc_iso(utcnow())
+        )
         ctx = TaskContext(self, task)
+        self._insert(task)
         with self._lock:
             self._tasks[task.id] = task
             self._contexts[task.id] = ctx
@@ -156,7 +194,8 @@ class TaskManager:
             ctx.check()
             with self._lock:
                 task.status = RUNNING
-                task.started_at = datetime.now().isoformat(timespec="seconds")
+                task.started_at = utc_iso(utcnow())
+            self._save(task)
             self._threads[threading.get_ident()] = ctx
             result = fn(ctx)
             with self._lock:
@@ -174,8 +213,8 @@ class TaskManager:
                 self._browser_lock.release()
             with self._lock:
                 task.needs_input = None
-                task.finished_at = datetime.now().isoformat(timespec="seconds")
-            self._save_final(task)
+                task.finished_at = utc_iso(utcnow())
+            self._save(task)
 
     def cancel(self, task_id: str) -> bool:
         ctx = self._contexts.get(task_id)
@@ -216,31 +255,77 @@ class TaskManager:
             task.logs.append(f"{stamp} {message}")
             del task.logs[:-MAX_LOG_LINES]
 
-    def _save_final(self, task: Task) -> None:
+    @staticmethod
+    def _columns(task: Task) -> dict:
+        """Colonnes de ``tasks`` (valeurs JSON assainies, dates en ``datetime``)."""
+
+        def json_safe(value):
+            return None if value is None else json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+        def moment(value: str | None) -> datetime | None:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+        return {
+            "kind": task.kind,
+            "title": task.title,
+            "status": task.status,
+            "browser": task.browser,
+            "result": json_safe(task.result),
+            "error": task.error or None,
+            "needs_input": json_safe(task.needs_input),
+            "meta": json_safe(task.meta) or {},
+            "logs": list(task.logs),
+            "created_at": moment(task.created_at),
+            "started_at": moment(task.started_at),
+            "finished_at": moment(task.finished_at),
+        }
+
+    def _insert(self, task: Task) -> None:
+        if not self._persist:
+            return
+        with self._lock:
+            values = self._columns(task)
+        with self._persist_lock, user_transaction() as (s, uid):
+            tasks_repo.insert_task(s, uid, uuid.UUID(task.id), values)
+
+    def _save(self, task: Task) -> None:
+        """Écrit l'état courant de la tâche ; une erreur de base est journalisée sans interrompre la tâche."""
         if not self._persist:
             return
         try:
-            config.ensure_data_dirs()
-            with config.TASKS_FILE.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(asdict(task), ensure_ascii=False, default=str) + "\n")
-        except OSError:
-            pass
+            with self._persist_lock:
+                with self._lock:
+                    values = self._columns(task)
+                with user_transaction() as (s, uid):
+                    tasks_repo.update_task(s, uid, uuid.UUID(task.id), values)
+        except Exception as exc:  # noqa: BLE001 - la persistance ne doit pas faire échouer la tâche
+            log.warning("État de la tâche non enregistré en base : %s", exc.__class__.__name__)
 
     def _load_history(self, limit: int = 100) -> None:
-        if not config.TASKS_FILE.exists():
-            return
-        try:
-            lines = config.TASKS_FILE.read_text(encoding="utf-8").splitlines()[-limit:]
-        except OSError:
-            return
-        for line in lines:
-            try:
-                data = json.loads(line)
-                task = Task(**{k: v for k, v in data.items() if k in Task.__dataclass_fields__})
-            except (json.JSONDecodeError, TypeError):
-                continue
-            self._tasks[task.id] = task
+        """Dernières tâches en base. Une tâche non finale vient d'un arrêt de l'application : affichée en échec."""
+        with user_transaction() as (s, uid):
+            rows = tasks_repo.recent(s, uid, limit)
+            for row in rows:
+                task = Task(
+                    id=str(row.id),
+                    kind=row.kind,
+                    title=row.title,
+                    status=row.status,
+                    logs=list(row.logs),
+                    result=row.result,
+                    error=row.error or "",
+                    needs_input=None,
+                    meta=dict(row.meta),
+                    browser=row.browser,
+                    created_at=utc_iso(row.created_at),
+                    started_at=utc_iso(row.started_at),
+                    finished_at=utc_iso(row.finished_at),
+                )
+                if task.status not in FINAL:
+                    task.status, task.error = FAILED, "Tâche interrompue par l'arrêt de l'application."
+                self._tasks[task.id] = task
 
-    def shutdown(self) -> None:
+    def shutdown(self, wait: bool = False) -> None:
+        """Arrête le pool ; ``wait=True`` attend la fin (et la persistance) des tâches en cours."""
         logging.getLogger("linkedin_market").removeHandler(self._handler)
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        self._pool.shutdown(wait=wait, cancel_futures=True)

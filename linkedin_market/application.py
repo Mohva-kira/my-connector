@@ -14,6 +14,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
 import textwrap
 from dataclasses import dataclass
@@ -21,6 +22,10 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config, interpreter, nlp
+from .db import utc_iso, utcnow
+from .db.repositories import applications as applications_repo
+from .db.repositories import user_transaction
+from .db.repositories.items import make_ref
 from .models import Item, Profile
 
 log = logging.getLogger(__name__)
@@ -73,25 +78,135 @@ def relevant_jobs(scored: list[dict], labels: dict[str, int], min_score: float) 
 
 
 # ------------------------------------------------------------------- suivi
+# Persistance PostgreSQL (vague 1, D-1) : ``applications``, ``application_events``, ``company_contacts``.
+# Les fichiers du dossier (CV, message, conseils, offre) restent sur disque sous ``DATA_DIR``.
+
+HISTORY_KINDS = ("status", "apply", "message", "contacts", "note")
+_LEGACY_HISTORY_KINDS = {"statut": "status", "candidature": "apply"}  # C-6
+CONTACT_SOURCES = ("linkedin_equipe_recrutement", "manuel")
+
+
+class ApplicationNotFound(KeyError):
+    """Aucune candidature préparée pour cette offre."""
+
+
+def _parse_at(value) -> datetime | None:
+    """Horodatage ISO (naïf = heure locale de la machine, fichiers hérités) -> ``datetime`` avec fuseau."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        try:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return moment if moment.tzinfo else moment.astimezone()
+
+
+def _relative_folder(folder) -> str:
+    """Chemin du dossier relatif à ``DATA_DIR`` (D-5), quel que soit l'endroit où il a été créé."""
+    return Path(os.path.relpath(Path(folder).resolve(), config.DATA_DIR.resolve())).as_posix()
+
+
+def _contact_row(contact: dict) -> dict:
+    """Contact (API, recherche LinkedIn ou dossier hérité) -> colonnes de ``company_contacts`` (C-4, C-5)."""
+    source = contact.get("source") or "manuel"
+    source = "linkedin_equipe_recrutement" if source == "linkedin" else source
+    return {
+        "full_name": (contact.get("full_name") or contact.get("name") or "").strip(),
+        "profile_url": (contact.get("profile_url") or "").strip(),
+        "email": (contact.get("email") or "").strip() or None,
+        "headline": (contact.get("headline") or "").strip(),
+        "source": source if source in CONTACT_SOURCES else "manuel",
+    }
+
+
+def _contact_public(contact) -> dict:
+    return {
+        "full_name": contact.full_name,
+        "profile_url": contact.profile_url,
+        "email": contact.email,
+        "headline": contact.headline,
+        "source": contact.source,
+    }
+
+
+def _public(app, item, contacts: list, events: list) -> dict:
+    """Entrée de candidature telle qu'exposée par l'API (``folder`` absolu, C-9 ; dates UTC, C-1/C-2)."""
+    return {
+        "title": item.title,
+        "company": item.company,
+        "url": item.url,
+        "score": app.score,
+        "folder": str(config.DATA_DIR / app.folder_path),
+        "generator": app.generator,
+        "status": app.status,
+        "apply_state": app.apply_state,
+        "prepared_at": utc_iso(app.prepared_at),
+        "updated_at": utc_iso(app.updated_at) if app.updated_at != app.prepared_at else None,
+        "contacts": [_contact_public(c) for c in contacts],
+        "history": [{"at": utc_iso(e.at), "kind": e.kind, **e.details} for e in events],
+    }
+
+
+def _load(s, uid, ref: str, *, lock: bool = False):
+    found = applications_repo.get(s, uid, ref, lock=lock)
+    if found is None:
+        raise ApplicationNotFound(ref)
+    return found
+
+
+def _entry(s, uid, ref: str) -> dict:
+    app, item = _load(s, uid, ref)
+    contacts = applications_repo.contacts(s, uid, [app.id])[app.id]
+    events = applications_repo.events(s, uid, [app.id])[app.id]
+    return _public(app, item, contacts, events)
 
 
 def load_applications() -> dict[str, dict]:
-    if not config.APPLICATIONS_FILE.exists():
-        return {}
-    return json.loads(config.APPLICATIONS_FILE.read_text(encoding="utf-8"))
+    """Toutes les candidatures, par identifiant d'offre ``job:<id>``."""
+    return {row.pop("id"): row for row in list_applications()}
 
 
 def save_applications(data: dict[str, dict]) -> None:
-    config.ensure_data_dirs()
-    config.APPLICATIONS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Enregistre (crée ou met à jour) des candidatures au format historique ``applications.json``.
+
+    Sert aux dossiers hérités et aux tests : l'offre absente de l'historique est créée a minima. Les candidatures
+    absentes de ``data`` ne sont pas supprimées.
+    """
+    with user_transaction() as (s, uid):
+        for ref, entry in data.items():
+            item_id = applications_repo.ensure_item(
+                s, uid, ref, title=entry.get("title", ""), company=entry.get("company", ""), url=entry.get("url", "")
+            )
+            values = {
+                "status": entry.get("status") or "préparée",
+                "apply_state": entry.get("apply_state") or "",
+                "score": float(entry.get("score") or 0),
+                "generator": entry.get("generator") or "local",
+                "folder_path": _relative_folder(entry["folder"]),
+            }
+            prepared_at = _parse_at(entry.get("prepared_at"))
+            if prepared_at:
+                values["prepared_at"] = prepared_at
+            application_id = applications_repo.upsert(s, uid, item_id, values)
+            if "contacts" in entry:
+                applications_repo.replace_contacts(s, uid, application_id, [_contact_row(c) for c in entry["contacts"]])
+            for event in entry.get("history", []):
+                details = {k: v for k, v in event.items() if k not in ("at", "kind")}
+                kind = _LEGACY_HISTORY_KINDS.get(event.get("kind"), event.get("kind"))
+                applications_repo.add_event(s, uid, application_id, kind, details, _parse_at(event.get("at")))
 
 
 def set_status(job_id: str, status: str) -> None:
-    data = load_applications()
-    if job_id in data:
-        data[job_id]["status"] = status
-        data[job_id]["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        save_applications(data)
+    """Statut libre (``PATCH`` ou choix explicite de l'utilisateur au CLI) : seule voie de régression (I-03)."""
+    if status not in STATUSES:
+        raise ValueError(f"Statut inconnu : {status}")
+    with user_transaction() as (s, uid):
+        found = applications_repo.get(s, uid, job_id, lock=True)
+        if found is not None:
+            applications_repo.update_fields(s, uid, found[0].id, {"status": status})
 
 
 # -------------------------------------------------------------- génération
@@ -128,7 +243,7 @@ class Application:
     cv: str
     message: str
     advice: str
-    generator: str          # claude | local
+    generator: str  # claude | local
 
 
 def _market_context(results: dict, profile: Profile) -> dict:
@@ -153,11 +268,29 @@ def _split_sections(text: str) -> tuple[str, str, str]:
 
 def _generate_with_claude(profile: Profile, item: Item, job: dict, market: dict) -> Application:
     claude = interpreter.ClaudeInterpreter()
-    offer = {k: job.get(k) for k in ("title", "company", "location", "matched_skills", "missing_skills",
-                                     "years_required", "seniority_required", "freelance", "remote")}
+    offer = {
+        k: job.get(k)
+        for k in (
+            "title",
+            "company",
+            "location",
+            "matched_skills",
+            "missing_skills",
+            "years_required",
+            "seniority_required",
+            "freelance",
+            "remote",
+        )
+    }
+    summary = {
+        "titre": profile.title,
+        "competences": profile.skills,
+        "annees_experience": profile.years_experience,
+        "seniorite": profile.seniority,
+    }
     user = (
         f"<profil_source>\n{profile.text}\n</profil_source>\n\n"
-        f"<profil_resume>\n{json.dumps({'titre': profile.title, 'competences': profile.skills, 'annees_experience': profile.years_experience, 'seniorite': profile.seniority}, ensure_ascii=False)}\n</profil_resume>\n\n"
+        f"<profil_resume>\n{json.dumps(summary, ensure_ascii=False)}\n</profil_resume>\n\n"
         f"<offre>\n{json.dumps(offer, ensure_ascii=False)}\n\nDescription :\n{item.text}\n</offre>\n\n"
         f"<marche>\n{json.dumps(market, ensure_ascii=False)}\n</marche>"
     )
@@ -166,10 +299,24 @@ def _generate_with_claude(profile: Profile, item: Item, job: dict, market: dict)
 
 
 _DISPLAY = {
-    "fastapi": "FastAPI", "postgresql": "PostgreSQL", "mongodb": "MongoDB", "mysql": "MySQL",
-    "javascript": "JavaScript", "typescript": "TypeScript", "node.js": "Node.js", "next.js": "Next.js",
-    "graphql": "GraphQL", "langchain": "LangChain", "mlops": "MLOps", "devops": "DevOps", "power bi": "Power BI",
-    "elasticsearch": "Elasticsearch", "go": "Go", "rest api": "REST API", "ia générative": "IA générative", "c#": "C# / .NET",
+    "fastapi": "FastAPI",
+    "postgresql": "PostgreSQL",
+    "mongodb": "MongoDB",
+    "mysql": "MySQL",
+    "javascript": "JavaScript",
+    "typescript": "TypeScript",
+    "node.js": "Node.js",
+    "next.js": "Next.js",
+    "graphql": "GraphQL",
+    "langchain": "LangChain",
+    "mlops": "MLOps",
+    "devops": "DevOps",
+    "power bi": "Power BI",
+    "elasticsearch": "Elasticsearch",
+    "go": "Go",
+    "rest api": "REST API",
+    "ia générative": "IA générative",
+    "c#": "C# / .NET",
 }
 
 
@@ -189,14 +336,24 @@ def _generate_locally(profile: Profile, item: Item, job: dict, market: dict) -> 
     level = f", niveau {profile.seniority}" if profile.seniority else ""
     top = ", ".join(map(_pretty, matched[:4] or profile.skills[:4]))
 
-    cv = [f"# {profile.title or job['title']}", "",
-          f"**Candidature : {job['title']}{' — ' + job['company'] if job.get('company') else ''}**", "",
-          "## Accroche", "",
-          f"{years}{level}. Expertise directement mobilisable sur ce poste : {top}. "
-          "Freelance en full remote depuis Abidjan (GMT), disponible pour des équipes "
-          "internationales.", "",
-          "## Atouts pour cette offre", ""]
-    cv += [f"- **{_pretty(s)}**" + (" — compétence en forte demande actuellement" if s in trending else "") for s in matched]
+    cv = [
+        f"# {profile.title or job['title']}",
+        "",
+        f"**Candidature : {job['title']}{' — ' + job['company'] if job.get('company') else ''}**",
+        "",
+        "## Accroche",
+        "",
+        f"{years}{level}. Expertise directement mobilisable sur ce poste : {top}. "
+        "Freelance en full remote depuis Abidjan (GMT), disponible pour des équipes "
+        "internationales.",
+        "",
+        "## Atouts pour cette offre",
+        "",
+    ]
+    cv += [
+        f"- **{_pretty(s)}**" + (" — compétence en forte demande actuellement" if s in trending else "")
+        for s in matched
+    ]
     if extra_trending:
         cv += ["", "## Autres compétences recherchées sur le marché", "", ", ".join(map(_pretty, extra_trending))]
     # Deux espaces en fin de ligne : saut de ligne Markdown, la mise en page du profil est conservée.
@@ -210,8 +367,11 @@ def _generate_locally(profile: Profile, item: Item, job: dict, market: dict) -> 
     )
     missing = job.get("missing_skills", [])
     advice = "\n".join(
-        [f"- Compétence demandée absente du profil : **{_pretty(s)}** — prépare un exemple proche ou un plan de montée en compétence."
-         for s in missing[:5]]
+        [
+            f"- Compétence demandée absente du profil : **{_pretty(s)}** — prépare un exemple proche "
+            "ou un plan de montée en compétence."
+            for s in missing[:5]
+        ]
         or ["- Aucun écart de compétence détecté : insiste sur des résultats chiffrés."]
     )
     return Application("\n".join(cv), message, advice, "local")
@@ -281,81 +441,98 @@ def _slug(text: str) -> str:
 def write(app: Application, item: Item, job: dict) -> Path:
     """Écrit le dossier de candidature et l'enregistre dans le suivi."""
     config.ensure_data_dirs()
-    folder = config.APPLICATIONS_DIR / f"{datetime.now():%Y%m%d}-{_slug(job.get('company') or '')}-{_slug(job['title'])}"
+    folder = (
+        config.APPLICATIONS_DIR / f"{datetime.now():%Y%m%d}-{_slug(job.get('company') or '')}-{_slug(job['title'])}"
+    )
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "cv.md").write_text(app.cv, encoding="utf-8")
     (folder / "message.txt").write_text(app.message, encoding="utf-8")
     (folder / "conseils.md").write_text(app.advice, encoding="utf-8")
     (folder / "offre.txt").write_text(
-        f"{job['title']} — {job.get('company', '')}\n{job['url']}\n\n{item.text}", encoding="utf-8")
-    page = (_CV_HTML.replace("__TITLE__", html.escape(job["title"] or "Offre"))
-            .replace("__URL__", html.escape(job["url"]))
-            .replace("__MD__", app.cv.replace("</", "<\\/")))
+        f"{job['title']} — {job.get('company', '')}\n{job['url']}\n\n{item.text}", encoding="utf-8"
+    )
+    page = (
+        _CV_HTML.replace("__TITLE__", html.escape(job["title"] or "Offre"))
+        .replace("__URL__", html.escape(job["url"]))
+        .replace("__MD__", app.cv.replace("</", "<\\/"))
+    )
     (folder / "cv.html").write_text(page, encoding="utf-8")
 
-    data = load_applications()
-    previous = data.get(job["id"], {})  # re-préparer ne doit pas effacer statut, contacts ni historique
-    data[job["id"]] = {
-        **{k: previous[k] for k in ("contacts", "history", "apply_state", "updated_at") if k in previous},
-        "title": job["title"], "company": job.get("company", ""), "url": job["url"],
-        "score": job["score"], "folder": str(folder), "generator": app.generator,
-        "status": previous.get("status", "préparée"),
-        "prepared_at": datetime.now().isoformat(timespec="seconds"),
-    }
-    save_applications(data)
+    with user_transaction() as (s, uid):
+        item_id = applications_repo.ensure_item(
+            s, uid, job["id"], title=job["title"], company=job.get("company", ""), url=job["url"]
+        )
+        # Re-préparer ne doit effacer ni le statut, ni les contacts, ni l'historique.
+        applications_repo.upsert(
+            s,
+            uid,
+            item_id,
+            {
+                "score": float(job["score"]),
+                "generator": app.generator,
+                "folder_path": _relative_folder(folder),
+                "prepared_at": utcnow(),
+            },
+        )
     return folder
 
 
 # ------------------------------------------------- suivi enrichi (interface web)
 
 
-class ApplicationNotFound(KeyError):
-    """Aucune candidature préparée pour cette offre."""
-
-
-def _normalize(entry: dict) -> dict:
-    """Candidatures écrites par l'ancien CLI : ajoute les champs récents sans rien supprimer."""
-    entry.setdefault("contacts", [])
-    entry.setdefault("history", [])
-    entry.setdefault("apply_state", "")
-    return entry
-
-
 def get_application(job_id: str) -> dict:
-    data = load_applications()
-    if job_id not in data:
-        raise ApplicationNotFound(job_id)
-    return _normalize(data[job_id])
+    with user_transaction() as (s, uid):
+        return _entry(s, uid, job_id)
 
 
 def list_applications() -> list[dict]:
-    rows = [{"id": job_id, **_normalize(entry)} for job_id, entry in load_applications().items()]
-    return sorted(rows, key=lambda r: r.get("prepared_at", ""), reverse=True)
+    """Candidatures, de la plus récente préparation à la plus ancienne."""
+    with user_transaction() as (s, uid):
+        rows = applications_repo.list_all(s, uid)
+        ids = [app.id for app, _ in rows]
+        contacts = applications_repo.contacts(s, uid, ids)
+        events = applications_repo.events(s, uid, ids)
+        return [
+            {"id": make_ref(item.kind, item.external_id), **_public(app, item, contacts[app.id], events[app.id])}
+            for app, item in rows
+        ]
 
 
 def update_application(job_id: str, **fields) -> dict:
-    data = load_applications()
-    if job_id not in data:
-        raise ApplicationNotFound(job_id)
-    data[job_id].update(fields)
-    data[job_id]["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    save_applications(data)
-    return _normalize(data[job_id])
+    """Met à jour ``apply_state``, ``status`` et/ou ``contacts`` (liste remplacée) ; touche ``updated_at``."""
+    with user_transaction() as (s, uid):
+        app, _ = _load(s, uid, job_id, lock=True)
+        values = {k: fields[k] for k in ("apply_state", "status") if k in fields}
+        applications_repo.update_fields(s, uid, app.id, values)
+        if "contacts" in fields:
+            applications_repo.replace_contacts(s, uid, app.id, [_contact_row(c) for c in fields["contacts"]])
+        return _entry(s, uid, job_id)
 
 
 def add_history(job_id: str, kind: str, **details) -> dict:
-    entry = get_application(job_id)
-    history = entry["history"] + [{"at": datetime.now().isoformat(timespec="seconds"), "kind": kind, **details}]
-    return update_application(job_id, history=history)
+    """Ajoute un événement à l'historique (``status``, ``apply``, ``message``, ``contacts``, ``note`` ; C-6)."""
+    kind = _LEGACY_HISTORY_KINDS.get(kind, kind)
+    if kind not in HISTORY_KINDS:
+        raise ValueError(f"Type d'historique inconnu : {kind}")
+    payload = json.loads(json.dumps(details, ensure_ascii=False, default=str))
+    with user_transaction() as (s, uid):
+        app, _ = _load(s, uid, job_id)
+        applications_repo.add_event(s, uid, app.id, kind, payload, None)
+        return _entry(s, uid, job_id)
 
 
 def advance_status(job_id: str, status: str) -> None:
-    """Passe au statut demandé sauf s'il ferait reculer la candidature."""
+    """Passe au statut demandé sauf s'il ferait reculer la candidature (I-03).
+
+    Lecture et écriture dans **une** transaction, la candidature verrouillée (``SELECT … FOR UPDATE``).
+    """
     if status not in STATUSES:
         raise ValueError(f"Statut inconnu : {status}")
-    current = get_application(job_id)["status"]
-    if _PROGRESS.get(status, 0) > _PROGRESS.get(current, 0) or current in ("préparée", "externe", "échec"):
-        set_status(job_id, status)
+    with user_transaction() as (s, uid):
+        app, _ = _load(s, uid, job_id, lock=True)
+        current = app.status
+        if _PROGRESS.get(status, 0) > _PROGRESS.get(current, 0) or current in ("préparée", "externe", "échec"):
+            applications_repo.update_fields(s, uid, app.id, {"status": status})
 
 
 def folder_of(entry: dict) -> Path:
@@ -373,7 +550,12 @@ def read_files(entry: dict) -> dict[str, str]:
         path = folder / name
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
-    return {"cv": read("cv.md"), "message": read("message.txt"), "advice": read("conseils.md"), "offer": read("offre.txt")}
+    return {
+        "cv": read("cv.md"),
+        "message": read("message.txt"),
+        "advice": read("conseils.md"),
+        "offer": read("offre.txt"),
+    }
 
 
 def write_files(job_id: str, *, cv: str | None = None, message: str | None = None, advice: str | None = None) -> None:
@@ -389,6 +571,8 @@ def write_files(job_id: str, *, cv: str | None = None, message: str | None = Non
         (folder / "cv.html").write_text(
             _CV_HTML.replace("__TITLE__", html.escape(entry.get("title") or "Offre"))
             .replace("__URL__", html.escape(entry.get("url", "")))
-            .replace("__MD__", cv.replace("</", "<\\/")), encoding="utf-8")
+            .replace("__MD__", cv.replace("</", "<\\/")),
+            encoding="utf-8",
+        )
         (folder / config.CV_PDF_NAME).unlink(missing_ok=True)  # PDF périmé : régénéré à la demande
     update_application(job_id)

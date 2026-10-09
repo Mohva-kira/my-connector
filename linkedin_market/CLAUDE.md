@@ -53,8 +53,15 @@ npm run dev            # Vite, port 5174, proxy /api -> 127.0.0.1:8765 (lancer l
 npm run build          # tsc --noEmit && vite build -> dist/ servi par FastAPI
 npx tsc --noEmit       # contrôle de types seul
 
-# Tests (hors ligne, ~2 min)
-.venv/bin/python -m pytest linkedin_market/tests
+# PostgreSQL 18 (base de l'application ; .env racine : LM_DATABASE_URL, LM_DB_PASSWORD, LM_SECRET_KEY)
+docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
+# LM_DATABASE_URL (et non DATABASE_URL, déjà lu par email_analyzer dans le même .env)
+
+# Tests (hors ligne, ~2 min). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
+# sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré).
+# Démarrage (CLI et web) : alembic upgrade head -> utilisateur unique -> import des JSON historiques -> tâches non finales en échec.
+# LM_DATABASE_URL=<url> .venv/bin/alembic -c linkedin_market/alembic.ini check    # modèles == migrations
+LM_TEST_DATABASE_URL=postgresql+psycopg://<user>:<mdp>@127.0.0.1:<port>/linkedin_market_test .venv/bin/python -m pytest linkedin_market/tests
 .venv/bin/python -m pytest linkedin_market/tests/test_messages_api.py -q
 
 # Lint Python : config linkedin_market/ruff.toml (py314, 120 colonnes, règles E F W I UP B),
@@ -63,14 +70,17 @@ npx tsc --noEmit       # contrôle de types seul
 .venv/bin/ruff check linkedin_market
 .venv/bin/ruff format --check linkedin_market
 # Lint front (dans linkedin_market/web/frontend) : ESLint 9 en configuration plate (eslint.config.js).
-# Dette : 9 avertissements (règles en "warn", frontend/04 § 4.3) ; toute nouvelle erreur bloque.
+# Dette : aucune (0 erreur, 0 avertissement depuis la vague 2) ; tout avertissement nouveau bloque.
 npm run lint
 ```
 Ne jamais utiliser `--dev` avec de vrais identifiants LinkedIn.
 
 ## Invariants non négociables (détail : `schemas-architecture/00` § 2, application : `backend/00` § 2)
+Décidé le 2026-10-08 (E-4, option A) : un `run` bloqué pendant la collecte finit `terminée` avec un rapport
+partiel et `result.blocked = true` (`backend/01` § 1.2 G-10).
+
 Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests.
-- **I-01** Toute donnée persistée porte `user_id` ; toute requête filtre dessus `[CIBLE]` PostgreSQL.
+- **I-01** Toute donnée persistée porte `user_id` ; toute requête filtre dessus (PostgreSQL 18, `db/repositories/*`).
 - **I-02** Un rapport est immuable : aucune route ni code ne réécrit un rapport existant.
 - **I-03** Le statut d'une candidature ne régresse jamais automatiquement (`application.advance_status()`) ;
   seul `PATCH /api/applications/{id}` le change librement.
@@ -83,14 +93,17 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
   **Aucun contournement** : seule la vérification manuelle par l'utilisateur dans la fenêtre visible est permise.
 - **I-07** Plafonds de prudence (`prudent` 15 / `normal` 30 / `agressif` 60 éléments par type) et plafonds
   quotidiens (`apply_daily_max`, `message_daily_max`) jamais dépassés ; contrôle à l'API **et** au début de la tâche.
-  Décidé (E-3) : `max_items` ≤ plafond de la prudence choisie, prudence par défaut `prudent` `[CIBLE]`.
+  Décidé (E-3) : `max_items` ≤ plafond de la prudence choisie, prudence par défaut `prudent` : `CHECK` en
+  base et défaut `[ACTUEL]` (vague 1), contrôle 422 à l'API et `min()` dans `pipeline` `[CIBLE]` (vague 2).
 - **I-08** Uniquement le propre compte de l'utilisateur : ni faux compte, ni compte partagé, ni rotation.
 - **I-09** Minimisation : un profil tiers (`person`) ne garde que titre + compétences ; aucune donnée sensible
   (art. 9 RGPD).
-- **I-10** Purge : `post`/`person` à 30 jours, offres sans candidature à 90 jours `[CIBLE]`.
+- **I-10** Purge : `post`/`person` à 30 jours, offres sans candidature à 90 jours (`purge_after` posé à l'ingestion ;
+  tâche `purge` `[CIBLE]`, vague 6).
 - **I-11** Claude ne reçoit **jamais de donnée de tiers identifiable** (profils, posts, recruteurs, contacts) ;
-  l'interprétation n'envoie que des agrégats ; le mode local produit toujours une interprétation. Formulation finale
-  vis-à-vis de la génération de CV en arbitrage : voir E-6.
+  l'interprétation n'envoie que des agrégats ; le mode local produit toujours une interprétation. Génération de CV
+  par Claude (E-6, décidé le 2026-10-09) : profil de l'utilisateur + texte de l'offre **après**
+  `nlp.redact_third_parties` (noms, emails, téléphones, URL de profils de personnes remplacés par `[personne]`) `[CIBLE]`.
 - **I-12** Prospection B2B (CPCE L.34-5, CNIL) : destinataire joint dans ses fonctions, objet lié à son offre,
   origine de l'adresse et moyen de désinscription simple et gratuit dans chaque message.
 - **I-13** Base légale `interet_legitime` + source sur chaque contact ; une entrée de `suppression_list` bloque
@@ -99,13 +112,13 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
 - **I-15** Identifiants, mots de passe SMTP, clés API, cookies, jeton local : jamais versionnés ni journalisés ;
   cookies valables 72 h.
 - **I-16** Source en mode `navigateur` (LinkedIn, Malt, WTTJ) utilisable seulement après acceptation de la version
-  courante du texte de risques dans la **popup de risques** (HTTP 428 sinon) `[CIBLE]`.
+  courante du texte de risques dans la **popup de risques** (HTTP 428 sinon) `[CIBLE]`. Le CLI avec collecte refuse
+  de démarrer sans ce consentement et renvoie vers Paramètres → Sources et consentements (décidé le 2026-10-09).
 
-### Points en arbitrage — ne pas trancher dans le code sans décision
-Issue d'une tâche `run` bloquée en cours de collecte (E-4) ;
-mécanisme de désinscription (réponse STOP, en-tête `List-Unsubscribe`, `backend/05` § 2.4) ; formulation d'I-11
-pour la génération de CV (E-6). Lis
-l'état courant dans les docs citées ; si la tâche en dépend, demande la décision.
+### Points en arbitrage
+Aucun au 2026-10-09 (E-4, désinscription, E-6 tranchés). Désinscription : réponse « STOP » + en-tête
+`List-Unsubscribe` mailto, opposition saisie par l'utilisateur (`backend/05` § 2.4). Tout nouveau point qui
+touche un invariant ou un risque se soumet à l'utilisateur avant le code.
 
 ## Interdits absolus
 - N'ajouter **aucune** technique de dissimulation ou de contournement des protections des plateformes :
@@ -128,10 +141,12 @@ l'état courant dans les docs citées ; si la tâche en dépend, demande la déc
 - `pathlib` partout, aucun chemin de driver codé en dur (Selenium Manager) : code portable Linux / Windows / macOS.
 - Couches : `Entrées → Orchestration → Domaine / Intégrations → Persistance` (`schemas-architecture/01` § 4). Le
   domaine n'importe ni FastAPI ni Selenium ; les routeurs n'importent jamais Selenium et ne portent pas de règle
-  métier ; seuls les modules de persistance touchent `DATA_DIR` (puis la base).
+  métier ; seuls les modules de persistance touchent `DATA_DIR` et la base.
 - Noms : uniquement ceux du **glossaire** (`job`, `application`, `source_code`, `caution`, `label`…), jamais
   `offer`, `candidate`, `scrape_run`. Clés JSON en snake_case, énumérations en français sans majuscule.
-- Dates : `[ACTUEL]` locales naïves (E-9) ; `[CIBLE]` UTC `timestamptz` — tout nouveau code écrit de l'UTC avec fuseau.
+- Dates : UTC `timestamptz` en base ; à l'API, ISO 8601 UTC suffixé `Z` via `db.utc_iso` (C-1). Jamais de date naïve.
+- Persistance : PostgreSQL 18 (SQLAlchemy 2.x, psycopg 3, Alembic). SQL uniquement dans `db/repositories/*` ; toute
+  évolution de schéma = nouvelle révision Alembic (`migrations/versions/`), vérifiée par `alembic check`.
 - Logs : jamais de secret, de cookie, de corps de message complet ni de texte de profil tiers ; masquer les
   adresses de tiers (E-12).
 - Toute précondition vérifiée par un routeur est revérifiée au début de la tâche (plafond, blocage, consentement).
@@ -142,7 +157,7 @@ l'état courant dans les docs citées ; si la tâche en dépend, demande la déc
 - Tailwind avec les **jetons sémantiques existants** (`bg-surface`, `text-text-secondary`, `bg-danger/15`…), jamais
   de couleur brute ni d'hexadécimal ; nouvelle couleur = variable dans les deux thèmes de `index.css`.
 - Interface en français, tutoiement. Validation client = confort ; le serveur reste seul garant. Schémas Zod dans
-  `src/schemas.ts` `[CIBLE]`, avec les bornes exactes du serveur.
+  `src/schemas.ts` `[ACTUEL]`, avec les bornes et messages exacts du serveur.
 - Toute action d'envoi passe par un écran de relecture ; aucune action irréversible sans clic explicite.
 
 ## Tests
@@ -152,8 +167,9 @@ l'état courant dans les docs citées ; si la tâche en dépend, demande la déc
 - Lancer la suite complète avant de conclure ; `npx tsc --noEmit` (ou `npm run build`) après toute modification du front.
 
 ## Marqueurs `[ACTUEL]` / `[CIBLE]`
-`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (PostgreSQL 18, nouvelles sources,
-popup de risques, opposition…). Avant d'implémenter un `[CIBLE]`, vérifie l'existant (le code a pu évoluer) ;
+`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (nouvelles sources, popup de risques,
+opposition, purge…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie
+l'existant (le code a pu évoluer) ;
 une fois livré, passe la mention en `[ACTUEL]` dans les docs concernées et retire l'écart `E-n` correspondant.
 
 ## Maintenance de la documentation

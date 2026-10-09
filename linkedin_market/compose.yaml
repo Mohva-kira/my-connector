@@ -1,0 +1,24 @@
+# Base PostgreSQL 18 de linkedin_market (l'application reste lancée par Python pour garder le navigateur visible).
+# Depuis la racine du dépôt (le .env racine fournit LM_DB_PASSWORD) :
+#   docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
+# puis, dans .env :
+#   LM_DATABASE_URL=postgresql+psycopg://linkedin_market:<LM_DB_PASSWORD>@127.0.0.1:5432/linkedin_market
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: linkedin_market
+      POSTGRES_USER: linkedin_market
+      POSTGRES_PASSWORD: ${LM_DB_PASSWORD:?définis LM_DB_PASSWORD dans le .env à la racine du dépôt}
+    ports:
+      - "127.0.0.1:5432:5432"   # jamais exposé hors de la machine
+    volumes:
+      - lm_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U linkedin_market -d linkedin_market"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  lm_pgdata:

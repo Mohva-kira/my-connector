@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from ... import activity, config, nlp, settings, storage
+from ... import activity, nlp, settings, storage
 from .. import services
 from ..guards import require_browser_ready
 from ..tasks import TaskManager
@@ -68,8 +68,11 @@ def get_profile() -> dict:
     results = services.latest_results()
     profile["suggestions"] = services.skill_suggestions(results, profile["skills"])
     # Les scores des offres reflètent le profil de la dernière analyse : à recalculer si les compétences ont changé.
-    profile["scores_outdated"] = bool(results) and profile["available"] and sorted(profile["skills"]) != sorted(
-        results.get("profile", {}).get("skills", []))
+    profile["scores_outdated"] = (
+        bool(results)
+        and profile["available"]
+        and sorted(profile["skills"]) != sorted(results.get("profile", {}).get("skills", []))
+    )
     return profile
 
 
@@ -93,7 +96,9 @@ def add_skill(request: Request, body: SkillBody) -> dict:
     except settings.SettingsError as exc:
         raise HTTPException(422, str(exc)) from exc
     profile = get_profile()
-    profile["linkedin_sync"] = _sync_skill(request, nlp.normalize(body.skill), new=nlp.normalize(body.skill) not in before)
+    profile["linkedin_sync"] = _sync_skill(
+        request, nlp.normalize(body.skill), new=nlp.normalize(body.skill) not in before
+    )
     return profile
 
 
@@ -110,8 +115,13 @@ def _sync_skill(request: Request, skill: str, *, new: bool) -> dict:
         require_browser_ready()
     except HTTPException as exc:
         return {"status": "unavailable", "message": f"Compétence ajoutée ici, mais pas sur LinkedIn : {exc.detail}"}
-    task = tasks.submit("profile_skill", f"Ajouter « {skill} » au profil LinkedIn",
-                        lambda ctx: services.sync_skill_to_linkedin(ctx, skill), browser=True, meta={"key": skill})
+    task = tasks.submit(
+        "profile_skill",
+        f"Ajouter « {skill} » au profil LinkedIn",
+        lambda ctx: services.sync_skill_to_linkedin(ctx, skill),
+        browser=True,
+        meta={"key": skill},
+    )
     return {"status": "queued", "task": task.public()}
 
 
@@ -123,8 +133,9 @@ def remove_skill(skill: str) -> dict:
 
 @router.post("/profile/reset-overrides")
 def reset_overrides() -> dict:
-    settings.save_profile_settings({"added_skills": [], "removed_skills": [], "title": "",
-                                    "years_experience": None, "seniority": ""})
+    settings.save_profile_settings(
+        {"added_skills": [], "removed_skills": [], "title": "", "years_experience": None, "seniority": ""}
+    )
     return get_profile()
 
 
@@ -156,10 +167,12 @@ def report_json(name: str) -> dict:
 
 @router.get("/reports/{name}/html")
 def report_html(name: str):
-    if storage.load_report(name) is None:
+    path = storage.report_html_path(name)
+    if path is None:
         raise HTTPException(404, "Rapport introuvable.")
-    return FileResponse(config.REPORTS_DIR / f"{name}.html", media_type="text/html",
-                        headers={"Content-Security-Policy": "sandbox allow-scripts allow-popups"})
+    return FileResponse(
+        path, media_type="text/html", headers={"Content-Security-Policy": "sandbox allow-scripts allow-popups"}
+    )
 
 
 # ---------------------------------------------------------------- tâches
@@ -195,7 +208,11 @@ def answer_task(request: Request, task_id: str, body: Answer) -> dict:
     if task is None or not task.needs_input:
         raise HTTPException(409, "Cette tâche n'attend pas de réponse.")
     # Les confirmations d'envoi (field « confirm_… ») ne sont jamais mémorisées comme une réponse de formulaire.
-    if body.remember and task.needs_input.get("question") and not str(task.needs_input.get("field", "")).startswith("confirm"):
+    if (
+        body.remember
+        and task.needs_input.get("question")
+        and not str(task.needs_input.get("field", "")).startswith("confirm")
+    ):
         settings.remember_answer(task.needs_input["question"], body.value)
     if not tasks.answer(task_id, body.value):
         raise HTTPException(409, "Cette tâche n'attend plus de réponse.")

@@ -1,0 +1,5 @@
+{"keyword": "Data Engineer", "location": "", "remote_only": true, "caution": "prudent", "max_items": 40,
+ "profile_source": "auto", "interpreter": "none", "apply_min_score": 65, "apply_daily_max": 8,
+ "message_daily_max": 12, "contact_email": "moi@exemple.test", "contact_phone": "+33100000000",
+ "signature": "Alex Exemple", "linkedin_skill_sync": false,
+ "answers": {"how many years of experience do you have with python?": "9", "authorized to work?": "Yes"}}

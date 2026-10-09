@@ -22,7 +22,7 @@ macOS. Chemins et commandes restent portables (`pathlib`, aucun chemin de driver
 | :--- | :--- | :--- |
 | **Développement backend** | `.venv/bin/python -m linkedin_market.web --dev --no-open` | Jeton désactivé, Swagger sur `/api/docs`, origines `http://127.0.0.1:5174` et `http://localhost:5174` autorisées. |
 | **Développement frontend** | `cd linkedin_market/web/frontend && npm run dev` (Vite, port 5174, proxy `/api` → 8765) | Rechargement à chaud. |
-| **Tests** | `.venv/bin/python -m pytest linkedin_market/tests` | `create_app(token=None)` ; fixtures HTML hors ligne (`tests/fixtures/`) ; aucun appel réseau réel ; base PostgreSQL de test jetable `[CIBLE]`. |
+| **Tests** | `.venv/bin/python -m pytest linkedin_market/tests` | `create_app(token=None)` ; fixtures HTML hors ligne (`tests/fixtures/`) ; aucun appel réseau réel ; base PostgreSQL de test jetable (`LM_TEST_DATABASE_URL`, nom en `_test`, 0 test ignoré exigé) `[ACTUEL]`. |
 | **Utilisation (production locale)** | `python -m linkedin_market.web` (ouvre le navigateur) ou `python -m linkedin_market -k "Data Engineer"` | Frontend compilé servi depuis `web/frontend/dist`. |
 
 Il n'y a ni *staging* ni production hébergée : la « mise en production » est la publication d'une version taguée.
@@ -34,7 +34,7 @@ Il n'y a ni *staging* ni production hébergée : la « mise en production » est
 | Python | **3.14** minimum | `python3.14 -m venv .venv` puis `/usr/bin/python3 -m pip --python .venv/bin/python install -r linkedin_market/requirements-dev.txt` (ou `.venv/bin/pip install -r linkedin_market/requirements.txt` si le venv a pip) |
 | Node.js | 22 LTS minimum, 24 vérifié (build du frontend uniquement) | `npm ci && npm run build` dans `web/frontend` (`tsc --noEmit && vite build`) |
 | Navigateur | Chrome / Chromium ou Firefox récent | Selenium Manager télécharge le driver adapté. |
-| PostgreSQL `[CIBLE]` | **18** | Paquet système **ou** `docker compose up -d db` (fichier `compose.yaml` fourni). |
+| PostgreSQL `[ACTUEL]` | **18** | Paquet système **ou** `docker compose --env-file .env -f linkedin_market/compose.yaml up -d db` depuis la racine. |
 | Dépendances Python clés | `selenium>=4.50,<5`, `fastapi>=0.115,<1`, `uvicorn[standard]>=0.32,<1`, `anthropic>=1.9,<2`, `numpy>=1.26,<3`, `pypdf>=4,<6`, `fpdf2>=2.8,<3`, `python-dotenv>=1,<2`, `sqlalchemy>=2.0,<2.2`, `psycopg[binary]>=3.2,<4`, `alembic>=1.18,<2`, `cryptography>=44,<51` (Fernet) ; dev : `ruff`, `pytest`, `httpx` | `linkedin_market/requirements.txt` `[ACTUEL]` (dev : `linkedin_market/requirements-dev.txt`, qui inclut le premier) |
 
 `compose.yaml` cible (base seule, l'application reste lancée par Python pour garder le navigateur visible) :
@@ -50,6 +50,8 @@ services:
       POSTGRES_PASSWORD: ${LM_DB_PASSWORD:?définir LM_DB_PASSWORD dans .env}
     ports:
       - "127.0.0.1:5432:5432"   # jamais exposé hors de la machine
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U linkedin_market -d linkedin_market"]
     volumes:
       - lm_pgdata:/var/lib/postgresql
 volumes:
@@ -80,9 +82,9 @@ Lues depuis `.env` à la racine du dépôt (jamais versionné ; `.env.example` v
 | `SMTP_SECURITY` | Chiffrement | `starttls` (défaut) \| `ssl` ; `none` accepté aujourd'hui mais à supprimer (E-20) | Non |
 | `SMTP_USER`, `SMTP_PASSWORD` | Authentification SMTP | — | Selon le serveur |
 | `SMTP_FROM` | Expéditeur | `Prénom Nom <prenom@exemple.fr>` | Non (défaut `SMTP_USER`) |
-| `DATABASE_URL` `[CIBLE]` | Connexion PostgreSQL | `postgresql+psycopg://linkedin_market:***@127.0.0.1:5432/linkedin_market` | Oui |
-| `LM_DB_PASSWORD` `[CIBLE]` | Mot de passe du conteneur `db` | Chaîne aléatoire | Avec `compose.yaml` |
-| `LM_SECRET_KEY` `[CIBLE]` | Clé Fernet de chiffrement des cookies de session | `Fernet.generate_key()` (44 caractères base64) | Oui ; générée au premier lancement si absente |
+| `LM_DATABASE_URL` | Connexion PostgreSQL (préfixe `LM_` : `DATABASE_URL` est réservé à email_analyzer, même `.env`) | `postgresql+psycopg://linkedin_market:***@127.0.0.1:5432/linkedin_market` | Oui |
+| `LM_DB_PASSWORD` | Mot de passe du conteneur `db` | Chaîne aléatoire | Avec `compose.yaml` |
+| `LM_SECRET_KEY` | Clé Fernet de chiffrement des cookies de session | `Fernet.generate_key()` (44 caractères base64) | Oui ; générée au premier lancement si absente |
 | `FRANCE_TRAVAIL_CLIENT_ID`, `FRANCE_TRAVAIL_CLIENT_SECRET` `[CIBLE]` | Application déclarée sur francetravail.io, abonnée à l'API « Offres d'emploi » | — | Pour la source `france_travail` |
 
 ## 5. Sécurité du Poste

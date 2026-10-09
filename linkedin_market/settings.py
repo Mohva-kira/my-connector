@@ -2,33 +2,33 @@
 et surcharges du profil (compétences ajoutées/retirées).
 
 Les surcharges ne réécrivent jamais ``profil.*`` : elles s'appliquent par-dessus à la
-construction du profil (``profile.finalize``).
+construction du profil (``profile.finalize``). Façade de persistance (D-1) : tables ``user_settings``,
+``memorized_answers``, ``candidate_profiles`` et ``profile_skill_overrides``.
 """
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-
 from . import config, nlp
+from .db.repositories import profile as profile_repo
+from .db.repositories import settings as settings_repo
+from .db.repositories import user_transaction
 
 DEFAULT_SETTINGS: dict = {
     "keyword": "",
     "location": "",
     "remote_only": True,
     "caution": config.DEFAULT_CAUTION,
-    "max_items": None,                 # None = selon la prudence
-    "profile_source": "auto",          # auto | file | linkedin
-    "interpreter": "claude",           # claude | local | none
+    "max_items": None,  # None = plafond de la prudence
+    "profile_source": "auto",  # auto | file | linkedin
+    "interpreter": "claude",  # claude | local (« none » lu comme local, E-7)
     "apply_min_score": config.APPLY_MIN_SCORE,
     "apply_daily_max": 10,
     "message_daily_max": 15,
-    "contact_email": "",               # email/téléphone saisis dans « Candidature simplifiée »
+    "contact_email": "",  # email/téléphone saisis dans « Candidature simplifiée »
     "contact_phone": "",
     "signature": "",
-    "linkedin_skill_sync": True,       # compétence ajoutée dans l'interface -> ajoutée au profil LinkedIn
-    "answers": {},                     # question normalisée -> réponse mémorisée
+    "linkedin_skill_sync": True,  # compétence ajoutée dans l'interface -> ajoutée au profil LinkedIn
+    "answers": {},  # question normalisée -> réponse mémorisée
 }
 
 DEFAULT_PROFILE_SETTINGS: dict = {
@@ -40,47 +40,58 @@ DEFAULT_PROFILE_SETTINGS: dict = {
 }
 
 _PROFILE_SOURCES = ("auto", "file", "linkedin")
-_INTERPRETERS = ("claude", "local", "none")
+_INTERPRETERS = ("claude", "local")  # « none » refusé à l'écriture (E-7, I-11)
 
 
 class SettingsError(ValueError):
     """Valeur de réglage invalide (message lisible côté UI)."""
 
 
-def _read(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+def read_interpreter(value: str | None) -> str:
+    """Interprète effectif : ``none`` (ancienne valeur) est lu comme ``local`` (E-7)."""
+    return "local" if value in (None, "", "none") else value
 
 
-def _write(path: Path, data: dict) -> None:
-    config.ensure_data_dirs()
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+def max_items_cap(caution: str) -> int:
+    return config.CAUTION_LEVELS[caution].max_items
+
+
+def _question_key(question: str) -> str:
+    return nlp.normalize(str(question))[:200]
 
 
 # ----------------------------------------------------------------- réglages
 def load_settings() -> dict:
-    return {**DEFAULT_SETTINGS, **{k: v for k, v in _read(config.SETTINGS_FILE).items() if k in DEFAULT_SETTINGS}}
+    with user_transaction() as (s, uid):
+        values = settings_repo.get_settings(s, uid)
+        answers = settings_repo.get_answers(s, uid)
+    values["interpreter"] = read_interpreter(values["interpreter"])
+    return {**DEFAULT_SETTINGS, **values, "answers": answers}
 
 
 def _int(value, name: str, low: int, high: int) -> int:
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise SettingsError(f"{name} doit être un entier.") from None
     if not low <= number <= high:
         raise SettingsError(f"{name} doit être compris entre {low} et {high}.")
     return number
 
 
-def validate_settings(update: dict) -> dict:
-    """Valide un sous-ensemble de réglages ; retourne uniquement les clés connues, normalisées."""
+def _check_max_items(max_items: int | None, caution: str) -> None:
+    """``max_items`` ≤ plafond de la prudence choisie (I-07, E-3)."""
+    cap = max_items_cap(caution)
+    if max_items is not None and max_items > cap:
+        raise SettingsError(f"max_items ne peut pas dépasser {cap} en prudence « {caution} ».")
+
+
+def validate_settings(update: dict, current: dict | None = None) -> dict:
+    """Valide un sous-ensemble de réglages ; retourne uniquement les clés connues, normalisées.
+
+    ``max_items`` est contrôlé contre la prudence de ``update`` ou, à défaut, celle de ``current`` (lue en base
+    si absente).
+    """
     clean: dict = {}
     for key, value in update.items():
         if key not in DEFAULT_SETTINGS:
@@ -97,7 +108,7 @@ def validate_settings(update: dict) -> dict:
         elif key == "apply_min_score":
             try:
                 value = float(value)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 raise SettingsError("apply_min_score doit être un nombre.") from None
             if not 0 <= value <= 100:
                 raise SettingsError("apply_min_score doit être compris entre 0 et 100.")
@@ -108,36 +119,43 @@ def validate_settings(update: dict) -> dict:
         elif key == "answers":
             if not isinstance(value, dict):
                 raise SettingsError("answers doit être un objet question -> réponse.")
-            value = {nlp.normalize(str(q))[:200]: str(a)[:500] for q, a in value.items() if str(q).strip()}
+            value = {_question_key(q): str(a)[:500] for q, a in value.items() if str(q).strip()}
         else:
             value = str(value or "").strip()
         clean[key] = value
+    if clean.get("max_items") is not None:
+        caution = clean.get("caution") or (current if current is not None else load_settings())["caution"]
+        _check_max_items(clean["max_items"], caution)
     return clean
 
 
 def save_settings(update: dict) -> dict:
-    merged = {**load_settings(), **validate_settings(update)}
-    _write(config.SETTINGS_FILE, merged)
-    return merged
+    """Mise à jour partielle ; ``answers`` remplace l'ensemble des réponses mémorisées."""
+    with user_transaction() as (s, uid):
+        current = settings_repo.get_settings(s, uid, lock=True)
+        clean = validate_settings(update, current)
+        merged = {**current, **clean}
+        _check_max_items(merged["max_items"], merged["caution"])
+        settings_repo.update_settings(s, uid, clean)
+        if "answers" in clean:
+            settings_repo.replace_answers(s, uid, clean["answers"])
+    return load_settings()
 
 
 def remember_answer(question: str, answer: str) -> None:
-    answers = dict(load_settings()["answers"])
-    answers[nlp.normalize(question)[:200]] = str(answer)[:500]
-    save_settings({"answers": answers})
+    with user_transaction() as (s, uid):
+        settings_repo.set_answer(s, uid, _question_key(question), str(answer)[:500])
 
 
 def find_answer(question: str) -> str | None:
-    return load_settings()["answers"].get(nlp.normalize(question)[:200])
+    with user_transaction() as (s, uid):
+        return settings_repo.get_answer(s, uid, _question_key(question))
 
 
 # ------------------------------------------------------------ profil (UI)
 def load_profile_settings() -> dict:
-    data = _read(config.PROFILE_SETTINGS_FILE)
-    merged = {**DEFAULT_PROFILE_SETTINGS, **{k: v for k, v in data.items() if k in DEFAULT_PROFILE_SETTINGS}}
-    merged["added_skills"] = list(merged["added_skills"])
-    merged["removed_skills"] = list(merged["removed_skills"])
-    return merged
+    with user_transaction() as (s, uid):
+        return {**DEFAULT_PROFILE_SETTINGS, **profile_repo.get_overrides(s, uid)}
 
 
 def _skill_list(values) -> list[str]:
@@ -169,7 +187,8 @@ def save_profile_settings(update: dict) -> dict:
         current[key] = value
     # Une compétence ne peut pas être à la fois ajoutée et retirée : le dernier choix gagne.
     current["removed_skills"] = [s for s in current["removed_skills"] if s not in current["added_skills"]]
-    _write(config.PROFILE_SETTINGS_FILE, current)
+    with user_transaction() as (s, uid):
+        profile_repo.save_overrides(s, uid, current)
     return current
 
 
@@ -179,14 +198,18 @@ def add_skill(skill: str) -> dict:
         raise SettingsError("Compétence vide.")
     current = load_profile_settings()
     added = current["added_skills"] + ([name] if name not in current["added_skills"] else [])
-    return save_profile_settings({"added_skills": added, "removed_skills": [s for s in current["removed_skills"] if s != name]})
+    return save_profile_settings(
+        {"added_skills": added, "removed_skills": [s for s in current["removed_skills"] if s != name]}
+    )
 
 
 def remove_skill(skill: str) -> dict:
     name = nlp.normalize(skill)
     current = load_profile_settings()
     removed = current["removed_skills"] + ([name] if name not in current["removed_skills"] else [])
-    return save_profile_settings({"added_skills": [s for s in current["added_skills"] if s != name], "removed_skills": removed})
+    return save_profile_settings(
+        {"added_skills": [s for s in current["added_skills"] if s != name], "removed_skills": removed}
+    )
 
 
 def apply_to_profile(profile) -> None:

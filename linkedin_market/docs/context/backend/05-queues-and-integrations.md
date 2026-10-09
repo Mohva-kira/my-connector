@@ -12,8 +12,8 @@
 | :--- | :--- | :--- |
 | Exécuteur | `ThreadPoolExecutor(max_workers=4, thread_name_prefix="lm-task")` | inchangé |
 | Sérialisation navigateur | `threading.Lock` partagé (`_browser_lock`) : une tâche `browser=True` attend le verrou par tranches de 0,5 s en restant `en_attente`, annulable pendant l'attente | inchangé |
-| État | dictionnaire `_tasks` en mémoire, protégé par `RLock` | table `tasks` (écriture à chaque changement de statut) |
-| Persistance | ligne JSON ajoutée à `tasks.jsonl` à la **fin** de la tâche ; 100 dernières rechargées au démarrage | `tasks` ; au démarrage, tâches non finales ⇒ `échec` « interrompue par l'arrêt de l'application » |
+| État | dictionnaire `_tasks` en mémoire, protégé par `RLock`, **et** table `tasks` : insertion à la soumission, mise à jour à chaque changement de statut / question (vague 1) | inchangé |
+| Persistance | table `tasks` (vague 1) ; 100 dernières rechargées au démarrage ; tâches non finales ⇒ `échec` « Tâche interrompue par l'arrêt de l'application. » (`db/bootstrap.py`) | inchangé |
 | Suivi client | polling `GET /api/tasks/{id}` toutes les 1,5 s | inchangé (pas de WebSocket/SSE : inutile en local) |
 | Journal | `_TaskLogHandler` (logs du thread de la tâche) + `ctx.log()`, 400 lignes max | idem + `task_id` dans la console (cf. `02` § 3) |
 
@@ -112,7 +112,7 @@ sequenceDiagram
   message, ajout de compétence) ou sont limitées par la prudence ; relancer automatiquement augmenterait le risque
   de blocage (R-1). L'utilisateur relance depuis l'interface.
 - Pas de *dead-letter queue* : une tâche en `échec` conserve `error` et ses logs ; `/api/monitor` liste les 5
-  dernières erreurs. `[CIBLE]` table `tasks` conservée 12 mois.
+  dernières erreurs. Table `tasks` `[ACTUEL]` ; conservation 12 mois par la tâche `purge` `[CIBLE]` (vague 6).
 - Relances **internes** limitées aux appels idempotents en lecture : API France Travail (§ 2.5), SDK Anthropic
   (relances du SDK).
 
@@ -179,9 +179,9 @@ Usages et données transmises :
 | Usage | Données envoyées | Repli |
 | :--- | :--- | :--- |
 | Interprétation du rapport (`interpret`) | `summary_for_interpreter()` : mot-clé, profil résumé, compteurs, 25 termes, 25 compétences, tendances, écart, 10 meilleures offres (titre, entreprise, lieu, score, compétences manquantes, critères), poids du modèle — **agrégats uniquement** | Claude non instanciable (clé ou SDK absent) ou en erreur ⇒ `LocalInterpreter`, `interpreter="local"` dans le rapport (I-11) |
-| Rédaction du CV, du message et des conseils (`_generate_with_claude`) | texte complet du profil de l'utilisateur, profil résumé, offre (champs scorés + **texte intégral**), contexte marché | erreur ou CV vide ⇒ `_generate_locally` (assemblage sans reformulation), `generator="local"` |
+| Rédaction du CV, du message et des conseils (`_generate_with_claude`) | texte complet du profil de l'utilisateur, profil résumé, offre (champs scorés + texte intégral **après `nlp.redact_third_parties`** `[CIBLE]` vague 6), contexte marché | erreur ou CV vide ⇒ `_generate_locally` (assemblage sans reformulation), `generator="local"` |
 
-Écart E-6 : le texte intégral de l'offre sort de la machine pour la rédaction du CV (cf. `02` § 4).
+E-6 tranchée (2026-10-09, option A) : le texte de l'offre sort de la machine pour la rédaction du CV **seulement après** retrait des noms, emails, téléphones et URL de profils de personnes (`nlp.redact_third_parties`, `[CIBLE]` vague 6, cf. `02` § 4).
 `[CIBLE]` : `timeout=120` s explicite sur le client ; aucune donnée `person` ni contact n'est jamais transmise ;
 mention dans la popup Claude/Réglages de ce qui est envoyé.
 
@@ -205,7 +205,9 @@ Conformité prospection B2B `[CIBLE]` (I-12, I-13 ; CPCE art. L.34-5 ; RGPD art.
 - **En-tête** `List-Unsubscribe: <mailto:<expéditeur>?subject=STOP>`. Pas de `List-Unsubscribe-Post` (RFC 8058) :
   il exigerait une URL HTTPS publique, incompatible avec une instance locale. La CNIL attend un moyen de
   désinscription « simple, gratuit et immédiat » ; la réponse par email est le seul canal disponible sans
-  serveur public — à valider (cf. rapport).
+  serveur public. **Décidé le 2026-10-09 (P-5, option A)** : réponse « STOP » + en-tête `List-Unsubscribe` mailto
+  sur chaque email ; l'utilisateur enregistre lui-même l'opposition (`POST /api/suppressions`) ; pas de lecture
+  IMAP, pas de lien HTTPS.
 - **Opposition** : tout « STOP » reçu est saisi par l'utilisateur (`POST /api/suppressions`) ; le contrôle
   `suppression_list` dans la transaction d'envoi rend tout nouvel envoi impossible (409).
 - **Volume** : `message_daily_max` (15), pas de séquence de relances automatiques, un message par action

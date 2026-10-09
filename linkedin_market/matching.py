@@ -11,19 +11,27 @@ modèle apprend ses propres poids et les sauvegarde.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 
 import numpy as np
 
-from . import config, nlp
+from . import nlp
+from .db import utc_iso, utcnow
+from .db.repositories import models as models_repo
+from .db.repositories import user_transaction
 from .models import Item, Profile
 
 FEATURES = [
-    "couverture_competences", "similarite_texte", "similarite_titre", "seniorite",
-    "experience", "teletravail", "localisation_compatible", "freelance",
+    "couverture_competences",
+    "similarite_texte",
+    "similarite_titre",
+    "seniorite",
+    "experience",
+    "teletravail",
+    "localisation_compatible",
+    "freelance",
 ]
 # Poids a priori (sur des critères dans [0, 1]) : la couverture des
 # compétences et la proximité du texte dominent.
@@ -36,7 +44,9 @@ _LOCATION_BLOCKERS = re.compile(
     r"|sur site|on-?site|presentiel|hybride|hybrid|uniquement en france|work permit"
 )
 _LOCATION_OK = re.compile(r"worldwide|anywhere|monde|international|afrique|africa|cote d.ivoire|abidjan|emea|remote")
-_FREELANCE = re.compile(r"freelance|independant|contract(?:or)?|contrat de mission|\bmission\b|consultant|portage|\btjm\b|daily rate|b2b")
+_FREELANCE = re.compile(
+    r"freelance|independant|contract(?:or)?|contrat de mission|\bmission\b|consultant|portage|\btjm\b|daily rate|b2b"
+)
 
 
 def _token_jaccard(a: str, b: str) -> float:
@@ -63,7 +73,7 @@ def build_features(jobs: list[Item], profile: Profile, keyword: str) -> list[Job
     target_title = f"{keyword} {profile.title}"
 
     out = []
-    for job, similarity in zip(jobs, similarities):
+    for job, similarity in zip(jobs, similarities, strict=True):
         full = f"{job.title} {job.text}"
         norm = nlp.normalize(f"{job.location} {full}")
         skills = nlp.extract_skills(full)
@@ -76,23 +86,27 @@ def build_features(jobs: list[Item], profile: Profile, keyword: str) -> list[Job
         if required is None or profile.years_experience is None:
             experience = 0.5
         else:
-            experience = 1.0 if profile.years_experience >= required else max(0.0, 1 - (required - profile.years_experience) / 5)
+            experience = (
+                1.0 if profile.years_experience >= required else max(0.0, 1 - (required - profile.years_experience) / 5)
+            )
 
         if _LOCATION_BLOCKERS.search(norm):
             location = 0.0
         else:
             location = 1.0 if _LOCATION_OK.search(norm) else 0.5
 
-        values = np.array([
-            coverage,
-            min(float(similarity) * 3, 1.0),   # cosinus TF-IDF typiquement < 0,35
-            max(_token_jaccard(target_title, job.title), _token_jaccard(keyword, job.title)),
-            seniority,
-            experience,
-            1.0 if nlp.is_remote(full) else 0.0,
-            location,
-            1.0 if _FREELANCE.search(norm) else 0.0,
-        ])
+        values = np.array(
+            [
+                coverage,
+                min(float(similarity) * 3, 1.0),  # cosinus TF-IDF typiquement < 0,35
+                max(_token_jaccard(target_title, job.title), _token_jaccard(keyword, job.title)),
+                seniority,
+                experience,
+                1.0 if nlp.is_remote(full) else 0.0,
+                location,
+                1.0 if _FREELANCE.search(norm) else 0.0,
+            ]
+        )
         out.append(JobFeatures(job, values, skills, sorted(set(skills) - profile_skills)))
     return out
 
@@ -112,6 +126,8 @@ class MatchingModel:
     train_accuracy: float | None = None
     loss_history: list[float] = field(default_factory=list)
     trained_at: str = ""
+    n_positive: int = 0
+    n_negative: int = 0
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return _sigmoid(((X - self.mean) / self.std) @ self.weights + self.bias)
@@ -120,8 +136,9 @@ class MatchingModel:
         """Poids ramenés à l'échelle des critères bruts (effet d'un passage de 0 à 1)."""
         raw = self.weights / self.std
         return sorted(
-            ({"feature": f, "weight": round(float(w), 3)} for f, w in zip(FEATURES, raw)),
-            key=lambda r: abs(r["weight"]), reverse=True,
+            ({"feature": f, "weight": round(float(w), 3)} for f, w in zip(FEATURES, raw, strict=True)),
+            key=lambda r: abs(r["weight"]),
+            reverse=True,
         )
 
     def fit(self, X: np.ndarray, y: np.ndarray, lr: float = 0.3, epochs: int = 3000, l2: float = 0.05) -> None:
@@ -155,35 +172,64 @@ class MatchingModel:
         self.weights, self.bias = w, float(b)
         self.trained = True
         self.n_labels = n
+        self.n_positive = int(y.sum())
+        self.n_negative = n - self.n_positive
         self.train_accuracy = round(float(((self.predict(X) >= 0.5) == y).mean()), 3)
-        self.trained_at = datetime.now(timezone.utc).isoformat()
+        self.trained_at = utc_iso(utcnow()) or ""
 
     # ---------------------------------------------------------- persistance
     def save(self) -> None:
-        config.ensure_data_dirs()
-        config.MODEL_FILE.write_text(json.dumps({
-            "features": FEATURES, "weights": self.weights.tolist(), "bias": self.bias,
-            "mean": self.mean.tolist(), "std": self.std.tolist(), "n_labels": self.n_labels,
-            "train_accuracy": self.train_accuracy, "loss_history": self.loss_history,
-            "trained_at": self.trained_at,
-        }, indent=2), encoding="utf-8")
+        """Enregistre une nouvelle version, active (``matching_models`` : une seule active, versions croissantes).
+
+        ``weights`` (jsonb) porte les 8 poids, le biais et la normalisation nécessaire à la prédiction.
+        """
+        trained_at = datetime.fromisoformat(self.trained_at) if self.trained_at else utcnow()
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.astimezone()
+        values = {
+            "weights": {
+                "weights": self.weights.tolist(),
+                "bias": self.bias,
+                "mean": self.mean.tolist(),
+                "std": self.std.tolist(),
+                "train_accuracy": self.train_accuracy,
+                "loss_history": self.loss_history,
+            },
+            "feature_names": list(FEATURES),
+            "n_positive": self.n_positive,
+            "n_negative": self.n_negative,
+            "learned": self.trained,
+            "trained_at": trained_at,
+        }
+        with user_transaction() as (s, uid):
+            models_repo.activate_new_version(s, uid, values)
 
     @classmethod
-    def load(cls) -> "MatchingModel":
-        if not config.MODEL_FILE.exists():
-            return cls()
-        data = json.loads(config.MODEL_FILE.read_text(encoding="utf-8"))
-        if data.get("features") != FEATURES:   # critères modifiés : modèle obsolète
-            return cls()
+    def load(cls) -> MatchingModel:
+        """Modèle actif ; poids a priori s'il n'y en a pas ou si les critères ont changé."""
+        with user_transaction() as (s, uid):
+            row = models_repo.active_model(s, uid)
+            if row is None or row.feature_names != FEATURES or not row.learned:
+                return cls()
+            data, n_positive, n_negative, trained_at = row.weights, row.n_positive, row.n_negative, row.trained_at
         return cls(
-            weights=np.array(data["weights"]), bias=data["bias"], mean=np.array(data["mean"]),
-            std=np.array(data["std"]), trained=True, n_labels=data["n_labels"],
-            train_accuracy=data.get("train_accuracy"), loss_history=data.get("loss_history", []),
-            trained_at=data.get("trained_at", ""),
+            weights=np.array(data["weights"]),
+            bias=data["bias"],
+            mean=np.array(data["mean"]),
+            std=np.array(data["std"]),
+            trained=True,
+            n_labels=n_positive + n_negative,
+            train_accuracy=data.get("train_accuracy"),
+            loss_history=data.get("loss_history", []),
+            trained_at=utc_iso(trained_at) or "",
+            n_positive=n_positive,
+            n_negative=n_negative,
         )
 
 
-def train_from_labels(profile: Profile, keyword: str, labels: dict[str, int], labeled_items: dict[str, Item]) -> MatchingModel | None:
+def train_from_labels(
+    profile: Profile, keyword: str, labels: dict[str, int], labeled_items: dict[str, Item]
+) -> MatchingModel | None:
     """Réentraîne sur toutes les annotations ; None si pas assez d'exemples."""
     items = [labeled_items[i] for i in labels if i in labeled_items]
     y = np.array([labels[i.id] for i in items], dtype=float)
@@ -201,22 +247,29 @@ def score_jobs(features: list[JobFeatures], model: MatchingModel) -> list[dict]:
         return []
     scores = model.predict(np.vstack([f.values for f in features]))
     rows = []
-    for f, score in zip(features, scores):
-        criteria = {name: round(float(v), 3) for name, v in zip(FEATURES, f.values)}
-        rows.append({
-            "id": f.item.id, "title": f.item.title, "company": f.item.company, "url": f.item.url,
-            "location": f.item.location, "posted_at": f.item.posted_at,
-            "score": round(float(score) * 100, 1),
-            "criteria": criteria,
-            "job_skills": f.job_skills, "missing_skills": f.missing_skills,
-            "matched_skills": [s for s in f.job_skills if s not in f.missing_skills],
-            # Fiche de lecture rapide de l'offre.
-            "summary": nlp.key_sentences(f.item.text),
-            "years_required": nlp.extract_years(f.item.text),
-            "seniority_required": nlp.extract_seniority(f.item.title) or nlp.extract_seniority(f.item.text[:600]),
-            "remote": bool(criteria["teletravail"]),
-            "freelance": bool(criteria["freelance"]),
-        })
+    for f, score in zip(features, scores, strict=True):
+        criteria = {name: round(float(v), 3) for name, v in zip(FEATURES, f.values, strict=True)}
+        rows.append(
+            {
+                "id": f.item.id,
+                "title": f.item.title,
+                "company": f.item.company,
+                "url": f.item.url,
+                "location": f.item.location,
+                "posted_at": f.item.posted_at,
+                "score": round(float(score) * 100, 1),
+                "criteria": criteria,
+                "job_skills": f.job_skills,
+                "missing_skills": f.missing_skills,
+                "matched_skills": [s for s in f.job_skills if s not in f.missing_skills],
+                # Fiche de lecture rapide de l'offre.
+                "summary": nlp.key_sentences(f.item.text),
+                "years_required": nlp.extract_years(f.item.text),
+                "seniority_required": nlp.extract_seniority(f.item.title) or nlp.extract_seniority(f.item.text[:600]),
+                "remote": bool(criteria["teletravail"]),
+                "freelance": bool(criteria["freelance"]),
+            }
+        )
     rows.sort(key=lambda r: r["score"], reverse=True)
     return rows
 
@@ -235,7 +288,8 @@ def skill_gap(scored: list[dict], profile: Profile) -> dict:
     owned = set(profile.skills)
     rows = sorted(
         ({"skill": s, "weight": round(w / total, 3), "owned": s in owned} for s, w in demand.items()),
-        key=lambda r: r["weight"], reverse=True,
+        key=lambda r: r["weight"],
+        reverse=True,
     )
     covered = sum(r["weight"] for r in rows if r["owned"])
     return {

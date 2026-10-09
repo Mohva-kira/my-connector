@@ -12,3 +12,20 @@ resumer
 tenant_*.json
 __pycache__/
 *.pyc
+# Roues Python téléchargées en local pour le build Docker hors-ligne
+# (services/email_analyzer/deploy/fetch-wheels.sh) : ~400 Mo, jamais versionnées.
+services/email_analyzer/wheels/*.whl
+services/email_analyzer/wheels/.requirements.sha256
+
+# linkedin_market : cookies de session LinkedIn, données scrapées, annotations,
+# rapports et profil personnel — données personnelles, jamais versionnées.
+linkedin_market_data/
+/profil.*
+/profile.*
+/cv.pdf
+/CV.pdf
+
+# linkedin_market web : dépendances et build du frontend
+linkedin_market/web/frontend/node_modules/
+linkedin_market/web/frontend/dist/
+linkedin_market/tests/fixtures/_work/

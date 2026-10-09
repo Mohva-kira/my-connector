@@ -53,7 +53,7 @@ def skill_demand(items: list[Item]) -> list[dict]:
     """Part des éléments qui citent chaque compétence, par source."""
     by_source: dict[str, list[Item]] = {}
     for item in items:
-        by_source.setdefault(item.source, []).append(item)
+        by_source.setdefault(item.kind, []).append(item)
     counts: dict[str, Counter] = {s: Counter() for s in by_source}
     for source, group in by_source.items():
         for item in group:
@@ -83,8 +83,10 @@ def rising_terms(items: list[Item], today: date | None = None, limit: int = 20) 
     older = [i for i in items if i.posted_at < split]
     result = {"recent_docs": len(recent), "older_docs": len(older), "terms": [], "skills": []}
     if len(recent) < 3 or len(older) < 3:
-        result["note"] = ("Pas assez de données datées sur les deux périodes : relance la collecte "
-                          "dans quelques jours pour mesurer l'évolution.")
+        result["note"] = (
+            "Pas assez de données datées sur les deux périodes : relance la collecte "
+            "dans quelques jours pour mesurer l'évolution."
+        )
         return result
 
     def growth(counter_recent: Counter, counter_old: Counter, keys) -> list[dict]:

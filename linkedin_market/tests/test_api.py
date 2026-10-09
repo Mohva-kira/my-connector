@@ -1,26 +1,65 @@
+import copy
 import json
+import re
 
 import pytest
 from fastapi.testclient import TestClient
 
-from linkedin_market import application, config
+from linkedin_market import application, config, report, storage
+from linkedin_market.models import Item
 from linkedin_market.web.app import create_app
 from linkedin_market.web.tasks import TaskManager
 
+pytestmark = pytest.mark.db  # réglages, historique et rapports en PostgreSQL (vague 1)
+
 JOB = {
-    "id": "job:111", "title": "Senior Python Developer", "company": "Acme", "url": "https://www.linkedin.com/jobs/view/111/",
-    "location": "Remote", "posted_at": "2026-10-01", "score": 82.0, "criteria": {}, "job_skills": ["python", "aws"],
-    "missing_skills": ["aws"], "matched_skills": ["python"], "summary": ["Build APIs."], "years_required": 5,
-    "seniority_required": "senior", "remote": True, "freelance": False,
+    "id": "job:111",
+    "title": "Senior Python Developer",
+    "company": "Acme",
+    "url": "https://www.linkedin.com/jobs/view/111/",
+    "location": "Remote",
+    "posted_at": "2026-10-01",
+    "score": 82.0,
+    "criteria": {},
+    "job_skills": ["python", "aws"],
+    "missing_skills": ["aws"],
+    "matched_skills": ["python"],
+    "summary": ["Build APIs."],
+    "years_required": 5,
+    "seniority_required": "senior",
+    "remote": True,
+    "freelance": False,
 }
 REPORT = {
-    "generated_at": "2026-10-07T10:00:00", "request": {"keyword": "python", "location": "", "remote_only": True,
-        "caution": "normal", "max_items": 30, "profile_source": "auto", "extra_skills": [], "years_experience": None, "seniority": ""},
+    "generated_at": "2026-10-07T10:00:00",
+    "request": {
+        "keyword": "python",
+        "location": "",
+        "remote_only": True,
+        "caution": "normal",
+        "max_items": 30,
+        "profile_source": "auto",
+        "extra_skills": [],
+        "years_experience": None,
+        "seniority": "",
+    },
     "profile": {"origin": "x", "title": "Dev", "skills": ["python"], "years_experience": 10, "seniority": "senior"},
-    "counts": {"job": 1, "post": 0, "person": 0}, "top_jobs": [JOB], "min_labels": 6,
-    "model": {"trained": False, "n_labels": 0, "train_accuracy": None, "importance": [], "loss_history": [], "trained_at": None},
+    "counts": {"job": 1, "post": 0, "person": 0},
+    "top_jobs": [JOB],
+    "min_labels": 6,
+    "model": {
+        "trained": False,
+        "n_labels": 0,
+        "train_accuracy": None,
+        "importance": [],
+        "loss_history": [],
+        "trained_at": None,
+    },
     "gap": {"skills": [], "missing": [{"skill": "aws", "weight": 0.5, "owned": False}], "coverage": 50.0},
-    "rising": {"skills": [{"term": "docker", "growth": 1.5}]}, "skill_demand": [], "top_terms": [], "weekly": {},
+    "rising": {"skills": [{"term": "docker", "growth": 1.5}]},
+    "skill_demand": [],
+    "top_terms": [],
+    "weekly": {},
 }
 
 
@@ -28,20 +67,38 @@ REPORT = {
 def client(tmp_path, monkeypatch):
     root = tmp_path / "project"
     root.mkdir()
-    (root / "profil.json").write_text(json.dumps({"title": "Dev", "skills": ["python"], "text": "Dev Python"}), encoding="utf-8")
+    (root / "profil.json").write_text(
+        json.dumps({"title": "Dev", "skills": ["python"], "text": "Dev Python"}), encoding="utf-8"
+    )
     monkeypatch.setattr(config, "PROJECT_ROOT", root)
     # Sans identifiants, aucune action ne lance de navigateur (ajout de compétence compris).
     monkeypatch.delenv("LINKEDIN_EMAIL", raising=False)
     monkeypatch.delenv("LINKEDIN_PASSWORD", raising=False)
     manager = TaskManager(persist=False)
-    with TestClient(create_app(tasks=manager, token="secret"), base_url="http://127.0.0.1:8765",
-                    headers={"X-Local-Token": "secret"}) as c:
+    with TestClient(
+        create_app(tasks=manager, token="secret"), base_url="http://127.0.0.1:8765", headers={"X-Local-Token": "secret"}
+    ) as c:
         yield c
     manager.shutdown()
 
 
-def write_report():
-    (config.REPORTS_DIR / "python-20261007-1000.json").write_text(json.dumps(REPORT), encoding="utf-8")
+def write_report() -> str:
+    """Rapport « python » en base (et son HTML), avec l'offre job:111 dans l'historique ; renvoie son nom."""
+    storage.append_items(
+        [
+            Item(
+                kind="job",
+                id="job:111",
+                url=JOB["url"],
+                title=JOB["title"],
+                text="Build APIs in Python.",
+                keyword="python",
+                company="Acme",
+                posted_at="2026-10-01",
+            )
+        ]
+    )
+    return report.write(copy.deepcopy(REPORT))[1].name
 
 
 def test_guard_rejects_bad_host_and_token(tmp_path):
@@ -60,7 +117,12 @@ def test_guard_rejects_bad_host_and_token(tmp_path):
 
 
 def test_settings_roundtrip_and_validation(client):
-    assert client.put("/api/settings", json={"keyword": "Data Engineer", "caution": "prudent", "apply_daily_max": 5}).json()["keyword"] == "Data Engineer"
+    assert (
+        client.put(
+            "/api/settings", json={"keyword": "Data Engineer", "caution": "prudent", "apply_daily_max": 5}
+        ).json()["keyword"]
+        == "Data Engineer"
+    )
     assert client.get("/api/settings").json()["apply_daily_max"] == 5
     assert client.put("/api/settings", json={"caution": "fou"}).status_code == 422
     assert client.put("/api/settings", json={"apply_daily_max": -1}).status_code == 422
@@ -93,6 +155,18 @@ def test_jobs_labels_and_filters(client):
     assert client.get("/api/jobs?q=acme").json()["jobs"]
     assert client.put("/api/jobs/job:111/label", json={"value": 3}).status_code == 422
     assert client.get("/api/jobs/job:999").status_code == 404
+    assert client.put("/api/jobs/job:111/label", json={"value": None}).json()["n_labels"] == 0
+    assert storage.load_labels() == {}
+
+
+def test_label_d_une_offre_absente_de_l_historique(client):
+    """L'annotation d'une offre purgée n'est plus perdue en silence : 404 actionnable, rien d'écrit."""
+    write_report()
+    for value in (1, 0, None):
+        response = client.put("/api/jobs/job:4242/label", json={"value": value})
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Cette offre n'est plus dans l'historique : annotation impossible."
+    assert storage.load_labels() == {}
 
 
 def test_legacy_application_roundtrip_and_status_rules(client, data_dir):
@@ -100,22 +174,43 @@ def test_legacy_application_roundtrip_and_status_rules(client, data_dir):
     folder.mkdir(parents=True)
     (folder / "cv.md").write_text("# CV", encoding="utf-8")
     (folder / "message.txt").write_text("Bonjour", encoding="utf-8")
-    application.save_applications({"job:111": {
-        "title": "Dev", "company": "Acme", "url": "https://www.linkedin.com/jobs/view/111/", "score": 80,
-        "folder": str(folder), "generator": "local", "status": "postulée", "prepared_at": "2026-10-06T10:00:00"}})
+    application.save_applications(
+        {
+            "job:111": {
+                "title": "Dev",
+                "company": "Acme",
+                "url": "https://www.linkedin.com/jobs/view/111/",
+                "score": 80,
+                "folder": str(folder),
+                "generator": "local",
+                "status": "postulée",
+                "prepared_at": "2026-10-06T10:00:00",
+            }
+        }
+    )
     detail = client.get("/api/applications/job:111").json()
     assert detail["contacts"] == [] and detail["history"] == [] and detail["message"] == "Bonjour"
     patched = client.patch("/api/applications/job:111", json={"message": "Salut", "cv": "# Nouveau"}).json()
     assert patched["message"] == "Salut" and "Nouveau" in (folder / "cv.html").read_text(encoding="utf-8")
     application.advance_status("job:111", "contactée")
-    assert application.get_application("job:111")["status"] == "postulée"      # jamais rétrogradé
+    assert application.get_application("job:111")["status"] == "postulée"  # jamais rétrogradé
     application.advance_status("job:111", "entretien")
     assert application.get_application("job:111")["status"] == "entretien"
     assert client.patch("/api/applications/job:111", json={"status": "n'importe quoi"}).status_code == 422
     bad = client.patch("/api/applications/job:111", json={"contacts": [{"email": "pas-un-email"}]})
     assert bad.status_code == 422
-    ok = client.patch("/api/applications/job:111", json={"contacts": [{"name": "Ana", "email": "ana@acme.com"}]})
-    assert ok.json()["contacts"][0]["email"] == "ana@acme.com"
+    ok = client.patch("/api/applications/job:111", json={"contacts": [{"full_name": "Ana", "email": "ana@acme.com"}]})
+    assert ok.json()["contacts"][0] == {
+        "full_name": "Ana",
+        "profile_url": "",
+        "email": "ana@acme.com",
+        "headline": "",
+        "source": "manuel",
+    }
+    # C-4 : « name » n'est plus lu (le nom est perdu, pas d'erreur).
+    legacy = client.patch("/api/applications/job:111", json={"contacts": [{"name": "Ana", "email": "ana@acme.com"}]})
+    assert legacy.json()["contacts"][0]["full_name"] == ""
+    assert client.patch("/api/applications/job:111", json={"contacts": [{"source": "linkedin"}]}).status_code == 422
     assert client.get("/api/applications/job:404").status_code == 404
 
 
@@ -127,6 +222,7 @@ def test_application_folder_outside_data_dir_is_refused(client, tmp_path):
 def test_monitor_and_status_shape(client):
     write_report()
     monitor = client.get("/api/monitor").json()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", monitor["generated_at"])  # C-1
     assert monitor["funnel"][0] == {"step": "Offres analysées", "count": 1}
     assert monitor["quotas"]["apply"]["limit"] == 10 and len(monitor["activity"]) == 14
     status = client.get("/api/status").json()
@@ -143,13 +239,18 @@ def test_added_skill_is_synced_to_linkedin(client, monkeypatch):
     from linkedin_market.web import services
 
     unavailable = client.post("/api/profile/skills", json={"skill": "Go"}).json()
-    assert "go" in unavailable["skills"] and unavailable["linkedin_sync"]["status"] == "unavailable"   # ajout local conservé
+    assert (
+        "go" in unavailable["skills"] and unavailable["linkedin_sync"]["status"] == "unavailable"
+    )  # ajout local conservé
 
     calls = []
     monkeypatch.setenv("LINKEDIN_EMAIL", "me@example.com")
     monkeypatch.setenv("LINKEDIN_PASSWORD", "x")
-    monkeypatch.setattr(services, "sync_skill_to_linkedin",
-                        lambda ctx, skill: calls.append(skill) or {"skill": skill, "linkedin_name": "Kubernetes", "state": "ajoutée"})
+    monkeypatch.setattr(
+        services,
+        "sync_skill_to_linkedin",
+        lambda ctx, skill: calls.append(skill) or {"skill": skill, "linkedin_name": "Kubernetes", "state": "ajoutée"},
+    )
     queued = client.post("/api/profile/skills", json={"skill": "Kubernetes"}).json()
     assert queued["linkedin_sync"]["status"] == "queued" and queued["linkedin_sync"]["task"]["kind"] == "profile_skill"
     task_id = queued["linkedin_sync"]["task"]["id"]
