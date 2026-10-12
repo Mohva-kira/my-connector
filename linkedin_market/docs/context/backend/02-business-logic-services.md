@@ -37,7 +37,7 @@ Fonctions de cas d'usage, toutes de signature `(ctx: TaskContext, …) -> dict` 
 
 Règle : **toute précondition vérifiée par le routeur est revérifiée au début de la tâche** (la tâche peut attendre
 le verrou navigateur plusieurs minutes, l'état a pu changer). C'est déjà le cas pour les plafonds et le blocage ;
-`[ACTUEL]` (vague 3) idem pour le consentement (I-16, `consent.require`) ; `[CIBLE]` pour l'opposition (I-13).
+`[ACTUEL]` (vague 3) idem pour le consentement (I-16, `consent.require`) ; `[ACTUEL]` (vague 4) pour l'opposition (I-13, `suppression_list`).
 
 Cible : un module par cas d'usage sous `linkedin_market/services/` (`analysis.py`, `applications.py`,
 `outreach.py`, `sources.py`, `retention.py`), chacun recevant une `Session` SQLAlchemy et un `TaskContext`.
@@ -87,7 +87,8 @@ qui enregistre l'événement `blocked` puis lève.
 | `outreach.OutreachError` | validation du destinataire / test SMTP | 422 / 502 |
 | `ValueError` de `folder_of` | dossier hors `applications/` | 500 |
 | `consent.SourceConsentRequired` `[ACTUEL]` | `consent.require` (gestionnaire `web/app.py`) | 428 |
-| `RecipientSuppressed` `[CIBLE]` | contrôle `suppression_list` | 409 |
+| `outreach.RecipientSuppressed(OutreachError)` `[ACTUEL]` (vague 4) | `services.reserve_message` / `_confirm_reservation` (`suppression_list`, contact `opposed_at`) | 409 (API) ; réservation `échec` (tâche) |
+| `suppressions.OpposedContact(ValueError)` `[ACTUEL]` (vague 4, alias `application.ContactOpposed`) | `replace_contacts` (coordonnée opposée) | 422 |
 | Toute exception **dans une tâche** | — | tâche `échec`, `error = str(exc)` (3 lignes de traceback dans `logs`) |
 
 ### 1.6 Repository / Data Access Layer
@@ -192,11 +193,12 @@ Résolus et retirés à l'acceptation de la vague 1 (2026-10-09) : E-1, E-2 (slu
 `UNIQUE (user_id, slug)`), E-8 (écritures en base), E-9 (`timestamptz` UTC, C-1), E-15 (noms de l'ERD), E-16
 (`person` sans texte, `CHECK`), E-19 (404 sur HTML absent). Résolus et retirés à l'acceptation de la vague 2
 (2026-10-09) : E-3, E-4, E-5, E-7, E-10, E-11, E-12, E-20, E-22 (détail de chaque correction dans `01` § 1.2,
-G-1 à G-12, et `05` §§ 1, 2). Les numéros ne sont pas réattribués.
+G-1 à G-12, et `05` §§ 1, 2). Résolu et retiré à l'acceptation de la vague 4 (2026-10-12) : E-17 (`01` § 5.7.1, `05` § 2.4).
+Point mineur ouvert : `purge_after` vaut `now() + interval '3 years'` (défaut SQL, `03` § 3.3 bis) alors que la doc parle de
+1095 jours ; écart d'au plus 1 jour (année bissextile), sans conséquence de conformité, à aligner lors de la vague 6 (purge). Les numéros ne sont pas réattribués.
 
 | # | Écart | Référence | Correction proposée |
 | :--- | :--- | :--- | :--- |
 | E-6 | La génération de CV par Claude envoie le **profil source complet** et le **texte intégral de l'offre** (`application._generate_with_claude`), qui peut contenir des noms de personnes. | I-11 | **Tranchée le 2026-10-09 (option A)** : I-11 = « jamais de donnée de tiers identifiable » ; profil de l'utilisateur admis ; texte de l'offre passé par `nlp.redact_third_parties(text, known_names)` avant envoi (emails, téléphones, URL `linkedin.com/in/…`, noms des contacts de la candidature, motifs LinkedIn « X et des millions… », « relations travaillent ici » ⇒ `[personne]`). Pas de nouvelle version de la popup de risques. À livrer en vague 6. |
-| E-17 | Le brouillon de message (`message_draft`) n'ajoute ni origine de l'adresse ni mention de désinscription ; aucune `suppression_list`. | I-12, I-13 | Pied de message imposé + contrôle (cf. `05` § 2.4). |
 | E-18 | Les prompts (`interpreter.SYSTEM_PROMPT`, `application.CV_SYSTEM_PROMPT`), les libellés (`FEATURE_LABELS`) et le CV local codent en dur « freelance basé à Abidjan », « GMT ». | Outil open source multi-utilisateurs | Réglages `home_location` / `timezone` injectés dans les prompts. |
 | E-21 | Lot 1 `02` § 6 : l'événement `blocked` porterait `until` ; le code n'enregistre que `where` (+ `job`) et calcule `until` à la lecture. | lot 1 `02` § 6 | Corriger la table du lot 1 (calcul à la lecture conservé). Toujours ouvert : `until` reste calculé à la lecture (`activity.py`), pas stocké. |

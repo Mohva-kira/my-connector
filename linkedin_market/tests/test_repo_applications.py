@@ -121,12 +121,15 @@ def test_contacts_full_name_et_sources(entry, client):
         assert [r.id for r in rows] == [jane_id] and rows[0].legal_basis == "interet_legitime"
     # Ancien format interne (« name », source « linkedin ») converti.
     application.update_application("job:5", contacts=[{"name": "John", "source": "linkedin"}])
-    assert application.get_application("job:5")["contacts"][0] == {
+    john = application.get_application("job:5")["contacts"][0]
+    assert ISO_UTC.match(john.pop("collected_at"))  # V4-8 : lecture seule
+    assert john == {
         "full_name": "John",
         "profile_url": "",
         "email": None,
         "headline": "",
         "source": "linkedin_equipe_recrutement",
+        "opposed": False,
     }
 
 
@@ -151,3 +154,31 @@ def test_filtre_user_id(entry, db_user_id):
         other = users.ensure_user(s, "autre@example.org")
         assert applications_repo.get(s, other, "job:5") is None and applications_repo.list_all(s, other) == []
         assert applications_repo.get(s, db_user_id, "job:5") is not None
+
+
+def test_i14_mark_sent_pose_last_contacted_at_et_purge_a_trois_ans(entry):
+    """Non-régression (vague 4) : l'envoi repousse la purge du contact lié à 3 ans (I-14)."""
+    from datetime import timedelta
+
+    from linkedin_market.db.repositories import outreach as outreach_repo
+    from linkedin_market.db.repositories import user_transaction
+
+    application.update_application("job:5", contacts=[{"full_name": "Jane", "email": "jane@acme.com"}])
+    with user_transaction() as (s, uid):
+        contact = s.execute(select(models.CompanyContact)).scalar_one()
+        assert contact.last_contacted_at is None
+        message_id = outreach_repo.insert_confirmed(
+            s,
+            uid,
+            contact.application_id,
+            {"channel": "email", "recipient": "jane@acme.com", "subject": "s", "body": "b", "contact_id": contact.id},
+        )
+        outreach_repo.mark_sent(s, uid, message_id, "<id@x>")
+        s.expire_all()
+        contact = s.execute(select(models.CompanyContact)).scalar_one()
+        assert contact.last_contacted_at is not None
+        assert (
+            contact.purge_after - contact.last_contacted_at
+            == outreach_repo.CONTACT_RETENTION
+            == timedelta(days=3 * 365)
+        )

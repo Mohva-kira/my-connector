@@ -57,7 +57,7 @@ npx tsc --noEmit       # contrôle de types seul
 docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
 # LM_DATABASE_URL (et non DATABASE_URL, déjà lu par email_analyzer dans le même .env)
 
-# Tests (hors ligne, ~2 min, 212 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
+# Tests (hors ligne, ~2 min, 252 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
 # sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré). Depuis la
 # vague 2, conftest retire du processus LINKEDIN_*/SMTP_*/ANTHROPIC_API_KEY (identifiants réels du .env racine) :
 # aucune tâche lancée par un test ne peut se connecter à un vrai service.
@@ -110,9 +110,12 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
   par Claude (E-6, décidé le 2026-10-09) : profil de l'utilisateur + texte de l'offre **après**
   `nlp.redact_third_parties` (noms, emails, téléphones, URL de profils de personnes remplacés par `[personne]`) `[CIBLE]`.
 - **I-12** Prospection B2B (CPCE L.34-5, CNIL) : destinataire joint dans ses fonctions, objet lié à son offre,
-  origine de l'adresse et moyen de désinscription simple et gratuit dans chaque message.
+  origine de l'adresse et moyen de désinscription simple et gratuit dans chaque message `[ACTUEL]` depuis la
+  vague 4 : pied imposé ajouté par le serveur (`outreach.compose_footer`, jamais saisi par l'utilisateur) +
+  `List-Unsubscribe` mailto (pas de `List-Unsubscribe-Post`, pas d'IMAP).
 - **I-13** Base légale `interet_legitime` + source sur chaque contact ; une entrée de `suppression_list` bloque
-  tout envoi, définitivement.
+  tout envoi, définitivement `[ACTUEL]` depuis la vague 4 : 409 décidé dans la transaction de réservation avant le
+  429, revérifié au début de la tâche ; `POST /api/suppressions` minimise les contacts (`opposed_at`).
 - **I-14** Contact entreprise supprimé 3 ans après le dernier contact.
 - **I-15** Identifiants, mots de passe SMTP, clés API, cookies, jeton local : jamais versionnés ni journalisés ;
   cookies valables 72 h.
@@ -176,8 +179,8 @@ touche un invariant ou un risque se soumet à l'utilisateur avant le code.
 - Lancer la suite complète avant de conclure ; `npx tsc --noEmit` (ou `npm run build`) après toute modification du front.
 
 ## Marqueurs `[ACTUEL]` / `[CIBLE]`
-`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (nouvelles sources, popup de risques,
-opposition, purge…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie
+`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (nouvelles sources,
+import manuel, purge…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie
 l'existant (le code a pu évoluer) ;
 une fois livré, passe la mention en `[ACTUEL]` dans les docs concernées et retire l'écart `E-n` correspondant.
 

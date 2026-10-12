@@ -1,10 +1,15 @@
+import email
+import email.policy
 import re
 import time
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select, update
 
 from linkedin_market import activity, application, browser, config, outreach, session, settings
+from linkedin_market.db import models
+from linkedin_market.db import session as db_session
 from linkedin_market.tests.browser_fixtures import url_of
 from linkedin_market.web.app import create_app
 from linkedin_market.web.tasks import TaskManager
@@ -190,3 +195,116 @@ def test_contact_lookup_end_to_end(client, monkeypatch, accept_risks):
     assert "J. D. : j***@acme.com" in logs and not any(x in logs for x in ("Jane Doe", "John Roe", "jane@acme.com"))
     saved = {c["full_name"]: c for c in application.get_application("job:1")["contacts"]}
     assert saved["Jane Doe"]["email"] == "j.manual@acme.com" and saved["John Roe"]["email"] is None
+
+
+# ------------------------------------------------- vague 4 : pied imposé et opposition
+def parsed(raw: str):
+    return email.message_from_string(raw, policy=email.policy.default)
+
+
+def stored_messages() -> list[models.OutreachMessage]:
+    with db_session.transaction() as s:
+        return list(s.execute(select(models.OutreachMessage)).scalars())
+
+
+def test_email_porte_le_pied_et_l_en_tete_list_unsubscribe(client, monkeypatch, smtp_server):
+    use_smtp(monkeypatch, smtp_server)
+    footer = client.get("/api/applications/job:1/message-draft", params={"to": "jane@acme.com"}).json()["footer"]
+    task = client.post("/api/applications/job:1/messages", json={**MAIL, "confirm": True, "attach_cv": False}).json()
+    assert wait_done(client, task["id"])["status"] == "terminée"
+    sent = parsed(smtp_server.mails[0])
+    assert sent["List-Unsubscribe"] == "<mailto:me@example.com?subject=STOP>"
+    assert sent["List-Unsubscribe-Post"] is None
+    text = sent.get_body().get_content().replace("\r\n", "\n")
+    assert text.rstrip("\n") == "Bonjour Jane\n\n" + footer  # corps + « \n\n » + pied
+    (row,) = stored_messages()
+    assert row.body == "Bonjour Jane\n\n" + footer  # le texte réellement envoyé
+    assert row.status == "envoyé"
+
+
+def test_pied_saisi_par_le_client_n_est_pas_double(client, monkeypatch, smtp_server):
+    use_smtp(monkeypatch, smtp_server)
+    footer = client.get("/api/applications/job:1/message-draft", params={"to": "jane@acme.com"}).json()["footer"]
+    body = {**MAIL, "confirm": True, "attach_cv": False, "body": "Bonjour Jane\n\n" + footer}
+    task = client.post("/api/applications/job:1/messages", json=body).json()
+    assert wait_done(client, task["id"])["status"] == "terminée"
+    text = parsed(smtp_server.mails[0]).get_body().get_content().replace("\r\n", "\n")
+    assert text.count("Pour ne plus recevoir") == 1 and text.rstrip("\n") == "Bonjour Jane\n\n" + footer
+    assert stored_messages()[0].body.count("Pour ne plus recevoir") == 1
+
+
+def test_pied_selon_l_origine_du_contact(client, monkeypatch, smtp_server):
+    use_smtp(monkeypatch, smtp_server)
+    application.update_application(
+        "job:1",
+        contacts=[{"full_name": "Jane", "email": "jane@acme.com", "source": "linkedin_equipe_recrutement"}],
+    )
+    task = client.post("/api/applications/job:1/messages", json={**MAIL, "confirm": True, "attach_cv": False}).json()
+    assert wait_done(client, task["id"])["status"] == "terminée"
+    assert "provient de l'équipe de recrutement affichée sur l'offre LinkedIn." in stored_messages()[0].body
+
+
+def test_smtp_test_sans_list_unsubscribe(client, monkeypatch, smtp_server):
+    use_smtp(monkeypatch, smtp_server)
+    assert client.post("/api/smtp/test", json={}).status_code == 200
+    sent = parsed(smtp_server.mails[0])
+    assert sent["List-Unsubscribe"] is None and "STOP" not in sent.get_body().get_content()
+
+
+def test_destinataire_oppose_409_sans_reservation_ni_envoi(client, monkeypatch, smtp_server):
+    use_smtp(monkeypatch, smtp_server)
+    application.record_opposition("Jane@Acme.com", "refus_oral")
+    response = client.post("/api/applications/job:1/messages", json={**MAIL, "confirm": True})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Ce destinataire a demandé à ne plus être contacté."
+    assert stored_messages() == [] and not getattr(smtp_server, "mails", [])
+    assert activity.count_today("message_email") == 0
+
+
+def test_409_oppose_avant_429_meme_plafond_atteint(client, monkeypatch, smtp_server):
+    use_smtp(monkeypatch, smtp_server)
+    settings.save_settings({"message_daily_max": 1})
+    activity.record("message_linkedin", job="job:2")  # plafond atteint
+    application.record_opposition("jane@acme.com", "désinscription")
+    assert client.post("/api/applications/job:1/messages", json={**MAIL, "confirm": True}).status_code == 409
+    other = {**MAIL, "to": "autre@acme.com", "confirm": True}
+    assert client.post("/api/applications/job:1/messages", json=other).status_code == 429
+
+
+def test_contact_lie_oppose_bloque_aussi(client, monkeypatch, smtp_server):
+    use_smtp(monkeypatch, smtp_server)
+    application.update_application("job:1", contacts=[{"full_name": "Jane", "email": "jane@acme.com"}])
+    with db_session.transaction() as s:  # filet de sécurité : opposed_at posé sans empreinte
+        s.execute(update(models.CompanyContact).values(opposed_at=func.now()))
+    response = client.post("/api/applications/job:1/messages", json={**MAIL, "confirm": True})
+    assert response.status_code == 409 and stored_messages() == []
+
+
+def test_linkedin_pied_ajoute_par_le_serveur(client, monkeypatch, accept_risks):
+    accept_risks()
+    monkeypatch.setattr(session, "login", lambda *a, **k: None)
+
+    class Driver:
+        def quit(self) -> None:
+            pass
+
+    monkeypatch.setattr(browser, "create_driver", Driver)
+    seen = {}
+
+    def fake_send(driver, url, body, caution, *, footer, check, timeout=12.0):
+        seen.update(url=url, body=body, footer=footer)
+        return {"channel": "linkedin", "mode": "message", "to": url, "truncated": False}
+
+    monkeypatch.setattr(outreach, "send_linkedin_message", fake_send)
+    url = "https://www.linkedin.com/in/jane-doe/"
+    footer = client.get("/api/applications/job:1/message-draft", params={"to": url}).json()["footer"]
+    body = {"channel": "linkedin", "to": url, "body": "Bonjour Jane", "confirm": True}
+    task = client.post("/api/applications/job:1/messages", json=body).json()
+    assert wait_done(client, task["id"])["status"] == "terminée"
+    assert (
+        seen["footer"]
+        == footer
+        == "Au sujet de votre offre « Senior Python Developer ». Pour ne plus être contacté(e), répondez STOP."
+    )
+    assert seen["body"] == "Bonjour Jane"
+    assert stored_messages()[0].body == "Bonjour Jane\n\n" + footer

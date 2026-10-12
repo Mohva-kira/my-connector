@@ -142,7 +142,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | Code | Usage réel |
 | :--- | :--- |
 | `200 OK` | Lecture, mise à jour synchrone (`PUT /api/settings`, `PATCH /api/applications/{id}`, `PUT /api/jobs/{id}/label`…), action synchrone (`POST /api/block/clear`, `/api/smtp/test`, `/api/tasks/{id}/cancel`, `/api/tasks/{id}/answer`, `/api/profile/skills`). |
-| `201 Created` | `[CIBLE]` `POST /api/sources/{code}/consent`, `POST /api/suppressions`, `POST /api/items/import`. Aucune route actuelle ne renvoie 201. |
+| `201 Created` | `[ACTUEL]` `POST /api/sources/{code}/consent`, `POST /api/suppressions` ; `[CIBLE]` `POST /api/items/import`. Aucune route actuelle ne renvoie 201. |
 | `202 Accepted` | Tâche créée : `POST /api/runs`, `/api/runs/rescore`, `/api/model/train`, `/api/jobs/{id}/prepare`, `/api/profile/import-linkedin`, `/api/applications/{id}/apply`, `/contacts/lookup`, `/messages`. |
 | `204 No Content` | `[CIBLE]` `DELETE /api/sources/{code}/consent`. |
 | `400 Bad Request` | Non utilisé (FastAPI renvoie 422 pour un corps invalide). |
@@ -150,7 +150,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | `403 Forbidden` | `Host` non local ou `Origin` étrangère. |
 | `404 Not Found` | Rapport, tâche, offre, candidature, CV introuvable ; toute route `GET /api/…` inconnue (`{"detail": "Introuvable."}`). |
 | `405 Method Not Allowed` | Méthode non `GET` sur une route `/api/…` inexistante (capturée par la route SPA `GET /{path:path}`). |
-| `409 Conflict` | Tâche du même type déjà active ; identifiants LinkedIn absents ; blocage en cours ; aucune analyse disponible ; candidature déjà postulée ; tâche qui n'attend pas de réponse ou déjà terminée. `[CIBLE]` destinataire en liste d'opposition, `risk_version` périmée. |
+| `409 Conflict` | Tâche du même type déjà active ; identifiants LinkedIn absents ; blocage en cours ; aucune analyse disponible ; candidature déjà postulée ; tâche qui n'attend pas de réponse ou déjà terminée. destinataire en liste d'opposition (`409 Ce destinataire a demandé à ne plus être contacté.`, vague 4) ; `[CIBLE]` `risk_version` périmée. |
 | `422 Unprocessable Entity` | Corps invalide (Pydantic) **et** règle métier de validation : réglage hors bornes, statut inconnu, `value` d'annotation, confirmation absente, adresse/objet invalides, test SMTP vers un tiers, mot-clé vide. |
 | `428 Precondition Required` | `[CIBLE]` action navigateur sans consentement actif à la version courante des risques de la source (I-16). Corps : `{"detail": "…", "source": "linkedin", "risk_version": "2026-10"}` — le frontend ouvre la popup de cette source ; **aucun rejeu automatique** (décision du 2026-10-09) : après acceptation, un bandeau « Relancer : {action} » attend un clic explicite ; pour un message, la relance rouvre la relecture et n'envoie rien (I-04). |
 | `429 Too Many Requests` | Plafond quotidien atteint (`apply_daily_max`, `message_daily_max`). |
@@ -391,7 +391,7 @@ remplie (409).
 | `GET /api/applications/{job_id}/cv.html` | — | `200 text/html` sandboxé | `404` candidature ; `404 CV introuvable.` |
 | `POST /api/applications/{job_id}/apply` | — | `202` tâche `apply` | `404` ; `409 Une candidature est déjà en cours pour cette offre.` ; `409 Cette candidature est déjà au statut « postulée ».` ; `409` identifiants / blocage ; `429 Plafond quotidien atteint (10 candidatures par jour) : réessaie demain ou relève-le dans les paramètres.` ; `[CIBLE]` `428` |
 | `POST /api/applications/{job_id}/contacts/lookup` | — | `202` tâche `contacts` | `404` ; `409 Une recherche de contacts est déjà en cours pour cette offre.` ; `409` identifiants / blocage ; `[CIBLE]` `428` |
-| `GET /api/applications/{job_id}/message-draft` | — | `200 {"subject": "Candidature — <titre ≤ 100>", "body": "<message.txt>\n\n<signature>"}` | `404` |
+| `GET /api/applications/{job_id}/message-draft?to=` | — | `[ACTUEL]` (vague 4) `200 {"subject": "Candidature — <titre ≤ 100>", "body": "<message.txt>\n\n<signature>", "footer", "origin", "opposed"}` (§ 5.7.1) | `404` |
 | `POST /api/applications/{job_id}/messages` | `MessageBody` | `202` tâche `message` (`browser` si canal `linkedin`) | voir ordre ci-dessous |
 | `POST /api/smtp/test` | `TestMail {to: str \| null}` | `200 {"channel": "email", "to": "me@example.com", "subject": "Test my-connector", "attachments": []}` | `503 SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.` ; `503 <SMTP_SECURITY refusé, G-5>` (via `applications._require_smtp()`, partagé avec `/messages`) ; `422 Le test n'est autorisé que vers ton adresse de contact ou l'expéditeur SMTP.` ; `502 <OutreachError>` |
 
@@ -420,8 +420,9 @@ Ordre des contrôles de `POST …/messages` (le premier qui échoue répond ; `[
 3. Canal `email` : `503 SMTP non configuré : …` / `503 <SMTP_SECURITY refusé, G-5>` → `422 Adresse email invalide :
    « pas-un-mail ».` → `422 Objet requis, sur une seule ligne.` Canal `linkedin` : `409` identifiants
    (`require_credentials()`).
-4. **Réservation** (`services.reserve_message()`, transaction de `backend/03` § 5.1) : `429 Plafond quotidien
-   atteint (15 messages par jour) : …` (+ `Retry-After`, G-2) décidé **dans** la transaction, le plus souvent
+4. **Réservation** (`services.reserve_message()`, transaction de `backend/03` § 5.1) : `[ACTUEL]` (vague 4) :
+   `409 Ce destinataire a demandé à ne plus être contacté.` (empreinte de `to` dans `suppression_list`) **avant**
+   `429 Plafond quotidien atteint (15 messages par jour) : …` (+ `Retry-After`, G-2) décidé **dans** la transaction, le plus souvent
    avant toute autre écriture ; `404` si la candidature a disparu entre temps (filet de sécurité, improbable après
    le contrôle 1). Canal `linkedin` seulement, **après** la réservation : `409` blocage (`require_not_blocked()`).
 5. `409 Un envoi est déjà en cours pour cette candidature.` Si cette erreur (ou toute autre, y compris une erreur
@@ -429,8 +430,8 @@ Ordre des contrôles de `POST …/messages` (le premier qui échoue répond ; `[
    (`services.release_message()`, pas de trace dans `outreach_messages`). Si la tâche est créée mais annulée avant
    d'avoir démarré (ex. attente du verrou navigateur interrompue), la réservation passe en `échec` (`on_abort`,
    `backend/05` § 1.2) plutôt que d'être supprimée : la place est rendue dans les deux cas, mais la trace diffère.
-6. `[CIBLE]` dans la transaction : `409 Ce destinataire a demandé à ne plus être contacté.` ;
-   `428` (canal `linkedin`). Le pied de conformité (origine de l'adresse + désinscription) est **ajouté par le serveur** après le corps saisi (cf. `05-queues-and-integrations.md`) : il n'est jamais exigé dans `body`, donc pas de `422` à ce titre.
+6. `[ACTUEL]` : `428` (canal `linkedin`, étape 3) ; le `409` « opposé » est l'étape 4 (dans la
+   transaction, avant le `429`). Le pied de conformité (origine de l'adresse + désinscription) est **ajouté par le serveur** après le corps saisi (cf. `05-queues-and-integrations.md`) : il n'est jamais exigé dans `body`, donc pas de `422` à ce titre.
 
 Au début de la tâche (`services.send_message`), la réservation et le plafond sont revérifiés
 (`_confirm_reservation()`, `FOR UPDATE` sur `user_settings`) : un plafond abaissé entre la réservation et
@@ -458,7 +459,7 @@ Entrée de candidature (`GET /api/applications`) :
 Types d'historique écrits par le code : `statut`, `candidature`, `contacts`, `message` (l'ERD cible les renomme
 `status`, `apply`, `contacts`, `message` — conversion par l'import JSON, cf. § 1.1 C-6).
 
-#### 5.7.1 Contrat figé pour la vague 4 (prospection conforme, brief du 2026-10-09)
+#### 5.7.1 Contrat de la vague 4 `[ACTUEL]` (prospection conforme, brief du 2026-10-09, accepté le 2026-10-12)
 - **`GET /api/applications/{job_id}/message-draft?to=<adresse ou URL>`** (paramètre facultatif) ⇒
   `200 {"subject", "body", "footer", "origin", "opposed"}`. `footer` = pied imposé **exact** que le serveur
   ajoutera (selon canal et origine) ; `origin` ∈ `linkedin_equipe_recrutement` | `manuel` (contact de la
@@ -504,11 +505,61 @@ Types d'historique écrits par le code : `statut`, `candidature`, `contacts`, `m
     `300 − 2 − len(footer)` caractères (puis `rstrip()`), **sans ajout de « … »** (remplace la troncature actuelle
     `note[:299] + "…"` d'`outreach.py`), le pied est toujours conservé entier, `result.truncated = true`. Message direct (relation de 1er degré) : aucune troncature. Le frontend compte de la même façon
     (`Array.from(s).length`, pas `s.length`).
+- **Précisions figées le 2026-10-12 (brief vague 4, lecture du code et du frontend commité)** :
+  - **V4-5 — empreinte** (`recipient_hash`, source unique `db/repositories/suppressions.py`) : email ⇒
+    `sha256(email.strip().lower())` ; URL de profil ⇒ forme canonique `https://www.linkedin.com/in/<slug>` (minuscules,
+    sous-domaine pays `fr.` remplacé par `www.`, sans paramètres, sans fragment, sans « / » final), puis `sha256`.
+    Un destinataire qui n'est ni email ni profil n'a pas d'empreinte (jamais opposé).
+  - **V4-6 — `GET …/message-draft?to=`** : `to` absent, vide ou ni email ni URL de profil (saisie en cours) ⇒ canal
+    `email`, `origin = "manuel"`, `opposed = false`, pied email avec origine « saisie manuelle ». `footer` calculé par
+    `outreach.compose_footer(channel, title, origin, sender)` : `title` = `tidy(titre, 100)` (email) ou `tidy(titre, 60)`
+    (LinkedIn) ; `sender` = adresse nue (`email.utils.parseaddr`) de `SMTP_FROM`, sinon `contact_email` des réglages,
+    sinon le texte « l'expéditeur de ce message ». `body` = `message.txt` + signature, **sans** pied. `404` si la
+    candidature n'existe pas ; jamais `409` (l'opposition est signalée par `opposed: true`, pas par une erreur).
+  - **V4-7 — `POST …/messages`** : `body` reste le texte saisi (sans pied). Le serveur recalcule `origin` (contact
+    trouvé par `find_contact`, sinon `manuel`) et `footer`, **ignore** tout pied saisi, et enregistre dans
+    `outreach_messages.body` le texte réellement envoyé (`body.rstrip() + "\n\n" + footer`). Le `409` « opposé » est
+    décidé par empreinte de `to` (V4-5) **dans** la transaction de réservation, après le verrouillage de la
+    candidature et de `user_settings` et avant le comptage du plafond ; revérifié au début de la tâche
+    (`_confirm_reservation`) : réservation `échec`, `error` = même texte, aucun envoi. Un contact lié qui porte
+    `opposed_at` bloque aussi (filet de sécurité). Canal LinkedIn : pied ajouté dans les deux modes (message direct :
+    `body.rstrip() + "\n\n" + footer` sans troncature ; connexion : V4-4).
+  - **V4-8 — email** : chaque email de `/messages` (et lui seul, pas `/smtp/test`) porte
+    `List-Unsubscribe: <mailto:{adresse nue de SMTP_FROM}?subject=STOP>` ; pas de `List-Unsubscribe-Post`.
+  - **V4-9 — `POST /api/suppressions`** : `recipient` validé après `strip()` (V4-3) ; effet conforme à V4-1 ;
+    l'appariement des `company_contacts` se fait **en Python** par empreinte (V4-5) sur tous les contacts de
+    l'utilisateur (toutes candidatures), pas par SQL. Un `application_events` `contacts` `{"opposition": true}` par
+    candidature touchée (aucun si aucun contact ne correspond ; aucune donnée personnelle dans l'événement).
+    Idempotent : `ON CONFLICT (user_id, recipient_hash) DO NOTHING` (le `reason` d'origine est conservé). Réponse `201 {"ok": true}`.
+    Les contacts déjà opposés sont laissés tels quels.
+  - **V4-10 — `PATCH contacts` et recherche de contacts avec opposés** : le frontend renvoie dans `contacts` les
+    lignes opposées telles que lues (`email: null`, `profile_url: ""`, `opposed`/`collected_at` en extra, ignorés par
+    Pydantic). Règles de `replace_contacts` : (a) un contact opposé en base n'est **jamais** supprimé ni modifié par
+    un `PATCH` ; (b) une ligne entrante sans email ni URL dont le `full_name` correspond à un contact opposé est
+    ignorée (écho de la ligne opposée, pas de doublon) ; (c) toute ligne entrante dont l'email ou l'URL a une
+    empreinte dans `suppression_list` ⇒ `422 Ce contact s'est opposé à tout contact : ses coordonnées ne peuvent plus
+    être saisies.` (aucune écriture) ; (d) dans `lookup_contacts` (tâche), un recruteur trouvé dont une empreinte est
+    opposée est **écarté silencieusement** (compté ni dans `found` ni dans `emails`), jamais d'échec de tâche.
+  - **Lectures de contrat validées à la revue (2026-10-12)** :
+    - (a) `PATCH /applications/{job_id}` : ordre statut inconnu (`422`) → `contacts` → changement de statut ; un `422`
+      « opposé » n'écrit donc rien (ni contacts, ni statut, ni historique).
+    - (b) `record_opposition` apparie par empreinte **sans fermeture transitive** : les empreintes de **toutes** les
+      coordonnées des contacts appariés sont bloquées (envoi, `PATCH`, recherche), mais un autre contact qui ne
+      partage que l'une des coordonnées avec un contact apparié n'est pas minimisé tant que son propre identifiant
+      n'a pas été opposé ; il reste bloqué sur la coordonnée commune. Limite assumée (l'identité d'une personne n'est
+      pas inférée au-delà des coordonnées saisies) ; l'utilisateur peut envoyer une requête par coordonnée.
+    - (c) Envoi LinkedIn en mode connexion : `outreach_messages.body` garde le texte complet non tronqué
+      (`body.rstrip() + "\n\n" + footer`) ; la note réellement saisie est plus courte, `result.truncated = true` et
+      le journal de tâche l'indiquent.
+    - `outreach.strip_footer` ne retire qu'un pied **exact** en fin de texte (évite le doublon) ; `assemble` et
+      `connection_note` rajoutent toujours le pied : aucun chemin n'envoie un message sans pied (I-12).
+  - **Migration** : révision Alembic `0002` ajoute `company_contacts.opposed_at timestamptz NULL` (ERD déjà à jour) ;
+    `alembic check` doit rester vide.
 - **`Contact`** (lecture) ajoute `opposed: bool` (`opposed_at IS NOT NULL`) et `collected_at` (UTC `Z`), pour la
   ligne « Origine de l'adresse » ; `PATCH contacts` ignore `opposed` et ne peut pas réécrire l'email ni l'URL d'un
   contact opposé (`422 Ce contact s'est opposé à tout contact : ses coordonnées ne peuvent plus être saisies.`).
 
-### 5.8 Sources et consentements `[ACTUEL]` (vague 3 : `/sources`, consentements, 428, `block/clear`, `RunBody.sources` ; `[CIBLE]` : `items/import`, `suppressions`)
+### 5.8 Sources et consentements `[ACTUEL]` (vague 3 : `/sources`, consentements, 428, `block/clear`, `RunBody.sources` ; vague 4 : `suppressions`, § 5.7.1 ; `[CIBLE]` : `items/import`)
 
 | Méthode & chemin | Corps | Succès | Erreurs |
 | :--- | :--- | :--- | :--- |

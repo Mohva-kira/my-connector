@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from email.utils import parseaddr
 from uuid import UUID
 
 from .. import (
@@ -324,40 +325,89 @@ def lookup_contacts(ctx: TaskContext, job_id: str) -> dict:
         raise RuntimeError(str(exc)) from exc
     finally:
         driver.quit()
+    found = application.drop_opposed(found)  # un recruteur opposé est écarté en silence (I-13, V4-10 d)
     merged = contacts_mod.merge_contacts(entry["contacts"], found)
     application.update_application(job_id, contacts=merged)
     application.add_history(job_id, "contacts", found=len(found), emails=sum(1 for c in found if c["email"]))
     return {"found": len(found), "emails": sum(1 for c in found if c["email"])}
 
 
-def message_draft(job_id: str) -> dict:
-    """Objet et corps proposés pour un message à l'entreprise (modifiables avant l'envoi)."""
+def sender_address() -> str:
+    """Adresse nue qui reçoit les demandes de désinscription : ``SMTP_FROM``, sinon ``contact_email`` des réglages."""
+    for candidate in (os.environ.get("SMTP_FROM") or "", settings.load_settings()["contact_email"]):
+        address = parseaddr(candidate)[1].strip()
+        if address:
+            return address
+    return "l'expéditeur de ce message"
+
+
+def _footer(channel: str, job_title: str, origin: str, sender: str) -> str:
+    """Pied imposé du message (I-12) : titre raccourci à 100 caractères (email) ou 60 (LinkedIn)."""
+    title = tidy(job_title, 60 if channel == "linkedin" else 100)
+    return outreach.compose_footer(channel, title, origin, sender)
+
+
+def message_draft(job_id: str, to: str | None = None) -> dict:
+    """Objet, corps (sans pied) et pied imposé exact d'un message à l'entreprise (``backend/01`` § 5.7.1, V4-6).
+
+    Le canal se déduit de ``to`` ; absent, vide ou invalide (saisie en cours) : email, origine ``manuel``,
+    ``opposed`` faux. L'opposition est signalée par ``opposed``, jamais par une erreur.
+    """
     entry = application.get_application(job_id)
     files = application.read_files(entry)
     signature = settings.load_settings()["signature"]
     body = files["message"].strip()
     if signature and signature not in body:
         body += f"\n\n{signature}"
-    return {"subject": f"Candidature — {tidy(entry.get('title', ''), 100)}", "body": body}
+    to = (to or "").strip()
+    channel = "linkedin" if outreach._PROFILE_URL.match(to) else "email"
+    if channel == "email" and not outreach._EMAIL.match(to):
+        to = ""
+    origin, opposed = "manuel", False
+    if to:
+        with user_transaction() as (s, uid):
+            found = applications_repo.get(s, uid, job_id)
+            if found is None:
+                raise application.ApplicationNotFound(job_id)
+            contact = outreach_repo.find_contact(s, uid, found[0].id, to)
+            origin = contact.source if contact else "manuel"
+            opposed = outreach_repo.recipient_blocked(s, uid, to, contact.id if contact else None)
+    title = entry.get("title", "")
+    return {
+        "subject": f"Candidature — {tidy(title, 100)}",
+        "body": body,
+        "footer": _footer(channel, title, origin, sender_address()),
+        "origin": origin,
+        "opposed": opposed,
+    }
 
 
-def reserve_message(job_id: str, *, channel: str, to: str, subject: str, body: str, attach_cv: bool) -> UUID:
-    """Réserve une place du plafond de messages (``backend/03`` § 5.1, E-11) ; ``429`` décidé dans la transaction.
+def reserve_message(
+    job_id: str, *, channel: str, to: str, subject: str, body: str, attach_cv: bool
+) -> tuple[UUID, str]:
+    """Réserve une place du plafond de messages (``backend/03`` § 5.1, E-11) ; renvoie ``(message_id, pied)``.
 
     ``FOR UPDATE`` sur la candidature puis sur ``user_settings`` : deux envois simultanés (même vers des
-    candidatures différentes) ne peuvent pas compter la même place. Lève ``ApplicationNotFound`` ou
-    ``QuotaExceeded`` (transaction annulée).
+    candidatures différentes) ne peuvent pas compter la même place. Toujours dans la transaction, dans cet ordre :
+    destinataire opposé (``RecipientSuppressed``, I-13) puis plafond (``QuotaExceeded``) puis insertion ; une
+    exception annule la transaction, sans rien écrire. Le serveur calcule l'origine et le pied imposé (I-12) et
+    enregistre dans ``outreach_messages.body`` le texte réellement envoyé. Lève aussi ``ApplicationNotFound``.
     """
     start, end = activity.day_bounds()
+    sender = sender_address()  # lu avant la transaction : une seule connexion tenue à la fois
     with user_transaction() as (s, uid):
         found = applications_repo.get(s, uid, job_id, lock=True)
         if found is None:
             raise application.ApplicationNotFound(job_id)
         application_id = found[0].id
         limit = settings_repo.get_settings(s, uid, lock=True)["message_daily_max"]
+        contact = outreach_repo.find_contact(s, uid, application_id, to)
+        if outreach_repo.recipient_blocked(s, uid, to, contact.id if contact else None):
+            raise outreach.RecipientSuppressed
         if outreach_repo.count_day(s, uid, start, end) >= limit:
             raise activity.QuotaExceeded("messages", limit)
-        return outreach_repo.insert_confirmed(
+        footer = _footer(channel, found[1].title, contact.source if contact else "manuel", sender)
+        message_id = outreach_repo.insert_confirmed(
             s,
             uid,
             application_id,
@@ -365,11 +415,12 @@ def reserve_message(job_id: str, *, channel: str, to: str, subject: str, body: s
                 "channel": channel,
                 "recipient": to,
                 "subject": subject.strip() if channel == "email" else "",
-                "body": body,
+                "body": outreach.assemble(body, footer),
                 "cv_attached": attach_cv and channel == "email",
-                "contact_id": outreach_repo.find_contact(s, uid, application_id, to),
+                "contact_id": contact.id if contact else None,
             },
         )
+        return message_id, footer
 
 
 def release_message(message_id: UUID) -> None:
@@ -391,14 +442,21 @@ def message_count_today() -> int:
 
 
 def _confirm_reservation(message_id: UUID) -> None:
-    """Début de tâche : la réservation existe toujours et le plafond (relu sous verrou) n'est pas dépassé (I-07)."""
+    """Début de tâche : réservation encore valide, destinataire non opposé (I-13), plafond non dépassé (I-07).
+
+    Le plafond est relu sous verrou. Lève ``RecipientSuppressed`` ou ``QuotaExceeded`` : l'appelant marque la
+    réservation ``échec`` (la place est rendue), sans aucun envoi.
+    """
     start, end = activity.day_bounds()
     with user_transaction() as (s, uid):
         limit = settings_repo.get_settings(s, uid, lock=True)["message_daily_max"]
         row = outreach_repo.get(s, uid, message_id, lock=True)
         if row is None or row.status != "confirmé" or row.sent_at is not None:
             raise RuntimeError("Réservation d'envoi introuvable : relance l'envoi depuis la candidature.")
+        blocked = outreach_repo.recipient_blocked(s, uid, row.recipient, row.contact_id)
         used = outreach_repo.count_day(s, uid, start, end)
+    if blocked:
+        raise outreach.RecipientSuppressed
     if used > limit:
         raise activity.QuotaExceeded("messages", limit)
 
@@ -422,16 +480,22 @@ def send_message(
     to: str,
     subject: str,
     body: str,
+    footer: str,
     attach_cv: bool,
 ) -> dict:
     """Envoie un message (email ou LinkedIn) déjà confirmé par l'utilisateur et réservé, puis le journalise.
 
-    Préconditions revérifiées ici (l'API les a déjà contrôlées) : réservation et plafond, SMTP chiffré ou local
-    (E-20), absence de blocage (LinkedIn). Un échec libère la place (``échec``) ; aucun renvoi automatique.
+    ``body`` est le texte saisi, sans pied ; ``footer`` le pied imposé calculé à la réservation (I-12), ajouté ici
+    après le corps. Préconditions revérifiées ici (l'API les a déjà contrôlées) : réservation, destinataire non
+    opposé et plafond, SMTP chiffré ou local (E-20), absence de blocage (LinkedIn). Un échec libère la place
+    (``échec``) ; aucun renvoi automatique.
     """
     try:
         entry = application.get_application(job_id)
         _confirm_reservation(message_id)
+        body = outreach.strip_footer(body, footer)
+        if not body:
+            raise outreach.OutreachError("Le message est vide.")
         cfg = settings.load_settings()
         sent_id: str | None = None
         if channel == "email":
@@ -453,9 +517,11 @@ def send_message(
                 ]
             ctx.check()
             ctx.log(f"Envoi de l'email à {logmask.mask_email(to)}…")
-            sent, sent_id = outreach.deliver_email(to, subject, body, attachments, smtp)
+            sent, sent_id = outreach.deliver_email(
+                to, subject, outreach.assemble(body, footer), attachments, smtp, unsubscribe=True
+            )
         else:
-            sent = _send_linkedin(ctx, job_id, to, body, cfg)
+            sent = _send_linkedin(ctx, job_id, to, body, footer, cfg)
     except outreach.UncertainDelivery as exc:
         _message_outcome(message_id, error=str(exc), uncertain=True)
         raise
@@ -477,7 +543,7 @@ def send_message(
     return sent
 
 
-def _send_linkedin(ctx: TaskContext, job_id: str, to: str, body: str, cfg: dict) -> dict:
+def _send_linkedin(ctx: TaskContext, job_id: str, to: str, body: str, footer: str, cfg: dict) -> dict:
     from ..browser import create_driver
 
     consent.require("linkedin")
@@ -487,14 +553,16 @@ def _send_linkedin(ctx: TaskContext, job_id: str, to: str, body: str, cfg: dict)
         session.login(driver, interactive=False, on_manual_check=ctx.manual_check)
         ctx.set_status(RUNNING)
         ctx.log(f"Envoi du message LinkedIn à {logmask.mask_profile_url(to)}…")
-        sent = outreach.send_linkedin_message(driver, to, body, config.CAUTION_LEVELS[cfg["caution"]], check=ctx.check)
+        sent = outreach.send_linkedin_message(
+            driver, to, body, config.CAUTION_LEVELS[cfg["caution"]], footer=footer, check=ctx.check
+        )
     except PermissionError as exc:
         activity.record("blocked", where="message LinkedIn", job=job_id, source="linkedin")
         raise RuntimeError(str(exc)) from exc
     finally:
         driver.quit()
     if sent.get("truncated"):
-        ctx.log("La note de connexion dépassait 300 caractères : elle a été tronquée.")
+        ctx.log("La note de connexion dépassait 300 caractères : le corps a été tronqué, le pied est conservé.")
     return sent
 
 

@@ -432,6 +432,7 @@ class CompanyContact(Base):
     legal_basis: Mapped[str] = mapped_column(server_default="interet_legitime")
     collected_at: Mapped[datetime] = created()
     last_contacted_at: Mapped[datetime | None]
+    opposed_at: Mapped[datetime | None]  # opposition saisie (I-13) : email et URL effacés, la ligne reste
     # Dernier contact (ou collecte) + 3 ans (I-14) ; jamais NULL pour que la purge s'applique toujours.
     purge_after: Mapped[datetime] = mapped_column(server_default=text("now() + interval '3 years'"))
 

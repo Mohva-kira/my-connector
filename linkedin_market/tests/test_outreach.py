@@ -158,28 +158,42 @@ def local_profiles(monkeypatch):
     monkeypatch.setattr(outreach, "_PROFILE_URL", re.compile(r"^file://"))
 
 
+FOOTER = outreach.compose_footer("linkedin", "Dev Python", "manuel", "me@example.com")
+
+
 def test_linkedin_direct_message(driver, local_profiles):
     result = outreach.send_linkedin_message(
-        driver, url_of("profile_first_degree.html"), "Bonjour Jane,\nvoici ma candidature.", CAUTION, timeout=5
+        driver,
+        url_of("profile_first_degree.html"),
+        "Bonjour Jane,\nvoici ma candidature.",
+        CAUTION,
+        footer=FOOTER,
+        timeout=5,
     )
-    assert result["mode"] == "message"
-    assert driver.execute_script("return window.__sent") == "Bonjour Jane,\nvoici ma candidature."
+    assert result["mode"] == "message" and result["truncated"] is False
+    # Message direct : corps + pied, jamais tronqué (V4-4).
+    assert driver.execute_script("return window.__sent") == "Bonjour Jane,\nvoici ma candidature.\n\n" + FOOTER
 
 
 def test_linkedin_connection_note_is_truncated(driver, local_profiles):
-    result = outreach.send_linkedin_message(driver, url_of("profile_connect.html"), "x" * 400, CAUTION, timeout=5)
+    result = outreach.send_linkedin_message(
+        driver, url_of("profile_connect.html"), "x" * 400, CAUTION, footer=FOOTER, timeout=5
+    )
+    note = driver.execute_script("return window.__note")
     assert result["mode"] == "connexion" and result["truncated"] is True
-    assert len(driver.execute_script("return window.__note")) == outreach.LINKEDIN_NOTE_MAX
+    assert len(note) == outreach.LINKEDIN_NOTE_MAX and note.endswith("\n\n" + FOOTER) and "…" not in note
 
 
 def test_linkedin_profile_without_message_or_connect(driver, local_profiles):
     with pytest.raises(outreach.OutreachError, match="InMail"):
-        outreach.send_linkedin_message(driver, url_of("profile_none.html"), "Bonjour", CAUTION, timeout=2)
+        outreach.send_linkedin_message(
+            driver, url_of("profile_none.html"), "Bonjour", CAUTION, footer=FOOTER, timeout=2
+        )
 
 
 def test_linkedin_rejects_non_profile_urls():
     with pytest.raises(outreach.OutreachError, match="Profil LinkedIn invalide"):
-        outreach.send_linkedin_message(None, "https://evil.example.com/in/x", "Bonjour", CAUTION)
+        outreach.send_linkedin_message(None, "https://evil.example.com/in/x", "Bonjour", CAUTION, footer=FOOTER)
 
 
 def test_linkedin_exception_after_send_click_is_uncertain(driver, local_profiles):
@@ -192,6 +206,12 @@ def test_linkedin_exception_after_send_click_is_uncertain(driver, local_profiles
     driver.get("about:blank")
     with pytest.raises(outreach.UncertainDelivery, match="n'a pas pu être confirmé"):
         outreach.send_linkedin_message(
-            driver, url_of("profile_first_degree.html"), "Bonjour", CAUTION, check=cancel_after_send, timeout=5
+            driver,
+            url_of("profile_first_degree.html"),
+            "Bonjour",
+            CAUTION,
+            footer=FOOTER,
+            check=cancel_after_send,
+            timeout=5,
         )
-    assert driver.execute_script("return window.__sent") == "Bonjour"
+    assert driver.execute_script("return window.__sent") == "Bonjour\n\n" + FOOTER

@@ -217,7 +217,7 @@ mention dans la popup Claude/Réglages de ce qui est envoyé.
 | Configuration | `SMTP_HOST`, `SMTP_FROM` (sinon `SMTP_USER`) obligatoires ; `SMTP_SECURITY` `starttls` (défaut, port 587) ou `ssl` (465) ; `SMTP_USER`/`SMTP_PASSWORD` si le serveur exige l'authentification |
 | `[ACTUEL]` (vague 2, G-5/E-20) | `SMTP_SECURITY=none` (sans chiffrement) admis **uniquement** vers un hôte local (`127.0.0.1`, `localhost`, `::1` — relais local, tests), via `config.smtp_security_error()` ; sinon `OutreachError` (503 à l'API). **Toute autre valeur** (ni `ssl`, `starttls`, ni `none`) est **refusée même vers un hôte local** : « SMTP_SECURITY=<valeur> n'est pas reconnu : choisis starttls ou ssl dans le fichier .env (none seulement pour un serveur SMTP local, 127.0.0.1). » — remplace l'ancien comportement qui retombait silencieusement sur le port 25 sans chiffrement. Contrôlé à l'API (`applications._require_smtp()`) **et** au début de la tâche (`services.send_message`, avant `outreach.deliver_email`). |
 | Délai | `SMTP_TIMEOUT = 25` s, contexte TLS `ssl.create_default_context()` (vérification du certificat) |
-| Message | `EmailMessage` : `From`, `To` validé, `Subject` sur une ligne, `Message-ID` (`make_msgid` au domaine de l'expéditeur), corps texte, pièce jointe `cv.pdf` facultative |
+| Message | `EmailMessage` : `From`, `To` validé, `Subject` sur une ligne, `Message-ID` (`make_msgid` au domaine de l'expéditeur), corps texte (+ pied imposé), pièce jointe `cv.pdf` facultative ; `[ACTUEL]` (vague 4) `List-Unsubscribe: <mailto:{adresse nue de SMTP_FROM}?subject=STOP>` sur les messages de `/messages` seulement (pas `/smtp/test`, pas de `List-Unsubscribe-Post`) |
 | Erreurs | `SMTPAuthenticationError` ⇒ « Le serveur SMTP refuse l'authentification : vérifie SMTP_USER et SMTP_PASSWORD. » ; `SMTPRecipientsRefused` ⇒ « Le destinataire a été refusé par le serveur : <to masqué, E-12>. » ; autre ⇒ « Envoi impossible (<Classe> : <détail>). » (`outreach._smtp_failure`) |
 | `[ACTUEL]` (vague 2) | Une erreur à la **fermeture** de la connexion (`client.quit()`) **après** que le serveur a accepté le message (`client.send_message(message)` réussi) est **ignorée** (`outreach.deliver_email`, `except smtplib.SMTPException, OSError: client.close()`) : le message est considéré envoyé (`Message-ID` retourné et stocké dans `outreach_messages.smtp_message_id`), une erreur de `QUIT` ne change rien à la livraison déjà actée par le serveur. |
 | Relance | **aucune** (risque de doublon chez le destinataire) ; statut `échec`, nouvel envoi manuel |
@@ -233,11 +233,11 @@ vérifier » côté UI, compte toujours dans le plafond du jour, **jamais** renv
 Un délai simplement dépassé (composeur non vidé, sans exception) reste une `UncertainDelivery` classique avec le
 même message : « L'envoi n'a pas pu être confirmé : vérifie la conversation sur LinkedIn avant de réessayer. »
 
-Conformité prospection B2B `[CIBLE]` (I-12, I-13 ; CPCE art. L.34-5 ; RGPD art. 6(1)(f), 14 et 21 ; fiche CNIL
+Conformité prospection B2B `[ACTUEL]` (vague 4, 2026-10-12 ; `outreach.compose_footer`, `assemble`, `connection_note`, `List-Unsubscribe` ; I-12, I-13 ; CPCE art. L.34-5 ; RGPD art. 6(1)(f), 14 et 21 ; fiche CNIL
 « Communication électronique : quelles règles ? », mise à jour en juin 2026) :
 - **Objet** du message en rapport avec la fonction du destinataire : une offre qu'il publie (rattachement à une
   `applications` obligatoire, pas d'envoi libre).
-- **Pied imposé**, ajouté par le backend et non supprimable dans l'interface :
+- **Pied imposé** `[ACTUEL]`, ajouté par le backend et non supprimable dans l'interface (textes exacts : `01` § 5.7.1 ; `strip_footer` n'évite que le doublon d'un pied exact, le pied est toujours rajouté) :
   « Je vous contacte au sujet de votre offre « <titre> » ; votre adresse provient de <source : votre profil
   LinkedIn / l'offre publiée / saisie manuelle>. Pour ne plus recevoir de message de ma part, répondez « STOP » ou
   écrivez à <expéditeur> : votre demande sera prise en compte immédiatement. »

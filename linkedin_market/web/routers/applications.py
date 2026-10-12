@@ -83,13 +83,17 @@ class ApplicationPatch(BaseModel):
 @router.patch("/applications/{job_id}")
 def patch_application(job_id: str, body: ApplicationPatch) -> dict:
     _entry(job_id)
+    if body.status is not None and body.status not in application.STATUSES:
+        raise HTTPException(422, f"Statut inconnu. Valeurs : {', '.join(application.STATUSES)}.")
+    if body.contacts is not None:
+        # Avant toute autre écriture : une coordonnée opposée refuse tout le PATCH (I-13, V4-10 c).
+        try:
+            application.update_application(job_id, contacts=[c.model_dump() for c in body.contacts])
+        except application.ContactOpposed as exc:
+            raise HTTPException(422, str(exc)) from exc
     if body.status is not None:
-        if body.status not in application.STATUSES:
-            raise HTTPException(422, f"Statut inconnu. Valeurs : {', '.join(application.STATUSES)}.")
         application.set_status(job_id, body.status)
         application.add_history(job_id, "status", status=body.status)
-    if body.contacts is not None:
-        application.update_application(job_id, contacts=[c.model_dump() for c in body.contacts])
     if any(v is not None for v in (body.cv, body.message, body.advice)):
         application.write_files(job_id, cv=body.cv, message=body.message, advice=body.advice)
     return get_application(job_id)
@@ -146,9 +150,12 @@ def lookup_contacts(request: Request, job_id: str) -> dict:
 
 
 @router.get("/applications/{job_id}/message-draft")
-def message_draft(job_id: str) -> dict:
+def message_draft(job_id: str, to: str | None = None) -> dict:
     _entry(job_id)
-    return services.message_draft(job_id)
+    try:
+        return services.message_draft(job_id, to)
+    except application.ApplicationNotFound:
+        raise HTTPException(404, "Aucune candidature préparée pour cette offre.") from None
 
 
 class MessageBody(BaseModel):
@@ -164,8 +171,9 @@ class MessageBody(BaseModel):
 def send_message(request: Request, job_id: str, body: MessageBody) -> dict:
     """Envoie un message à l'entreprise. ``confirm: true`` est exigé : l'interface le pose après relecture.
 
-    Le plafond est réservé en base (``429`` décidé dans la transaction, E-11) ; la place est rendue si la tâche
-    n'est finalement pas créée.
+    Le destinataire opposé (``409``, I-13) puis le plafond (``429``) sont décidés dans la transaction de
+    réservation (E-11) ; le pied imposé est ajouté par le serveur (I-12) ; la place est rendue si la tâche n'est
+    finalement pas créée.
     """
     _entry(job_id)
     if not body.confirm:
@@ -183,9 +191,11 @@ def send_message(request: Request, job_id: str, body: MessageBody) -> dict:
         require_credentials()
     to = body.to.strip()
     try:
-        message_id = services.reserve_message(
+        message_id, footer = services.reserve_message(
             job_id, channel=body.channel, to=to, subject=body.subject, body=body.body, attach_cv=body.attach_cv
         )
+    except outreach.RecipientSuppressed as exc:
+        raise HTTPException(409, str(exc)) from exc
     except activity.QuotaExceeded as exc:
         raise quota_exceeded(exc) from exc
     except application.ApplicationNotFound:
@@ -208,6 +218,7 @@ def send_message(request: Request, job_id: str, body: MessageBody) -> dict:
                 to=to,
                 subject=body.subject,
                 body=body.body,
+                footer=footer,
                 attach_cv=body.attach_cv,
             ),
             browser=body.channel == "linkedin",
@@ -229,6 +240,28 @@ def _require_smtp() -> dict:
     if insecure:
         raise HTTPException(503, insecure)
     return smtp
+
+
+class SuppressionBody(BaseModel):
+    """Opposition saisie par l'utilisateur : email ou URL de profil LinkedIn du destinataire (I-13)."""
+
+    recipient: str
+    reason: Literal["désinscription", "refus_oral", "plainte"]
+
+    @field_validator("recipient")
+    @classmethod
+    def valid_recipient(cls, value: str) -> str:
+        value = value.strip()
+        if not (outreach._EMAIL.match(value) or outreach._PROFILE_URL.match(value)):
+            raise ValueError("adresse email ou URL de profil LinkedIn attendue.")
+        return value
+
+
+@router.post("/suppressions", status_code=201)
+def add_suppression(body: SuppressionBody) -> dict:
+    """Enregistre l'opposition d'un destinataire (idempotent) et minimise ses contacts ; jamais supprimée."""
+    application.record_opposition(body.recipient, body.reason)
+    return {"ok": True}
 
 
 class TestMail(BaseModel):

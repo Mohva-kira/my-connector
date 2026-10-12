@@ -4,11 +4,12 @@ Réservation (``backend/03`` § 5.1, E-11) : dans **une** transaction, ``FOR UPD
 ``user_settings`` (sérialise le compteur entre candidatures), comptage du jour, insertion ``status='confirmé'``.
 L'envoi (SMTP, LinkedIn) a lieu hors transaction ; une seconde transaction écrit ``envoyé`` ou ``échec``. Une ligne
 ``confirmé`` sans ``sent_at`` laissée par un arrêt est « à vérifier », jamais renvoyée automatiquement.
-La ``suppression_list`` (I-13) s'ajoute à cette transaction en vague 4.
+La ``suppression_list`` (I-13) est consultée dans cette même transaction (vague 4) : un destinataire opposé est
+refusé avant le comptage du plafond, sans rien écrire.
 """
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import delete, func, or_, select, update
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..models import CompanyContact, OutreachMessage
 from . import activity as activity_repo
+from . import suppressions
 
 # Événements d'activité des messages envoyés avant la réservation en base (comptés pour la journée de transition).
 MESSAGE_ACTIVITY_KINDS = ("message_email", "message_linkedin")
@@ -43,12 +45,22 @@ def count_day(session: Session, user_id: UUID, start: datetime, end: datetime) -
     return max(reserved, recorded)
 
 
-def find_contact(session: Session, user_id: UUID, application_id: UUID, recipient: str) -> UUID | None:
+class ContactMatch(NamedTuple):
+    """Contact lié à un destinataire : identifiant, source (origine de l'adresse) et date d'opposition éventuelle."""
+
+    id: UUID
+    source: str
+    opposed_at: datetime | None
+
+
+def find_contact(session: Session, user_id: UUID, application_id: UUID, recipient: str) -> ContactMatch | None:
     """Contact de la candidature correspondant au destinataire (email sans casse, ou URL de profil)."""
     recipient = recipient.strip()
+    if not recipient:
+        return None
     url = recipient.split("?", 1)[0].rstrip("/")
-    return session.execute(
-        select(CompanyContact.id)
+    row = session.execute(
+        select(CompanyContact.id, CompanyContact.source, CompanyContact.opposed_at)
         .where(
             CompanyContact.user_id == user_id,
             CompanyContact.application_id == application_id,
@@ -59,7 +71,22 @@ def find_contact(session: Session, user_id: UUID, application_id: UUID, recipien
         )
         .order_by(CompanyContact.collected_at)
         .limit(1)
-    ).scalar_one_or_none()
+    ).first()
+    return ContactMatch(row.id, row.source, row.opposed_at) if row else None
+
+
+def recipient_blocked(session: Session, user_id: UUID, recipient: str, contact_id: UUID | None = None) -> bool:
+    """Destinataire opposé (I-13) : empreinte dans ``suppression_list``, ou contact lié portant ``opposed_at``."""
+    if suppressions.any_suppressed(session, user_id, suppressions.fingerprints(recipient)):
+        return True
+    if contact_id is None:
+        return False
+    return (
+        session.execute(
+            select(CompanyContact.opposed_at).where(CompanyContact.user_id == user_id, CompanyContact.id == contact_id)
+        ).scalar_one_or_none()
+        is not None
+    )
 
 
 def insert_confirmed(session: Session, user_id: UUID, application_id: UUID, values: dict[str, Any]) -> UUID:

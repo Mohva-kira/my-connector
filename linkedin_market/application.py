@@ -24,7 +24,7 @@ from pathlib import Path
 from . import config, interpreter, nlp
 from .db import utc_iso, utcnow
 from .db.repositories import applications as applications_repo
-from .db.repositories import user_transaction
+from .db.repositories import suppressions, user_transaction
 from .db.repositories.items import make_ref
 from .models import Item, Profile
 
@@ -86,6 +86,9 @@ _LEGACY_HISTORY_KINDS = {"statut": "status", "candidature": "apply"}  # C-6
 CONTACT_SOURCES = ("linkedin_equipe_recrutement", "manuel")
 
 
+ContactOpposed = suppressions.OpposedContact  # coordonnée d'un contact opposé saisie : ``422`` côté API (I-13)
+
+
 class ApplicationNotFound(KeyError):
     """Aucune candidature préparée pour cette offre."""
 
@@ -129,7 +132,49 @@ def _contact_public(contact) -> dict:
         "email": contact.email,
         "headline": contact.headline,
         "source": contact.source,
+        "opposed": contact.opposed_at is not None,
+        "collected_at": utc_iso(contact.collected_at),
     }
+
+
+def record_opposition(recipient: str, reason: str) -> None:
+    """Opposition saisie par l'utilisateur (I-13, ``backend/01`` § 5.7.1 V4-1 et V4-9), en **une** transaction.
+
+    1. apparie en Python, par empreinte, les contacts de l'utilisateur (toutes candidatures) ;
+    2. enregistre l'empreinte de ``recipient`` et celles de **toutes** les coordonnées des contacts appariés, avant
+       minimisation (idempotent : le motif d'origine est conservé) ;
+    3. minimise chaque contact apparié non encore opposé (``opposed_at``, email et URL effacés) ;
+    4. ajoute un événement ``contacts`` ``{"opposition": true}`` par candidature touchée, sans donnée personnelle.
+
+    Aucune fonction ne supprime une opposition.
+    """
+    target = suppressions.fingerprint(recipient)
+    if target is None:
+        raise ValueError("Adresse email ou URL de profil LinkedIn attendue.")
+    with user_transaction() as (s, uid):
+        matched = [
+            c
+            for c in applications_repo.all_contacts(s, uid)
+            if target in suppressions.fingerprints(c.email, c.profile_url)
+        ]
+        hashes = {target}
+        for contact in matched:
+            hashes |= suppressions.fingerprints(contact.email, contact.profile_url)
+        suppressions.add(s, uid, hashes, reason)
+        fresh = [c for c in matched if c.opposed_at is None]
+        applications_repo.oppose_contacts(s, uid, [c.id for c in fresh])
+        for application_id in dict.fromkeys(c.application_id for c in fresh):
+            applications_repo.add_event(s, uid, application_id, "contacts", {"opposition": True}, None)
+
+
+def drop_opposed(found: list[dict]) -> list[dict]:
+    """Retire les contacts dont l'email ou l'URL de profil est opposé (recherche de recruteurs, V4-10 d)."""
+    with user_transaction() as (s, uid):
+        return [
+            c
+            for c in found
+            if not suppressions.any_suppressed(s, uid, suppressions.fingerprints(c.get("email"), c.get("profile_url")))
+        ]
 
 
 def _public(app, item, contacts: list, events: list) -> dict:

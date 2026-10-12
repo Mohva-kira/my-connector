@@ -200,12 +200,15 @@ def test_legacy_application_roundtrip_and_status_rules(client, data_dir):
     bad = client.patch("/api/applications/job:111", json={"contacts": [{"email": "pas-un-email"}]})
     assert bad.status_code == 422
     ok = client.patch("/api/applications/job:111", json={"contacts": [{"full_name": "Ana", "email": "ana@acme.com"}]})
-    assert ok.json()["contacts"][0] == {
+    contact = ok.json()["contacts"][0]
+    assert contact.pop("collected_at").endswith("Z")  # V4-8 : date de collecte (UTC) et état d'opposition
+    assert contact == {
         "full_name": "Ana",
         "profile_url": "",
         "email": "ana@acme.com",
         "headline": "",
         "source": "manuel",
+        "opposed": False,
     }
     # C-4 : « name » n'est plus lu (le nom est perdu, pas d'erreur).
     legacy = client.patch("/api/applications/job:111", json={"contacts": [{"name": "Ana", "email": "ana@acme.com"}]})

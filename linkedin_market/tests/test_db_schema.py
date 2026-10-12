@@ -339,3 +339,34 @@ def test_contact_purge_after_par_defaut_trois_ans(db_user_id):
         score = s.get(models.Application, application_id).score
     assert contact.purge_after - contact.collected_at >= timedelta(days=3 * 365)
     assert score == 72.5 and isinstance(score, float)
+
+
+@pytest.mark.db
+def test_contact_opposed_at_present_et_nul_par_defaut(db_user_id):
+    assert "opposed_at" in models.CompanyContact.__table__.columns
+    assert models.CompanyContact.__table__.columns["opposed_at"].nullable
+    with session.transaction() as s:
+        item_id = _item(s, db_user_id)
+        application_id = s.execute(
+            insert(models.Application)
+            .values(user_id=db_user_id, item_id=item_id, score=1, generator="local", folder_path="applications/x")
+            .returning(models.Application.id)
+        ).scalar_one()
+        opposed_at = s.execute(
+            insert(models.CompanyContact)
+            .values(user_id=db_user_id, application_id=application_id, full_name="Recruteur")
+            .returning(models.CompanyContact.opposed_at)
+        ).scalar_one()
+    assert opposed_at is None
+
+
+@pytest.mark.db
+def test_revision_0002_ajoute_puis_retire_opposed_at(db_schema):
+    with db_schema.begin() as conn:
+        cfg = alembic_config(conn)
+        try:
+            command.downgrade(cfg, "0001")
+            assert "opposed_at" not in {c["name"] for c in inspect(conn).get_columns("company_contacts")}
+        finally:
+            command.upgrade(cfg, "head")
+        assert "opposed_at" in {c["name"] for c in inspect(conn).get_columns("company_contacts")}

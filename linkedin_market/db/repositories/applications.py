@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Application, ApplicationEvent, CollectedItem, CompanyContact
 from . import items as items_repo
+from . import suppressions
 
 
 def get(session: Session, user_id: UUID, ref: str, *, lock: bool = False) -> tuple[Application, CollectedItem] | None:
@@ -134,10 +135,43 @@ def contacts(session: Session, user_id: UUID, application_ids: list[UUID]) -> di
     return found
 
 
+def all_contacts(session: Session, user_id: UUID) -> list[CompanyContact]:
+    """Tous les contacts de l'utilisateur (toutes candidatures), pour l'appariement par empreinte (V4-9)."""
+    return list(
+        session.execute(
+            select(CompanyContact).where(CompanyContact.user_id == user_id).order_by(CompanyContact.collected_at)
+        ).scalars()
+    )
+
+
+def oppose_contacts(session: Session, user_id: UUID, contact_ids: list[UUID]) -> None:
+    """Minimisation d'une opposition (I-13) : ``opposed_at = now()``, email et URL effacés ; la ligne reste."""
+    if contact_ids:
+        session.execute(
+            update(CompanyContact)
+            .where(
+                CompanyContact.user_id == user_id,
+                CompanyContact.id.in_(contact_ids),
+                CompanyContact.opposed_at.is_(None),
+            )
+            .values(opposed_at=func.now(), email=None, profile_url="")
+        )
+
+
 def replace_contacts(session: Session, user_id: UUID, application_id: UUID, rows: list[dict[str, Any]]) -> None:
     """Remplace la liste des contacts. Un contact déjà connu (même URL de profil, sinon même email) est mis à jour
-    en place : il garde son ``id`` (messages liés), sa date de collecte et sa date de purge (I-14)."""
-    existing = contacts(session, user_id, [application_id])[application_id]
+    en place : il garde son ``id`` (messages liés), sa date de collecte et sa date de purge (I-14).
+
+    Contacts opposés (V4-10) : jamais supprimés ni modifiés ; une ligne entrante sans coordonnée dont le nom
+    correspond à un opposé est son écho et est ignorée ; une ligne dont une coordonnée est opposée lève
+    ``suppressions.OpposedContact`` avant toute écriture.
+    """
+    incoming = {h for row in rows for h in suppressions.fingerprints(row.get("email"), row.get("profile_url"))}
+    if suppressions.any_suppressed(session, user_id, incoming):
+        raise suppressions.OpposedContact(suppressions.OPPOSED_CONTACT_MESSAGE)
+    everyone = contacts(session, user_id, [application_id])[application_id]
+    existing = [c for c in everyone if c.opposed_at is None]
+    opposed_names = {c.full_name.strip().lower() for c in everyone if c.opposed_at is not None}
 
     def key(profile_url: str | None, email: str | None) -> str:
         return f"url:{profile_url}" if profile_url else f"mail:{(email or '').lower()}"
@@ -145,6 +179,12 @@ def replace_contacts(session: Session, user_id: UUID, application_id: UUID, rows
     by_key = {key(c.profile_url, c.email): c for c in existing}
     kept: set[UUID] = set()
     for row in rows:
+        if (
+            not row.get("email")
+            and not row.get("profile_url")
+            and (row.get("full_name") or "").strip().lower() in opposed_names
+        ):
+            continue  # écho d'un contact opposé tel que lu par le client
         previous = by_key.get(key(row.get("profile_url"), row.get("email")))
         if previous is not None and previous.id not in kept:
             kept.add(previous.id)

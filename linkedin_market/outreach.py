@@ -13,7 +13,7 @@ import ssl
 import time
 from collections.abc import Callable
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import make_msgid, parseaddr
 from pathlib import Path
 
 from selenium.common.exceptions import WebDriverException
@@ -35,8 +35,65 @@ class OutreachError(RuntimeError):
     """Envoi impossible ou échoué (message affichable tel quel)."""
 
 
+class RecipientSuppressed(OutreachError):
+    """Le destinataire a demandé à ne plus être contacté (I-13) : aucun envoi, jamais (traduite en ``409``)."""
+
+    def __init__(self) -> None:
+        super().__init__("Ce destinataire a demandé à ne plus être contacté.")
+
+
 class UncertainDelivery(OutreachError):
     """L'envoi a peut-être eu lieu sans confirmation visible : à vérifier par l'utilisateur, jamais renvoyé."""
+
+
+# ----------------------------------------------------------------- pied imposé
+FOOTER_SEPARATOR = "\n\n"
+ORIGIN_TEXTS = {
+    "linkedin_equipe_recrutement": "l'équipe de recrutement affichée sur l'offre LinkedIn",
+    "manuel": "une saisie manuelle à partir d'informations publiques",
+}
+
+
+def compose_footer(channel: str, title: str, origin: str, sender: str) -> str:
+    """Pied imposé (I-12) ajouté par le serveur après le corps de chaque message ; fonction pure.
+
+    ``title`` est le titre de l'offre déjà raccourci par l'appelant (100 caractères en email, 60 sur LinkedIn),
+    ``origin`` la source du contact (``linkedin_equipe_recrutement`` ou ``manuel``) et ``sender`` l'adresse nue
+    qui reçoit les demandes de désinscription.
+    """
+    if channel == "linkedin":
+        return f"Au sujet de votre offre « {title} ». Pour ne plus être contacté(e), répondez STOP."
+    origin_text = ORIGIN_TEXTS.get(origin, ORIGIN_TEXTS["manuel"])
+    return (
+        f"Je vous contacte au sujet de votre offre « {title} » ; votre adresse provient de {origin_text}. "
+        f"Pour ne plus recevoir de message de ma part, répondez « STOP » ou écrivez à {sender} : "
+        "votre demande sera prise en compte immédiatement."
+    )
+
+
+def strip_footer(body: str, footer: str) -> str:
+    """Corps sans le pied imposé s'il le termine déjà (un pied saisi par le client n'est jamais doublé)."""
+    text = (body or "").rstrip()
+    if footer and text.endswith(footer):
+        text = text[: -len(footer)].rstrip()
+    return text
+
+
+def assemble(body: str, footer: str) -> str:
+    """Texte envoyé : ``corps + « \\n\\n » + pied`` (V4-4)."""
+    return strip_footer(body, footer) + FOOTER_SEPARATOR + footer
+
+
+def connection_note(body: str, footer: str) -> tuple[str, bool]:
+    """Note de connexion LinkedIn (300 caractères Unicode) : le corps est tronqué, le pied reste entier (V4-4).
+
+    Renvoie ``(note, tronquée)``. Aucun « … » n'est ajouté.
+    """
+    text = strip_footer(body, footer)
+    if len(text) + len(FOOTER_SEPARATOR) + len(footer) <= LINKEDIN_NOTE_MAX:
+        return text + FOOTER_SEPARATOR + footer, False
+    room = max(0, LINKEDIN_NOTE_MAX - len(FOOTER_SEPARATOR) - len(footer))
+    return text[:room].rstrip() + FOOTER_SEPARATOR + footer, True
 
 
 # --------------------------------------------------------------------- email
@@ -47,7 +104,17 @@ def validate_recipient(address: str) -> str:
     return address
 
 
-def build_email(sender: str, to: str, subject: str, body: str, attachments: list[Path] | None = None) -> EmailMessage:
+def build_email(
+    sender: str,
+    to: str,
+    subject: str,
+    body: str,
+    attachments: list[Path] | None = None,
+    *,
+    unsubscribe: bool = False,
+) -> EmailMessage:
+    """Message prêt à envoyer ; ``unsubscribe`` ajoute ``List-Unsubscribe: <mailto:…?subject=STOP>`` (messages à
+    l'entreprise seulement, jamais l'email de test ; pas de ``List-Unsubscribe-Post``)."""
     if "\n" in subject or "\r" in subject:
         raise OutreachError("L'objet ne peut pas contenir de saut de ligne.")
     if not body.strip():
@@ -57,6 +124,9 @@ def build_email(sender: str, to: str, subject: str, body: str, attachments: list
     message["To"] = validate_recipient(to)
     message["Subject"] = subject.strip()
     message["Message-ID"] = make_msgid(domain=sender.rsplit("@", 1)[-1].strip("> ") or None)
+    address = parseaddr(sender)[1]
+    if unsubscribe and address:
+        message["List-Unsubscribe"] = f"<mailto:{address}?subject=STOP>"
     message.set_content(body)
     for path in attachments or []:
         message.add_attachment(
@@ -85,7 +155,13 @@ def send_email(
 
 
 def deliver_email(
-    to: str, subject: str, body: str, attachments: list[Path] | None = None, smtp: dict | None = None
+    to: str,
+    subject: str,
+    body: str,
+    attachments: list[Path] | None = None,
+    smtp: dict | None = None,
+    *,
+    unsubscribe: bool = False,
 ) -> tuple[dict, str]:
     """Envoie un email ; renvoie le résultat et le ``Message-ID`` (conservé dans ``outreach_messages``).
 
@@ -99,7 +175,7 @@ def deliver_email(
     insecure = config.smtp_security_error(smtp)
     if insecure:
         raise OutreachError(insecure)
-    message = build_email(smtp["from"], to, subject, body, attachments)
+    message = build_email(smtp["from"], to, subject, body, attachments, unsubscribe=unsubscribe)
     try:
         if smtp["security"] == "ssl":
             client = smtplib.SMTP_SSL(
@@ -173,19 +249,25 @@ def _wait(predicate, timeout: float, check: Callable[[], None]):
 def send_linkedin_message(
     driver,
     profile_url: str,
-    text: str,
+    body: str,
     caution: config.Caution,
     *,
+    footer: str,
     check: Callable[[], None] = lambda: None,
     timeout: float = 12.0,
 ) -> dict:
-    """Message direct (relation de 1er degré) ou, à défaut, demande de connexion avec note (300 caractères max)."""
+    """Message direct (relation de 1er degré) ou, à défaut, demande de connexion avec note (300 caractères max).
+
+    Le pied imposé ``footer`` (I-12) suit le corps dans les deux modes (``corps + « \\n\\n » + pied``). Message direct :
+    jamais tronqué. Note de connexion : le corps est tronqué, le pied reste entier (``connection_note``).
+    """
     if not _PROFILE_URL.match(profile_url or ""):
         raise OutreachError(
             "Profil LinkedIn invalide : renseigne l'URL du profil du recruteur (https://www.linkedin.com/in/…)."
         )
-    if not text.strip():
+    if not strip_footer(body, footer):
         raise OutreachError("Le message est vide.")
+    text = assemble(body, footer)
     driver.get(profile_url)
     human_pause(caution, 0.6)
     if any(p in driver.current_url for p in ("/checkpoint", "/authwall", "/login", "/uas/")):
@@ -262,10 +344,7 @@ def send_linkedin_message(
     field = _wait(lambda: driver.execute_script(_JS_NOTE_FIELD), timeout, check)
     if field is None:
         raise OutreachError("Champ de note introuvable.")
-    note = text.strip()
-    truncated = len(note) > LINKEDIN_NOTE_MAX
-    if truncated:
-        note = note[: LINKEDIN_NOTE_MAX - 1].rstrip() + "…"
+    note, truncated = connection_note(body, footer)
     field.send_keys(note)
     send = [
         b

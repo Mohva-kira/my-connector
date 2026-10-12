@@ -1,7 +1,8 @@
 # Base de Données, Modélisation & Migrations
 
 > **Statut** : §§ 1 à 4 et 8 `[ACTUEL]` depuis l'acceptation de la vague 1 (2026-10-09) ; § 5.1 (réservation de
-> message) et § 5.2 (plafond `apply`) `[ACTUEL]` depuis l'acceptation de la vague 2 (2026-10-09) ; le reste de la
+> message) et § 5.2 (plafond `apply`) `[ACTUEL]` depuis l'acceptation de la vague 2 (2026-10-09), § 5.1 complété par la
+> `suppression_list` et la révision `0002` (`opposed_at`) à l'acceptation de la vague 4 (2026-10-12) ; le reste de la
 > généralisation « transaction par cas d'usage », § 6 (purge, vague 6) et la sauvegarde automatique du § 7
 > restent `[CIBLE]`. Le schéma de référence est
 > `schemas-architecture/03-database-erd.md` (tables, colonnes, contraintes, rétention, correspondance des
@@ -173,7 +174,8 @@ linkedin_market/migrations/
 ├── script.py.mako
 └── versions/
     ├── 0001_initial.py        # schéma complet + données de référence sources + trigger d'immuabilité
-    └── 0002_<objet>.py        # évolutions de schéma suivantes
+    ├── 0002_contact_opposed_at.py  # [ACTUEL] vague 4 : company_contacts.opposed_at timestamptz NULL (I-13)
+    └── 0003_<objet>.py        # évolutions de schéma suivantes
 linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_market_data/ (pas une révision Alembic)
 ```
 - Identifiants de révision **séquentiels sur 4 chiffres** (`alembic revision --rev-id 0002 -m "…"`,
@@ -230,12 +232,16 @@ CREATE TRIGGER trg_reports_immutable BEFORE UPDATE ON reports
 
 ### 3.3 bis Précisions de schéma validées (vague 1, 2026-10-08)
 - `CHECK` sur **tous** les champs énumérés, y compris `tasks.kind` : un nouveau type de tâche (ex. `purge`, vague 6)
-  exige une révision `0002_…` **et** l'entrée au glossaire avant le code.
+  exige une révision `0003_…` (ou suivante) **et** l'entrée au glossaire avant le code.
 - `CHECK` « chemin relatif » sur `reports.html_path` et `applications.folder_path` (ni `/` initial, ni `..`).
 - Textes `NOT NULL DEFAULT ''` sauf `collected_items.text`, `company_contacts.email`, `outreach_messages.error`,
   `outreach_messages.smtp_message_id`, `tasks.error` (NULL = absent). `tasks.params` / `tasks.meta` `NOT NULL
   DEFAULT '{}'` ; `tasks.id DEFAULT uuidv7()` en secours (Python fournit `uuid.uuid7()`).
-- `company_contacts.purge_after NOT NULL DEFAULT now() + interval '3 years'` (recalculé à chaque contact).
+- `company_contacts.purge_after NOT NULL DEFAULT now() + interval '3 years'` (recalculé à chaque contact ; la doc
+  parle parfois de 1095 jours : écart d'au plus 1 jour, point mineur à aligner en vague 6).
+- `company_contacts.opposed_at timestamptz NULL` `[ACTUEL]` (révision `0002`, vague 4) : renseigné par
+  `POST /api/suppressions` ; `email` est alors `NULL` et `profile_url` `''` (minimisation), la ligne et sa
+  `purge_after` restent ; jamais remis à `NULL`.
 - Index sur les clés étrangères parcourues par les jointures, cascades et `SET NULL` :
   `application_events (application_id)`, `company_contacts (user_id, application_id)`,
   `outreach_messages (application_id)`, `reports (task_id) WHERE task_id IS NOT NULL`,
@@ -330,8 +336,8 @@ Implémentée par `web/services.reserve_message()` (ORM SQLAlchemy, pas de SQL b
 BEGIN;
 SELECT id FROM applications WHERE id = :app AND user_id = :uid FOR UPDATE;          -- un envoi à la fois par candidature
 SELECT message_daily_max FROM user_settings WHERE user_id = :uid FOR UPDATE;         -- sérialise le plafond (E-11)
--- [CIBLE] vague 4 : SELECT 1 FROM suppression_list WHERE user_id = :uid AND recipient_hash = :h ;
---                   trouvé ⇒ ROLLBACK + 409 (I-13) — absent à ce jour.
+-- [ACTUEL] vague 4 : SELECT 1 FROM suppression_list WHERE user_id = :uid AND recipient_hash IN (:h) ;
+--                   trouvé (ou contact lié avec opposed_at) ⇒ ROLLBACK + 409 (I-13), avant le comptage.
 SELECT count(*) FROM outreach_messages WHERE …;                                      -- ≥ plafond ⇒ ROLLBACK + 429
 INSERT INTO outreach_messages (…, status) VALUES (…, 'confirmé') RETURNING id;
 COMMIT;
@@ -345,8 +351,9 @@ INSERT INTO application_events (application_id, kind, details) VALUES (:app, 'me
 INSERT INTO activity_events (user_id, kind, data) VALUES (:uid, 'message_email', :data);
 COMMIT;
 ```
-`recipient_hash` = `sha256(lower(trim(email)))` ou `sha256(url de profil normalisée sans paramètres ni « / » final)`
-(utilisé seulement à partir de la vague 4, pas encore en base).
+`recipient_hash` = `sha256(lower(trim(email)))` ou `sha256(forme canonique de l'URL de profil)` : minuscules,
+`https://www.linkedin.com/in/<slug>`, sous-domaine pays remplacé par `www.`, sans paramètres, fragment ni « / » final
+(`backend/01` § 5.7.1 V4-5 ; `[ACTUEL]` depuis la vague 4, source unique `db/repositories/suppressions.py`).
 
 Précisions livrées (`db/repositories/outreach.py::count_day`, `insert_confirmed`, `mark_sent`, `mark_failed`,
 `note_uncertain`, `release`) :

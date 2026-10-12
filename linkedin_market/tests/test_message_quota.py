@@ -181,12 +181,12 @@ def test_g6_conflit_rend_la_reservation(client, manager, data_dir, monkeypatch):
 def test_g6_plafond_message_revérifié_au_debut_de_la_tache(data_dir, monkeypatch, smtp_server):
     use_smtp(monkeypatch, smtp_server.server_address[1])
     (ref,) = prepare(data_dir)
-    message_id = services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b",
+    message_id, footer = services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b",
                                           attach_cv=False)  # fmt: skip
     settings.save_settings({"message_daily_max": 0})  # plafond abaissé entre l'API et le début de la tâche
     with pytest.raises(activity.QuotaExceeded):
         services.send_message(FakeCtx(), ref, message_id=message_id, channel="email", to="jane@acme.com",
-                              subject="s", body="b", attach_cv=False)  # fmt: skip
+                              subject="s", body="b", footer=footer, attach_cv=False)  # fmt: skip
     assert [r.status for r in messages()] == ["échec"]
     assert not getattr(smtp_server, "mails", [])
 
@@ -214,12 +214,12 @@ def test_g6_plafond_candidature_revérifié_sous_verrou(data_dir, monkeypatch, a
 def test_g5_revérifié_au_debut_de_la_tache(data_dir, monkeypatch):
     (ref,) = prepare(data_dir)
     use_smtp(monkeypatch, 25)
-    message_id = services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b",
+    message_id, footer = services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b",
                                           attach_cv=False)  # fmt: skip
     monkeypatch.setenv("SMTP_HOST", "smtp.exemple.fr")  # .env modifié après l'acceptation par l'API
     with pytest.raises(RuntimeError, match="SMTP_SECURITY=none") as raised:
         services.send_message(FakeCtx(), ref, message_id=message_id, channel="email", to="jane@acme.com",
-                              subject="s", body="b", attach_cv=False)  # fmt: skip
+                              subject="s", body="b", footer=footer, attach_cv=False)  # fmt: skip
     assert str(raised.value) == INSECURE
     assert [r.status for r in messages()] == ["échec"]
 
@@ -294,7 +294,7 @@ def test_reservation_liee_au_contact(data_dir):
     application.update_application(
         ref, contacts=[{"full_name": "Jane Doe", "email": "Jane.Doe@acme.com", "source": "manuel"}]
     )
-    message_id = services.reserve_message(ref, channel="email", to="jane.doe@acme.com", subject="s", body="b",
+    message_id, _ = services.reserve_message(ref, channel="email", to="jane.doe@acme.com", subject="s", body="b",
                                           attach_cv=False)  # fmt: skip
     with session.transaction() as s:
         row = s.get(models.OutreachMessage, UUID(str(message_id)))
@@ -381,8 +381,43 @@ def test_erreur_a_la_fermeture_smtp_ignoree(data_dir, monkeypatch, smtp_server):
     result, message_id = outreach.deliver_email("jane@acme.com", "Candidature", "Bonjour")
     assert result["to"] == "jane@acme.com" and message_id.startswith("<")
     (ref,) = prepare(data_dir)
-    reserved = services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b",
+    reserved, footer = services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b",
                                         attach_cv=False)  # fmt: skip
     services.send_message(FakeCtx(), ref, message_id=reserved, channel="email", to="jane@acme.com", subject="s",
-                          body="b", attach_cv=False)  # fmt: skip
+                          body="b", footer=footer, attach_cv=False)  # fmt: skip
     assert [r.status for r in messages()] == ["envoyé"]
+
+
+# --------------------------------------------- vague 4 : opposition entre réservation et tâche (I-13)
+def test_i13_opposition_entre_la_reservation_et_la_tache(data_dir, monkeypatch, smtp_server):
+    from linkedin_market import outreach
+
+    use_smtp(monkeypatch, smtp_server.server_address[1])
+    settings.save_settings({"message_daily_max": 1})
+    (ref,) = prepare(data_dir)
+    message_id, footer = services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b",
+                                                  attach_cv=False)  # fmt: skip
+    assert services.message_count_today() == 1
+    application.record_opposition("jane@acme.com", "plainte")  # l'utilisateur saisit l'opposition entre-temps
+    with pytest.raises(outreach.RecipientSuppressed) as raised:
+        services.send_message(FakeCtx(), ref, message_id=message_id, channel="email", to="jane@acme.com",
+                              subject="s", body="b", footer=footer, attach_cv=False)  # fmt: skip
+    assert str(raised.value) == "Ce destinataire a demandé à ne plus être contacté."
+    (row,) = messages()
+    assert row.status == "échec" and row.error == str(raised.value) and row.sent_at is None
+    assert not getattr(smtp_server, "mails", [])  # aucun envoi
+    assert services.message_count_today() == 0  # place rendue
+    assert activity.count_today("message_email") == 0
+
+
+def test_i13_409_avant_429_dans_la_reservation(data_dir):
+    from linkedin_market import outreach
+
+    settings.save_settings({"message_daily_max": 0})  # plafond atteint d'emblée
+    (ref,) = prepare(data_dir)
+    application.record_opposition("jane@acme.com", "désinscription")
+    with pytest.raises(outreach.RecipientSuppressed):
+        services.reserve_message(ref, channel="email", to="jane@acme.com", subject="s", body="b", attach_cv=False)
+    with pytest.raises(activity.QuotaExceeded):
+        services.reserve_message(ref, channel="email", to="autre@acme.com", subject="s", body="b", attach_cv=False)
+    assert messages() == []
