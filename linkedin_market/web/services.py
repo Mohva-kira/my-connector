@@ -11,6 +11,7 @@ from .. import (
     application,
     apply_bot,
     config,
+    consent,
     cv_pdf,
     interpreter,
     logmask,
@@ -30,6 +31,7 @@ from ..db import utc_iso, utcnow
 from ..db.repositories import applications as applications_repo
 from ..db.repositories import outreach as outreach_repo
 from ..db.repositories import settings as settings_repo
+from ..db.repositories import sources as sources_repo
 from ..db.repositories import user_transaction
 from ..models import SearchRequest
 from .tasks import RUNNING, TaskContext
@@ -56,6 +58,28 @@ def build_request(overrides: dict | None = None) -> SearchRequest:
         max_items=min(values["max_items"] or cap, cap),
         profile_source=values["profile_source"],
     )
+
+
+def validate_run_sources(codes: list[str]) -> list[str]:
+    """Valide ``RunBody.sources`` pour une collecte ; renvoie les sources demandées en mode ``navigateur``.
+
+    Erreurs (``ValueError``, converties en ``422`` par le routeur, dans l'ordre rencontré, I-16/vague 3) :
+    source inconnue, source ``import_manuel`` (Indeed s'importe à la main) puis source non encore activée.
+    """
+    with user_transaction() as (s, _uid):
+        known = {source.code: source for source in sources_repo.all_sources(s)}
+    navigate: list[str] = []
+    for code in codes:
+        source = known.get(code)
+        if source is None:
+            raise ValueError(f"sources : source inconnue « {code} ».")
+        if source.access_mode == "import_manuel":
+            raise ValueError("sources : Indeed s'importe à la main, elle ne se collecte pas.")
+        if not source.enabled:
+            raise ValueError(f"sources : la source « {source.label} » n'est pas encore disponible.")
+        if source.access_mode == "navigateur":
+            navigate.append(code)
+    return navigate
 
 
 # ------------------------------------------------------------- résultats
@@ -236,7 +260,9 @@ def apply_job(ctx: TaskContext, job_id: str) -> dict:
     from ..browser import create_driver
 
     entry = application.get_application(job_id)
-    # Plafond relu sous verrou au début de la tâche (I-07) : l'API a pu accepter d'autres candidatures entre-temps.
+    # Préconditions revérifiées au début de la tâche (I-07, I-16) : l'API a pu accepter d'autres candidatures, ou le
+    # consentement a pu être révoqué, entre la création de la tâche et son démarrage.
+    consent.require("linkedin")
     activity.check_quota_locked(("apply",), "apply_daily_max", "candidatures")
     activity.guard_not_blocked()
     cfg = settings.load_settings()
@@ -254,7 +280,7 @@ def apply_job(ctx: TaskContext, job_id: str) -> dict:
         bot = apply_bot.EasyApply(driver, ctx, cv_pdf=pdf, caution=config.CAUTION_LEVELS[cfg["caution"]], cfg=cfg)
         result = bot.run({"id": job_id, "title": entry.get("title", ""), "url": entry["url"]})
     except apply_bot.BlockedError:
-        activity.record("blocked", where="candidature", job=job_id)
+        activity.record("blocked", where="candidature", job=job_id, source="linkedin")
         application.update_application(job_id, apply_state="échec")
         raise
     except BaseException:
@@ -285,6 +311,7 @@ def lookup_contacts(ctx: TaskContext, job_id: str) -> dict:
     from ..browser import create_driver
 
     entry = application.get_application(job_id)
+    consent.require("linkedin")
     activity.guard_not_blocked()
     caution = config.CAUTION_LEVELS[settings.load_settings()["caution"]]
     driver = create_driver()
@@ -293,7 +320,7 @@ def lookup_contacts(ctx: TaskContext, job_id: str) -> dict:
         ctx.set_status(RUNNING)
         found = contacts_mod.find_hiring_team(driver, entry["url"], caution, check=ctx.check, log_fn=ctx.log)
     except PermissionError as exc:
-        activity.record("blocked", where="recherche de contacts", job=job_id)
+        activity.record("blocked", where="recherche de contacts", job=job_id, source="linkedin")
         raise RuntimeError(str(exc)) from exc
     finally:
         driver.quit()
@@ -453,6 +480,7 @@ def send_message(
 def _send_linkedin(ctx: TaskContext, job_id: str, to: str, body: str, cfg: dict) -> dict:
     from ..browser import create_driver
 
+    consent.require("linkedin")
     activity.guard_not_blocked()
     driver = create_driver()
     try:
@@ -461,7 +489,7 @@ def _send_linkedin(ctx: TaskContext, job_id: str, to: str, body: str, cfg: dict)
         ctx.log(f"Envoi du message LinkedIn à {logmask.mask_profile_url(to)}…")
         sent = outreach.send_linkedin_message(driver, to, body, config.CAUTION_LEVELS[cfg["caution"]], check=ctx.check)
     except PermissionError as exc:
-        activity.record("blocked", where="message LinkedIn", job=job_id)
+        activity.record("blocked", where="message LinkedIn", job=job_id, source="linkedin")
         raise RuntimeError(str(exc)) from exc
     finally:
         driver.quit()
@@ -481,6 +509,7 @@ def import_linkedin_profile(ctx: TaskContext) -> dict:
     from ..browser import create_driver
     from ..scraper import LinkedInScraper
 
+    consent.require("linkedin")
     activity.guard_not_blocked()
     request = build_request()
     driver = create_driver()
@@ -502,6 +531,7 @@ def sync_skill_to_linkedin(ctx: TaskContext, skill: str) -> dict:
     """Ajoute au profil LinkedIn une compétence que l'utilisateur vient d'ajouter dans l'interface."""
     from ..browser import create_driver
 
+    consent.require("linkedin")
     activity.guard_not_blocked()
     caution = config.CAUTION_LEVELS[settings.load_settings()["caution"]]
     driver = create_driver()
@@ -510,7 +540,7 @@ def sync_skill_to_linkedin(ctx: TaskContext, skill: str) -> dict:
         ctx.set_status(RUNNING)
         result = profile_sync.add_skill(driver, skill, caution, check=ctx.check, log_fn=ctx.log)
     except PermissionError as exc:
-        activity.record("blocked", where="profil LinkedIn (compétence)")
+        activity.record("blocked", where="profil LinkedIn (compétence)", source="linkedin")
         raise RuntimeError(str(exc)) from exc
     finally:
         driver.quit()

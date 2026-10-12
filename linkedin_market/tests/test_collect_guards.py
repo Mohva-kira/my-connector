@@ -113,7 +113,9 @@ IDS = [4000001, 4000002, 4000003, 4000004, 4000005]
 
 
 # ----------------------------------------------------------------------- G-10
-def test_run_blocked_pendant_la_collecte(client, fast, monkeypatch):
+def test_run_blocked_pendant_la_collecte(client, fast, monkeypatch, accept_risks):
+    accept_risks()
+
     def checkpoint_at_third_job(driver, url):
         if driver.detail_gets == 3:
             driver.current_url = CHECKPOINT
@@ -136,7 +138,8 @@ def test_run_blocked_pendant_la_collecte(client, fast, monkeypatch):
     assert any("Collecte interrompue par LinkedIn" in line for line in task["logs"])
 
 
-def test_run_blocked_false_sans_blocage(client, fast, monkeypatch):
+def test_run_blocked_false_sans_blocage(client, fast, monkeypatch, accept_risks):
+    accept_risks()
     use_driver(monkeypatch, FakeLinkedIn(IDS))
     task = wait_final(client, client.post("/api/runs", json=RUN).json()["id"])
     assert task["status"] == "terminée", task
@@ -145,7 +148,8 @@ def test_run_blocked_false_sans_blocage(client, fast, monkeypatch):
     assert activity.block_status() is None
 
 
-def test_run_blocked_false_sans_collecte(client, fast, monkeypatch):
+def test_run_blocked_false_sans_collecte(client, fast, monkeypatch, accept_risks):
+    accept_risks()
     use_driver(monkeypatch, FakeLinkedIn(IDS))
     first = wait_final(client, client.post("/api/runs", json=RUN).json()["id"])
     assert first["status"] == "terminée"
@@ -154,7 +158,9 @@ def test_run_blocked_false_sans_collecte(client, fast, monkeypatch):
 
 
 # ------------------------------------------------------------------------ G-8
-def test_annulation_au_milieu_d_une_page(client, manager, fast, monkeypatch):
+def test_annulation_au_milieu_d_une_page(client, manager, fast, monkeypatch, accept_risks):
+    accept_risks()
+
     def cancel_after_second_job(driver, url):
         if driver.detail_gets == 2:
             (run,) = [t for t in manager.active() if t.kind == "run"]
@@ -171,7 +177,8 @@ def test_annulation_au_milieu_d_une_page(client, manager, fast, monkeypatch):
 
 
 # ------------------------------------------------------------------------ G-3
-def test_scrape_applique_le_plafond_de_la_prudence(fast, monkeypatch):
+def test_scrape_applique_le_plafond_de_la_prudence(fast, monkeypatch, accept_risks):
+    accept_risks()
     driver = FakeLinkedIn(list(range(4000001, 4000021)))  # 20 offres affichées
     use_driver(monkeypatch, driver)
     outcome = pipeline.scrape(SearchRequest(keyword="python", caution="prudent", max_items=200), False)

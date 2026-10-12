@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from ... import activity, nlp, settings, storage
+from ... import activity, consent, nlp, settings, storage
 from .. import services
 from ..guards import require_browser_ready
 from ..tasks import TaskManager
@@ -24,10 +24,19 @@ def status(request: Request) -> dict:
     return services.status_snapshot(tasks_of(request))
 
 
+class BlockClearBody(BaseModel):
+    source: str = "linkedin"
+
+
 @router.post("/block/clear")
-def clear_block() -> dict:
-    """Lève la période de repos après un blocage LinkedIn (l'utilisateur a vérifié son compte)."""
-    activity.record("unblocked")
+def clear_block(body: BlockClearBody | None = None) -> dict:
+    """Lève la période de repos d'une source après vérification du compte par l'utilisateur (défaut LinkedIn)."""
+    code = body.source if body else "linkedin"
+    try:
+        consent.ensure_source_exists(code)
+    except consent.SourceNotFound:
+        raise HTTPException(404, "Source inconnue.") from None
+    activity.record("unblocked", source=code)
     return {"ok": True}
 
 
@@ -111,8 +120,13 @@ def _sync_skill(request: Request, skill: str, *, new: bool) -> dict:
     tasks = tasks_of(request)
     if tasks.has_active("profile_skill", skill):
         return {"status": "skipped", "message": "Ajout à LinkedIn déjà en cours pour cette compétence."}
+    # Cas particulier (I-16) : cette route ne renvoie jamais 428 ; sans consentement, l'ajout local est conservé
+    # mais la synchronisation LinkedIn est « unavailable », comme pour des identifiants absents.
     try:
+        consent.require("linkedin")
         require_browser_ready()
+    except consent.SourceConsentRequired as exc:
+        return {"status": "unavailable", "message": f"Compétence ajoutée ici, mais pas sur LinkedIn : {exc}"}
     except HTTPException as exc:
         return {"status": "unavailable", "message": f"Compétence ajoutée ici, mais pas sur LinkedIn : {exc.detail}"}
     task = tasks.submit(
@@ -144,6 +158,7 @@ def import_linkedin(request: Request) -> dict:
     tasks = tasks_of(request)
     if tasks.has_active("import_profile"):
         raise HTTPException(409, "Un import est déjà en cours.")
+    consent.require("linkedin")
     require_browser_ready()
     task = tasks.submit("import_profile", "Importer le profil LinkedIn", services.import_linkedin_profile, browser=True)
     return task.public()

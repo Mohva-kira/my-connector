@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
-from ... import activity, application, config, outreach, settings
+from ... import activity, application, config, consent, outreach, settings
 from .. import services
 from ..guards import quota_exceeded, require_browser_ready, require_credentials, require_not_blocked
 from ..services import tidy
@@ -116,6 +116,7 @@ def apply(request: Request, job_id: str) -> dict:
         raise HTTPException(409, "Une candidature est déjà en cours pour cette offre.")
     if entry["status"] in ("postulée", "entretien"):
         raise HTTPException(409, f"Cette candidature est déjà au statut « {entry['status']} ».")
+    consent.require("linkedin")
     require_browser_ready(("apply",), settings.load_settings()["apply_daily_max"], "candidatures")
     title = tidy(entry.get("title", ""), 80)
     return tasks.submit(
@@ -133,6 +134,7 @@ def lookup_contacts(request: Request, job_id: str) -> dict:
     tasks = tasks_of(request)
     if tasks.has_active("contacts", job_id):
         raise HTTPException(409, "Une recherche de contacts est déjà en cours pour cette offre.")
+    consent.require("linkedin")
     require_browser_ready()
     return tasks.submit(
         "contacts",
@@ -177,6 +179,7 @@ def send_message(request: Request, job_id: str, body: MessageBody) -> dict:
         if not body.subject.strip() or "\n" in body.subject:
             raise HTTPException(422, "Objet requis, sur une seule ligne.")
     else:
+        consent.require("linkedin")
         require_credentials()
     to = body.to.strip()
     try:

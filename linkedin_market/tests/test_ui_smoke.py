@@ -51,7 +51,8 @@ def wait(driver, condition, timeout=15):
     return WebDriverWait(driver, timeout).until(condition)
 
 
-def test_skills_page_add_and_remove(driver, base_url):
+def test_skills_page_add_and_remove(driver, base_url, accept_risks):
+    accept_risks()
     driver.get(f"{base_url}/competences")
     wait(driver, EC.presence_of_element_located((By.CSS_SELECTOR, "ul[aria-label='Compétences']")))
     field = driver.find_element(By.CSS_SELECTOR, "input[aria-label='Nouvelle compétence']")

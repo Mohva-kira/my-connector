@@ -37,7 +37,7 @@ Fonctions de cas d'usage, toutes de signature `(ctx: TaskContext, …) -> dict` 
 
 Règle : **toute précondition vérifiée par le routeur est revérifiée au début de la tâche** (la tâche peut attendre
 le verrou navigateur plusieurs minutes, l'état a pu changer). C'est déjà le cas pour les plafonds et le blocage ;
-`[CIBLE]` idem pour le consentement (I-16) et l'opposition (I-13).
+`[ACTUEL]` (vague 3) idem pour le consentement (I-16, `consent.require`) ; `[CIBLE]` pour l'opposition (I-13).
 
 Cible : un module par cas d'usage sous `linkedin_market/services/` (`analysis.py`, `applications.py`,
 `outreach.py`, `sources.py`, `retention.py`), chacun recevant une `Session` SQLAlchemy et un `TaskContext`.
@@ -86,7 +86,7 @@ qui enregistre l'événement `blocked` puis lève.
 | `application.ApplicationNotFound(KeyError)` | `_entry` | 404 |
 | `outreach.OutreachError` | validation du destinataire / test SMTP | 422 / 502 |
 | `ValueError` de `folder_of` | dossier hors `applications/` | 500 |
-| `SourceConsentRequired` `[CIBLE]` | `SourceConsentService.require` | 428 |
+| `consent.SourceConsentRequired` `[ACTUEL]` | `consent.require` (gestionnaire `web/app.py`) | 428 |
 | `RecipientSuppressed` `[CIBLE]` | contrôle `suppression_list` | 409 |
 | Toute exception **dans une tâche** | — | tâche `échec`, `error = str(exc)` (3 lignes de traceback dans `logs`) |
 
@@ -100,7 +100,7 @@ qui enregistre l'événement `blocked` puis lève.
   fonction prend `session, user_id` en premiers arguments (I-01) ; aucune requête SQL hors de ces modules. Les
   fichiers produits (rapports HTML, dossiers de candidature) restent sur disque, seuls leurs chemins relatifs sont
   en base.
-- `[CIBLE]` dépôt `consents` (vague 3).
+- `[ACTUEL]` (vague 3) dépôt `sources` (`db/repositories/sources.py` : sources, consentement actif, acceptation = révocation + insertion, révocation) et domaine `consent.py` ; `activity.last_block_event(source)` filtre le repos par source (`data.source`, absent = `linkedin`).
 
 ## 2. Gestion des Transactions & Verrous
 

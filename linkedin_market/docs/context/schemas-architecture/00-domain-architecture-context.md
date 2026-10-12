@@ -64,7 +64,7 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 | **I-13** | Chaque contact porte sa base légale (`interet_legitime`) et sa source ; une adresse présente dans `suppression_list` bloque tout envoi, définitivement. | Vérification avant chaque envoi (HTTP 409). |
 | **I-14** | Un contact entreprise sans réponse est supprimé **3 ans** après le dernier contact. | `purge_after` sur `company_contacts`. |
 | **I-15** | Identifiants, mots de passe SMTP, clés API et cookies de session ne sont jamais versionnés ni journalisés. Les cookies de session expirent **72 h** après la dernière connexion par identifiants. | `.env` hors Git ; cookies chiffrés Fernet en base (`platform_sessions`) `[ACTUEL]`. |
-| **I-16** | Une source en mode `navigateur` (LinkedIn, Malt, WTTJ) ne peut être utilisée qu'après acceptation, dans une **popup de risques**, de la version courante du texte de risques ; un changement de version redemande l'acceptation. | `source_consents` ; HTTP 428 sinon `[CIBLE]`. |
+| **I-16** | Une source en mode `navigateur` (LinkedIn, Malt, WTTJ) ne peut être utilisée qu'après acceptation, dans une **popup de risques**, de la version courante du texte de risques ; un changement de version redemande l'acceptation. | `source_consents` ; HTTP 428 sinon `[ACTUEL]` (vague 3, `consent.py`, revérifié au début de chaque tâche navigateur ; repos de 6 h par source ; CLI avec collecte refusé sans consentement). Items/import, nouvelles sources `[CIBLE]`. |
 
 ## 3. Matrice Actions Métier → Impact Système
 
@@ -89,7 +89,7 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 ## 4. Niveaux de Consistance & Traçabilité
 
 - **Consistance forte (transaction ACID PostgreSQL)** — `[ACTUEL]` pour le changement de statut et l'activation
-  d'un modèle, `[CIBLE]` pour l'envoi de message et le consentement :
+  d'un modèle, `[ACTUEL]` pour le consentement (vague 3), `[CIBLE]` pour l'envoi de message :
   - changement de statut de candidature + entrée d'historique ;
   - envoi d'un message : contrôle `suppression_list` + contrôle de plafond + insertion `outreach_messages` dans
     la même transaction (verrou `SELECT … FOR UPDATE` sur la ligne `applications`) ;

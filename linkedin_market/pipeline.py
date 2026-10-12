@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 
-from . import activity, config, matching, storage, trends
+from . import activity, config, consent, matching, storage, trends
 from . import profile as profile_mod
 from .models import Profile, SearchRequest
 
@@ -61,13 +61,15 @@ def scrape(
     Blocage (checkpoint, authwall) : arrêt immédiat de la navigation, événement ``blocked`` (``where="collecte"``)
     et repos de 6 h (I-06) ; les éléments déjà collectés sont gardés et l'analyse porte sur eux (E-4, option A).
     Annulation (``should_stop``, testé avant chaque page) : les éléments déjà collectés sont enregistrés, puis
-    ``Cancelled`` est levée.
+    ``Cancelled`` est levée. Consentement (I-16) revérifié ici : seul point d'entrée de la collecte LinkedIn, pour
+    le CLI comme pour la tâche web (``consent.SourceConsentRequired`` si révoqué entre-temps).
     """
     from .browser import create_driver
     from .scraper import LinkedInScraper
     from .session import login
 
     request = capped(request)
+    consent.require("linkedin")
     activity.guard_not_blocked()
 
     def check() -> None:
@@ -104,7 +106,7 @@ def scrape(
             if scraper.blocked or scraper._blocked():
                 break
         if scraper.blocked:
-            activity.record("blocked", where="collecte")
+            activity.record("blocked", where="collecte", source="linkedin")
             outcome.blocked = True
     finally:
         driver.quit()

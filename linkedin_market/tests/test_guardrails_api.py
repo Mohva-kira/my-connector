@@ -118,7 +118,8 @@ def frozen_clock(monkeypatch):
     return 5400
 
 
-def test_g2_retry_after_candidature(client, prepared, monkeypatch, frozen_clock):
+def test_g2_retry_after_candidature(client, prepared, monkeypatch, frozen_clock, accept_risks):
+    accept_risks()
     monkeypatch.setenv("LINKEDIN_EMAIL", "me@example.com")
     monkeypatch.setenv("LINKEDIN_PASSWORD", "x")
     settings.save_settings({"apply_daily_max": 1})
@@ -131,7 +132,8 @@ def test_g2_retry_after_candidature(client, prepared, monkeypatch, frozen_clock)
     assert response.headers["Retry-After"] == str(frozen_clock)
 
 
-def test_g2_retry_after_messages(client, prepared, monkeypatch, frozen_clock):
+def test_g2_retry_after_messages(client, prepared, monkeypatch, frozen_clock, accept_risks):
+    accept_risks()
     monkeypatch.setenv("SMTP_HOST", "127.0.0.1")
     monkeypatch.setenv("SMTP_FROM", "me@example.com")
     monkeypatch.setenv("SMTP_SECURITY", "none")

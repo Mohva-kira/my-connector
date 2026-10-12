@@ -106,12 +106,12 @@ class BlockedByLinkedIn(RuntimeError):
 BLOCK_COOLDOWN_HOURS = 6
 
 
-def _block(hours: float, now: datetime | None) -> tuple[datetime, datetime, str] | None:
+def _block(hours: float, now: datetime | None, source: str = "linkedin") -> tuple[datetime, datetime, str] | None:
     now = now or utcnow()
     if now.tzinfo is None:
         now = now.astimezone()
     with user_transaction() as (s, uid):
-        event = activity_repo.last_block_event(s, uid)
+        event = activity_repo.last_block_event(s, uid, source)
         if event is None or event.kind != "blocked":
             return None
         at, where = event.at, str(event.data.get("where", ""))
@@ -119,17 +119,20 @@ def _block(hours: float, now: datetime | None) -> tuple[datetime, datetime, str]
     return (at, until, where) if now < until else None
 
 
-def block_status(hours: float = BLOCK_COOLDOWN_HOURS, now: datetime | None = None) -> dict | None:
-    """Dernier blocage encore dans la période de repos (et non levé depuis), sinon None (I-06)."""
-    found = _block(hours, now)
+def block_status(
+    hours: float = BLOCK_COOLDOWN_HOURS, now: datetime | None = None, source: str = "linkedin"
+) -> dict | None:
+    """Dernier blocage de ``source`` encore dans la période de repos (et non levé depuis), sinon None (I-06)."""
+    found = _block(hours, now, source)
     if found is None:
         return None
     at, until, where = found
     return {"at": utc_iso(at), "where": where, "until": utc_iso(until)}
 
 
-def guard_not_blocked() -> None:
-    found = _block(BLOCK_COOLDOWN_HOURS, None)
+def guard_not_blocked(source: str = "linkedin") -> None:
+    """Repos de 6 h propre à ``source`` (vague 3) : un blocage LinkedIn ne bloque pas une autre source."""
+    found = _block(BLOCK_COOLDOWN_HOURS, None, source)
     if found:
         at, until, where = found
         raise BlockedByLinkedIn(

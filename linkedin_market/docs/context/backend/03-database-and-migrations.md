@@ -376,7 +376,7 @@ Précisions livrées (`db/repositories/outreach.py::count_day`, `insert_confirme
 | :--- | :--- |
 | Changement de statut manuel | `FOR UPDATE` sur `applications` + `UPDATE` + `INSERT application_events(kind='status')`. |
 | Candidature soumise `[ACTUEL]` (vague 2) | `FOR UPDATE` sur `user_settings` (`activity.check_quota_locked`) + contrôle `count(apply du jour)` au **démarrage** de la tâche (`services.apply_job`, avant tout accès au dossier) ; à la fin : statut + `apply_state` + `labels` (valeur 1) + `activity_events('apply')`. |
-| Consentement | `UPDATE source_consents SET revoked_at = now() WHERE … AND revoked_at IS NULL` + `INSERT`. |
+| Consentement `[ACTUEL]` (vague 3, `db/repositories/sources.py`) | `UPDATE source_consents SET revoked_at = now() WHERE … AND revoked_at IS NULL` + `INSERT`. |
 | Activation d'un modèle `[ACTUEL]` | `FOR UPDATE` sur `user_settings` + `UPDATE matching_models SET is_active = false WHERE user_id = :uid AND is_active` + `INSERT … (version = max+1, is_active = true)`. |
 | Collecte `[ACTUEL]` | insertion par lots de 100 (`ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE SET title, text, skills, keywords = anciens ∪ nouveaux, collected_at, purge_after` — ce dernier reste `NULL` s'il l'était) — une transaction par lot pour ne pas perdre une collecte interrompue. |
 

@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from .. import consent
 from .tasks import TaskManager
 
 FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -96,6 +97,13 @@ def create_app(*, tasks: TaskManager | None = None, token: str | None = "auto", 
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse({"detail": validation_detail(exc.errors())}, status_code=422)
 
+    @app.exception_handler(consent.SourceConsentRequired)
+    async def consent_required(request: Request, exc: consent.SourceConsentRequired) -> JSONResponse:
+        """Action navigateur sans consentement actif à la version courante des risques (I-16)."""
+        return JSONResponse(
+            {"detail": str(exc), "source": exc.source_code, "risk_version": exc.risk_version}, status_code=428
+        )
+
     @app.middleware("http")
     async def guard(request: Request, call_next):
         if not _HOST.match(request.headers.get("host", "")):
@@ -119,9 +127,9 @@ def create_app(*, tasks: TaskManager | None = None, token: str | None = "auto", 
     def health() -> dict:
         return {"ok": True}
 
-    from .routers import applications, core, jobs
+    from .routers import applications, core, jobs, sources
 
-    for module in (core, jobs, applications):
+    for module in (core, jobs, applications, sources):
         app.include_router(module.router, prefix="/api")
 
     @app.get("/{path:path}", include_in_schema=False)

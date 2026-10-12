@@ -114,7 +114,7 @@ class VerificationNotDoneError(RuntimeError):
 
 def _blocked_at_login() -> None:
     """Événement ``blocked`` (``where="connexion"``) puis arrêt : aucune nouvelle tentative (I-06)."""
-    activity.record("blocked", where="connexion")
+    activity.record("blocked", where="connexion", source="linkedin")
     log.error("Vérification LinkedIn non terminée : actions navigateur suspendues 6 h.")
     raise VerificationNotDoneError(VERIFICATION_NOT_DONE)
 

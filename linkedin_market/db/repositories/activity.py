@@ -55,11 +55,17 @@ def count_between(session: Session, user_id: UUID, kinds: tuple[str, ...], start
     ).scalar_one()
 
 
-def last_block_event(session: Session, user_id: UUID) -> ActivityEvent | None:
-    """Dernier ``blocked`` ou ``unblocked`` (I-06)."""
+def last_block_event(session: Session, user_id: UUID, source: str = "linkedin") -> ActivityEvent | None:
+    """Dernier ``blocked`` ou ``unblocked`` de cette source (I-06 ; repos par source, vague 3).
+
+    ``data.source`` absent (événements antérieurs à la vague 3) vaut ``linkedin`` (compatibilité).
+    """
+    source_expr = func.coalesce(ActivityEvent.data["source"].astext, "linkedin")
     return session.execute(
         select(ActivityEvent)
-        .where(ActivityEvent.user_id == user_id, ActivityEvent.kind.in_(("blocked", "unblocked")))
+        .where(
+            ActivityEvent.user_id == user_id, ActivityEvent.kind.in_(("blocked", "unblocked")), source_expr == source
+        )
         .order_by(ActivityEvent.at.desc(), ActivityEvent.id.desc())
         .limit(1)
     ).scalar_one_or_none()

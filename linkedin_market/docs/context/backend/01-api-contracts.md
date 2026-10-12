@@ -508,7 +508,7 @@ Types d'historique écrits par le code : `statut`, `candidature`, `contacts`, `m
   ligne « Origine de l'adresse » ; `PATCH contacts` ignore `opposed` et ne peut pas réécrire l'email ni l'URL d'un
   contact opposé (`422 Ce contact s'est opposé à tout contact : ses coordonnées ne peuvent plus être saisies.`).
 
-### 5.8 Sources et consentements `[CIBLE]`
+### 5.8 Sources et consentements `[ACTUEL]` (vague 3 : `/sources`, consentements, 428, `block/clear`, `RunBody.sources` ; `[CIBLE]` : `items/import`, `suppressions`)
 
 | Méthode & chemin | Corps | Succès | Erreurs |
 | :--- | :--- | :--- | :--- |
@@ -558,6 +558,7 @@ Pour `POST /api/profile/skills`, l'absence de consentement ne lève pas d'erreur
   `web/app.py`). Ordre des contrôles d'une action navigateur : `404` → `422` (corps, G-1) → **`428`** → `409`
   identifiants → `409` blocage (de la source) → `429` plafond. **Revérifié au début de la tâche** : consentement
   révoqué entre-temps ⇒ tâche `échec` avec le même texte que `detail`.
+  Sur `/apply` et `/contacts/lookup`, les `409` d'état (« déjà en cours », « déjà postulée ») passent avant le `428`.
 - **Repos par source** : l'événement `blocked` porte `data.source` (absent ⇒ `linkedin`, compatibilité) ;
   `guard_not_blocked(source)`. `POST /api/block/clear` accepte un corps facultatif `{"source": "linkedin"}`
   (défaut `linkedin`) ⇒ `200 {"ok": true}` ; `404 Source inconnue.` `/api/status.blocked` reste le blocage de

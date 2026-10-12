@@ -21,6 +21,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 from linkedin_market import config
+from linkedin_market import consent as consent_mod
 from linkedin_market.db import session, users
 
 # Fixtures partagées (navigateur réel, dossier de travail, serveur SMTP local) : disponibles dans tous les tests.
@@ -158,3 +159,19 @@ def db_user_id() -> UUID:
     """``id`` de l'utilisateur de test (test marqué ``db``)."""
     with session.transaction() as s:
         return users.current_user_id(s)
+
+
+@pytest.fixture
+def accept_risks():
+    """Accepte les risques d'une source ``navigateur`` (I-16) pour les tests qui lancent une action navigateur.
+
+    Les tests existants, antérieurs à la popup de risques, n'ont pas de consentement enregistré : sans cet appel,
+    toute action navigateur (collecte, candidature, contacts, message LinkedIn, import de profil, compétence) y
+    répondrait désormais ``428`` à la place du comportement attendu.
+    """
+
+    def _accept(source_code: str = "linkedin") -> None:
+        risk_version = consent_mod.get_public(source_code)["risk_version"]
+        consent_mod.accept(source_code, risk_version=risk_version, accepted=True)
+
+    return _accept

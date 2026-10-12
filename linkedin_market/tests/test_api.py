@@ -233,7 +233,8 @@ def test_run_requires_keyword(client):
     assert client.post("/api/runs", json={"scrape": False}).status_code == 422
 
 
-def test_added_skill_is_synced_to_linkedin(client, monkeypatch):
+def test_added_skill_is_synced_to_linkedin(client, monkeypatch, accept_risks):
+    accept_risks()
     import time
 
     from linkedin_market.web import services

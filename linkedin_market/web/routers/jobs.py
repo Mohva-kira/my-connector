@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
-from ... import matching, nlp, settings, storage
+from ... import consent, matching, nlp, settings, storage
 from .. import services
 from ..guards import require_browser_ready
 from .core import tasks_of
@@ -21,6 +21,16 @@ class RunBody(BaseModel):
     caution: str | None = None
     max_items: int | None = None
     interpreter: str | None = None
+    # Codes de GET /api/sources ; défaut linkedin seule, ignoré si scrape=false (I-16, vague 3).
+    sources: list[str] = Field(default_factory=lambda: ["linkedin"])
+
+    @field_validator("sources")
+    @classmethod
+    def _dedupe_sources(cls, value: list[str]) -> list[str]:
+        deduped = list(dict.fromkeys(value))
+        if not deduped:
+            raise ValueError("choisis au moins une source.")
+        return deduped
 
 
 @router.post("/runs", status_code=202)
@@ -28,15 +38,20 @@ def start_run(request: Request, body: RunBody) -> dict:
     tasks = tasks_of(request)
     if tasks.has_active("run"):
         raise HTTPException(409, "Une analyse est déjà en cours.")
-    overrides = body.model_dump(exclude_none=True, exclude={"scrape", "interpreter"})
+    overrides = body.model_dump(exclude_none=True, exclude={"scrape", "interpreter", "sources"})
     try:
         search = services.build_request(overrides)
         interpreter_name = settings.validate_settings(
             {"interpreter": body.interpreter or settings.load_settings()["interpreter"]}
         )["interpreter"]
+        navigate_sources = services.validate_run_sources(body.sources) if body.scrape else []
     except (ValueError, settings.SettingsError) as exc:
         raise HTTPException(422, str(exc)) from exc
     if body.scrape:
+        # Ordre des contrôles (I-16, vague 3) : 422 (ci-dessus) -> 428 (première source sans consentement, dans
+        # l'ordre de la liste) -> 409 identifiants / blocage (require_browser_ready).
+        for code in navigate_sources:
+            consent.require(code)
         require_browser_ready()
         title = f"Collecte et analyse — {search.keyword}"
     else:

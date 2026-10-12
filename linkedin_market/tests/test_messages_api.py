@@ -127,7 +127,8 @@ def test_smtp_test_only_to_self(client, monkeypatch, smtp_server):
     assert len(smtp_server.mails) == 1
 
 
-def test_linkedin_message_end_to_end(client, monkeypatch):
+def test_linkedin_message_end_to_end(client, monkeypatch, accept_risks):
+    accept_risks()
     import os
 
     os.environ["LINKEDIN_HEADLESS"] = "1"
@@ -148,7 +149,8 @@ def test_linkedin_message_end_to_end(client, monkeypatch):
     assert activity.count_today("message_linkedin") == 1
 
 
-def test_contact_lookup_end_to_end(client, monkeypatch):
+def test_contact_lookup_end_to_end(client, monkeypatch, accept_risks):
+    accept_risks()
     import os
 
     os.environ["LINKEDIN_HEADLESS"] = "1"

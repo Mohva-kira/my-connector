@@ -35,19 +35,22 @@ def require_credentials() -> None:
         )
 
 
-def require_not_blocked() -> None:
+def require_not_blocked(source: str = "linkedin") -> None:
+    """Repos de 6 h propre à ``source`` (I-06 ; un blocage LinkedIn ne bloque pas une autre source, vague 3)."""
     try:
-        activity.guard_not_blocked()
+        activity.guard_not_blocked(source)
     except activity.BlockedByLinkedIn as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
-def require_browser_ready(quota_kinds: tuple[str, ...] = (), limit: int = 0, label: str = "") -> None:
-    """Identifiants présents, plafond quotidien non atteint, aucun blocage LinkedIn récent."""
+def require_browser_ready(
+    quota_kinds: tuple[str, ...] = (), limit: int = 0, label: str = "", *, source: str = "linkedin"
+) -> None:
+    """Identifiants présents, plafond quotidien non atteint, aucun blocage récent de ``source``."""
     require_credentials()
     if quota_kinds:
         try:
             activity.check_quota(quota_kinds, limit, label)
         except activity.QuotaExceeded as exc:
             raise quota_exceeded(exc) from exc
-    require_not_blocked()
+    require_not_blocked(source)

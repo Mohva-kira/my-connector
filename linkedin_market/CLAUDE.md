@@ -57,7 +57,7 @@ npx tsc --noEmit       # contrôle de types seul
 docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
 # LM_DATABASE_URL (et non DATABASE_URL, déjà lu par email_analyzer dans le même .env)
 
-# Tests (hors ligne, ~2 min, 191 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
+# Tests (hors ligne, ~2 min, 212 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
 # sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré). Depuis la
 # vague 2, conftest retire du processus LINKEDIN_*/SMTP_*/ANTHROPIC_API_KEY (identifiants réels du .env racine) :
 # aucune tâche lancée par un test ne peut se connecter à un vrai service.
@@ -117,8 +117,8 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
 - **I-15** Identifiants, mots de passe SMTP, clés API, cookies, jeton local : jamais versionnés ni journalisés ;
   cookies valables 72 h.
 - **I-16** Source en mode `navigateur` (LinkedIn, Malt, WTTJ) utilisable seulement après acceptation de la version
-  courante du texte de risques dans la **popup de risques** (HTTP 428 sinon) `[CIBLE]`. Le CLI avec collecte refuse
-  de démarrer sans ce consentement et renvoie vers Paramètres → Sources et consentements (décidé le 2026-10-09).
+  courante du texte de risques dans la **popup de risques** (HTTP 428 sinon) `[ACTUEL]` depuis la vague 3 (`consent.py`, revérifié au début de la tâche ; repos de 6 h par
+  source). Le CLI avec collecte refuse de démarrer sans ce consentement et renvoie vers Paramètres → Sources et consentements (décidé le 2026-10-09).
 
 ### Points en arbitrage
 Aucun au 2026-10-09 (E-4, désinscription, E-6 tranchés). Désinscription : réponse « STOP » + en-tête

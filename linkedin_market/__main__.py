@@ -16,7 +16,7 @@ import re
 import sys
 import webbrowser
 
-from . import application, config, interpreter, matching, report, storage
+from . import application, config, consent, interpreter, matching, report, storage
 from . import profile as profile_mod
 from .db.bootstrap import prepare_database
 from .models import Profile, SearchRequest
@@ -240,7 +240,14 @@ def main(argv: list[str] | None = None) -> None:
         want_profile = request.profile_source == "linkedin" or (
             request.profile_source == "auto" and profile_mod.find_profile_file() is None
         )
-        outcome = scrape(request, want_profile)
+        try:
+            outcome = scrape(request, want_profile)
+        except consent.SourceConsentRequired as exc:
+            # P-3 (décidé le 2026-10-09) : message propre au CLI, distinct du détail HTTP 428 (backend/01 § 5.8.1).
+            sys.exit(
+                f"Accepte d'abord les risques liés à {exc.label} (version {exc.risk_version}) dans l'interface "
+                "web : Paramètres → Sources et consentements."
+            )
         linkedin_text = outcome.profile_text
         if outcome.blocked:
             log.warning(

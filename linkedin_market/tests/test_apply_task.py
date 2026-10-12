@@ -76,7 +76,8 @@ def wait_task(client, task_id, until, timeout=180):
     raise AssertionError(f"Délai dépassé : {task}")
 
 
-def test_guards_before_launching(client, monkeypatch, workdir):
+def test_guards_before_launching(client, monkeypatch, workdir, accept_risks):
+    accept_risks()
     prepare_entry(workdir, monkeypatch, "https://www.linkedin.com/jobs/view/1/")
     monkeypatch.delenv("LINKEDIN_EMAIL")
     assert client.post("/api/applications/job:1/apply").status_code == 409  # identifiants absents
@@ -96,7 +97,8 @@ def test_guards_before_launching(client, monkeypatch, workdir):
     assert client.post("/api/applications/job:404/apply").status_code == 404
 
 
-def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir):
+def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir, accept_risks):
+    accept_risks()
     import os
 
     os.environ["LINKEDIN_HEADLESS"] = "1"
@@ -144,7 +146,8 @@ def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir):
     assert (workdir / "applications" / "20261007-acme-dev" / "cv.pdf").is_file()
 
 
-def test_decline_confirmation_keeps_status(client, monkeypatch, workdir):
+def test_decline_confirmation_keeps_status(client, monkeypatch, workdir, accept_risks):
+    accept_risks()
     import os
 
     os.environ["LINKEDIN_HEADLESS"] = "1"

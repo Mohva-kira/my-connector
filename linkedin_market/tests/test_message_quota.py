@@ -191,7 +191,8 @@ def test_g6_plafond_message_revérifié_au_debut_de_la_tache(data_dir, monkeypat
     assert not getattr(smtp_server, "mails", [])
 
 
-def test_g6_plafond_candidature_revérifié_sous_verrou(data_dir, monkeypatch):
+def test_g6_plafond_candidature_revérifié_sous_verrou(data_dir, monkeypatch, accept_risks):
+    accept_risks()
     (ref,) = prepare(data_dir)
     settings.save_settings({"apply_daily_max": 1})
     activity.record("apply", job="job:x")  # candidature acceptée entre-temps par une autre tâche
@@ -318,7 +319,8 @@ def linkedin_ready(monkeypatch):
     monkeypatch.setattr("linkedin_market.browser.create_driver", Driver)
 
 
-def test_envoi_linkedin_incertain_reste_confirme(client, manager, data_dir, monkeypatch, linkedin_ready):
+def test_envoi_linkedin_incertain_reste_confirme(client, manager, data_dir, monkeypatch, linkedin_ready, accept_risks):
+    accept_risks()
     from linkedin_market import outreach
 
     (ref,) = prepare(data_dir)
@@ -342,7 +344,8 @@ def test_envoi_linkedin_incertain_reste_confirme(client, manager, data_dir, monk
     assert application.get_application(ref)["status"] == "préparée"
 
 
-def test_tache_annulee_avant_de_demarrer_rend_la_place(client, manager, data_dir, linkedin_ready):
+def test_tache_annulee_avant_de_demarrer_rend_la_place(client, manager, data_dir, linkedin_ready, accept_risks):
+    accept_risks()
     (ref,) = prepare(data_dir)
     settings.save_settings({"message_daily_max": 1})
     gate = threading.Event()
