@@ -2,7 +2,7 @@
 
 ## Le projet en bref
 Outil **open source auto-hébergé** d'analyse du marché freelance et d'aide à la candidature : collecte d'offres,
-posts et profils (LinkedIn aujourd'hui ; France Travail, Malt, WTTJ, import manuel Indeed en `[CIBLE]`),
+posts et profils (LinkedIn, France Travail, Malt, WTTJ ; import manuel Indeed : `[ACTUEL]` depuis la vague 5),
 tendances sur 30 jours, matching appris sur les annotations, dossiers de candidature, prospection B2B confirmée.
 **Une instance = un utilisateur**, sur son poste, avec **son** compte et ses données. Deux points d'entrée qui
 appellent les mêmes fonctions de `pipeline.py` : CLI `python -m linkedin_market` et interface web locale
@@ -57,7 +57,7 @@ npx tsc --noEmit       # contrôle de types seul
 docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
 # LM_DATABASE_URL (et non DATABASE_URL, déjà lu par email_analyzer dans le même .env)
 
-# Tests (hors ligne, ~2 min, 252 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
+# Tests (hors ligne, ~2 min, 348 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
 # sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré). Depuis la
 # vague 2, conftest retire du processus LINKEDIN_*/SMTP_*/ANTHROPIC_API_KEY (identifiants réels du .env racine) :
 # aucune tâche lancée par un test ne peut se connecter à un vrai service.
@@ -179,8 +179,7 @@ touche un invariant ou un risque se soumet à l'utilisateur avant le code.
 - Lancer la suite complète avant de conclure ; `npx tsc --noEmit` (ou `npm run build`) après toute modification du front.
 
 ## Marqueurs `[ACTUEL]` / `[CIBLE]`
-`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (nouvelles sources,
-import manuel, purge…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie
+`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (purge, interpréteur…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie
 l'existant (le code a pu évoluer) ;
 une fois livré, passe la mention en `[ACTUEL]` dans les docs concernées et retire l'écart `E-n` correspondant.
 

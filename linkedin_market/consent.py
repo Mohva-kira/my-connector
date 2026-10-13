@@ -7,9 +7,7 @@ de créer la tâche, pour répondre ``428`` immédiatement plutôt que de la lai
 
 from __future__ import annotations
 
-import os
-
-from . import activity
+from . import activity, config
 from .db import utc_iso
 from .db.models import Source, SourceConsent
 from .db.repositories import sources as sources_repo
@@ -54,7 +52,7 @@ class SourceConsentRequired(RuntimeError):
 
 
 def _france_travail_configured() -> bool:
-    return bool(os.environ.get("FRANCE_TRAVAIL_CLIENT_ID")) and bool(os.environ.get("FRANCE_TRAVAIL_CLIENT_SECRET"))
+    return config.france_travail_configured()
 
 
 def _public(source: Source, consent_row: SourceConsent | None) -> dict:

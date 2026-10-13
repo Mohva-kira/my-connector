@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ... import consent, matching, nlp, settings, storage
 from .. import services
-from ..guards import require_browser_ready
+from ..guards import require_credentials, require_france_travail_credentials, require_not_blocked
 from .core import tasks_of
 
 router = APIRouter()
@@ -48,19 +48,28 @@ def start_run(request: Request, body: RunBody) -> dict:
     except (ValueError, settings.SettingsError) as exc:
         raise HTTPException(422, str(exc)) from exc
     if body.scrape:
-        # Ordre des contrôles (I-16, vague 3) : 422 (ci-dessus) -> 428 (première source sans consentement, dans
-        # l'ordre de la liste) -> 409 identifiants / blocage (require_browser_ready).
+        # Ordre des contrôles (I-16, vagues 3 et 5) : 422 (ci-dessus) -> 428 (première source navigateur sans
+        # consentement, dans l'ordre de la liste) -> 409 identifiants (LinkedIn puis France Travail, seulement si
+        # la source est demandée) -> 409 blocage (premier code navigateur de la liste en repos).
         for code in navigate_sources:
             consent.require(code)
-        require_browser_ready()
+        if "linkedin" in body.sources:
+            require_credentials()
+        if "france_travail" in body.sources:
+            require_france_travail_credentials()
+        for code in navigate_sources:
+            require_not_blocked(code)
         title = f"Collecte et analyse — {search.keyword}"
     else:
         title = f"Analyse de l'historique — {search.keyword}"
     task = tasks.submit(
         "run",
         title,
-        lambda ctx: services.run_analysis(ctx, search, scrape=body.scrape, interpreter_name=interpreter_name),
-        browser=body.scrape,
+        lambda ctx: services.run_analysis(
+            ctx, search, scrape=body.scrape, interpreter_name=interpreter_name, sources=body.sources
+        ),
+        # Le verrou navigateur ne concerne que les sources pilotées par Selenium (France Travail seule : sans).
+        browser=body.scrape and bool(navigate_sources),
     )
     return task.public()
 
@@ -78,11 +87,19 @@ def start_rescore(request: Request) -> dict:
 
 
 @router.get("/jobs")
-def list_jobs(min_score: float = 0, label: str | None = None, status: str | None = None, q: str | None = None) -> dict:
+def list_jobs(
+    min_score: float = 0,
+    label: str | None = None,
+    status: str | None = None,
+    q: str | None = None,
+    source: str | None = None,
+) -> dict:
     results = services.latest_results()
     if results is None:
         return {"report": None, "jobs": []}
     rows = [r for r in services.jobs_overview(results) if r["score"] >= min_score]
+    if source:
+        rows = [r for r in rows if r["source_code"] == source]  # filtre exact ; code inconnu : liste vide
     if label == "pertinente":
         rows = [r for r in rows if r["label"] == 1]
     elif label == "non_pertinente":

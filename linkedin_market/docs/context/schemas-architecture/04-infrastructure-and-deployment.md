@@ -85,7 +85,7 @@ Lues depuis `.env` à la racine du dépôt (jamais versionné ; `.env.example` v
 | `LM_DATABASE_URL` | Connexion PostgreSQL (préfixe `LM_` : `DATABASE_URL` est réservé à email_analyzer, même `.env`) | `postgresql+psycopg://linkedin_market:***@127.0.0.1:5432/linkedin_market` | Oui |
 | `LM_DB_PASSWORD` | Mot de passe du conteneur `db` | Chaîne aléatoire | Avec `compose.yaml` |
 | `LM_SECRET_KEY` | Clé Fernet de chiffrement des cookies de session | `Fernet.generate_key()` (44 caractères base64) | Oui ; générée au premier lancement si absente |
-| `FRANCE_TRAVAIL_CLIENT_ID`, `FRANCE_TRAVAIL_CLIENT_SECRET` `[CIBLE]` | Application déclarée sur francetravail.io, abonnée à l'API « Offres d'emploi » | — | Pour la source `france_travail` |
+| `FRANCE_TRAVAIL_CLIENT_ID`, `FRANCE_TRAVAIL_CLIENT_SECRET` `[ACTUEL]` | Application déclarée sur francetravail.io, abonnée à l'API « Offres d'emploi » | — | Pour la source `france_travail` |
 
 ## 5. Sécurité du Poste
 

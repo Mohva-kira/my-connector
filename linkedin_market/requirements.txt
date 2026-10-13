@@ -8,6 +8,8 @@ selenium>=4.50,<5
 fastapi>=0.115,<1
 uvicorn[standard]>=0.32,<1
 anthropic>=1.9,<2          # optionnel en mode local, import à la demande
+# API officielle France Travail (client HTTP synchrone, vague 5)
+httpx>=0.27,<1
 # Calcul (matching, tendances)
 numpy>=1.26,<3
 # Lecture du CV PDF et génération des dossiers PDF

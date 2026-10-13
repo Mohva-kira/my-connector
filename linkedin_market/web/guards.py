@@ -7,7 +7,7 @@ from datetime import datetime, time, timedelta
 
 from fastapi import HTTPException
 
-from .. import activity, config
+from .. import activity, config, pipeline
 
 
 def _now() -> datetime:
@@ -38,9 +38,19 @@ def require_credentials() -> None:
 def require_not_blocked(source: str = "linkedin") -> None:
     """Repos de 6 h propre à ``source`` (I-06 ; un blocage LinkedIn ne bloque pas une autre source, vague 3)."""
     try:
-        activity.guard_not_blocked(source)
+        pipeline.guard_source_rest(source)
     except activity.BlockedByLinkedIn as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+def require_france_travail_credentials() -> None:
+    """Identifiants de l'API France Travail présents (la source est ignorée sinon, au début de la tâche)."""
+    if not config.france_travail_configured():
+        raise HTTPException(
+            409,
+            "Identifiants France Travail absents : renseigne FRANCE_TRAVAIL_CLIENT_ID et "
+            "FRANCE_TRAVAIL_CLIENT_SECRET dans le fichier .env.",
+        )
 
 
 def require_browser_ready(

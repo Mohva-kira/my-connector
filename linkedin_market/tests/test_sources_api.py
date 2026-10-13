@@ -2,9 +2,11 @@
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
 from linkedin_market import __main__ as cli
 from linkedin_market import activity, consent
+from linkedin_market.db import models, session
 from linkedin_market.web.app import create_app
 from linkedin_market.web.tasks import TaskManager
 
@@ -25,6 +27,19 @@ def client():
 def credentials(monkeypatch):
     monkeypatch.setenv("LINKEDIN_EMAIL", "me@example.com")
     monkeypatch.setenv("LINKEDIN_PASSWORD", "x")
+
+
+@pytest.fixture
+def malt_desactivee():
+    """Malt désactivée en base (cas d'une source retirée) ; la table ``sources`` est conservée entre deux tests."""
+
+    def set_enabled(value: bool) -> None:
+        with session.transaction() as s:
+            s.execute(update(models.Source).where(models.Source.code == "malt").values(enabled=value))
+
+    set_enabled(False)
+    yield
+    set_enabled(True)
 
 
 def source(client, code: str) -> dict:
@@ -77,7 +92,7 @@ def test_accepter_puis_revoquer(client):
         ),
     ],
 )
-def test_erreurs_du_consentement(client, code, body, status, detail):
+def test_erreurs_du_consentement(client, code, body, status, detail, malt_desactivee):
     response = client.post(f"/api/sources/{code}/consent", json=body)
     assert response.status_code == status and response.json()["detail"] == detail
 
@@ -127,7 +142,7 @@ def test_ordre_des_controles_422_avant_428_avant_409(client, monkeypatch):
         (["malt"], "sources : la source « Malt » n'est pas encore disponible."),
     ],
 )
-def test_run_refuse_les_sources_invalides(client, sources, detail):
+def test_run_refuse_les_sources_invalides(client, sources, detail, malt_desactivee):
     response = client.post("/api/runs", json={"keyword": "python", "sources": sources})
     assert response.status_code == 422 and detail in response.json()["detail"]
 
@@ -175,4 +190,26 @@ def test_cli_avec_collecte_refuse_de_demarrer_sans_consentement(monkeypatch):
     assert str(exc.value) == (
         f"Accepte d'abord les risques liés à LinkedIn (version {VERSION}) dans l'interface web : "
         "Paramètres → Sources et consentements."
+    )
+
+
+def test_nouvelles_sources_activees_et_configuration_de_france_travail(client, monkeypatch):
+    rows = {row["code"]: row for row in client.get("/api/sources").json()}
+    assert all(row["enabled"] for row in rows.values())  # révision 0003 (vague 5)
+    assert rows["malt"]["consent_required"] is True and rows["wttj"]["consent_required"] is True
+    assert rows["france_travail"]["configured"] is False and rows["france_travail"]["consent_required"] is False
+    monkeypatch.setenv("FRANCE_TRAVAIL_CLIENT_ID", "id")
+    assert source(client, "france_travail")["configured"] is False  # le secret manque encore
+    monkeypatch.setenv("FRANCE_TRAVAIL_CLIENT_SECRET", "secret")
+    assert source(client, "france_travail")["configured"] is True
+    assert "secret" not in str(client.get("/api/sources").json())  # aucun secret exposé
+
+
+@pytest.mark.parametrize("code", ["malt", "wttj"])
+def test_consentement_accepte_pour_malt_et_wttj(client, code):
+    response = client.post(f"/api/sources/{code}/consent", json={"risk_version": VERSION, "accepted": True})
+    assert response.status_code == 201 and response.json()["consent_required"] is False
+    assert (
+        client.post("/api/sources/france_travail/consent", json={"risk_version": VERSION, "accepted": True}).status_code
+        == 422
     )

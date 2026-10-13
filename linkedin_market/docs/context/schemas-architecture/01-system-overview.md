@@ -93,7 +93,7 @@ C4Container
 | Entrées | `__main__.py`, `web/__main__.py`, `web/app.py`, `web/routers/*` | Parsing CLI / HTTP, validation Pydantic, codes HTTP. Aucune règle métier. |
 | Orchestration | `pipeline.py`, `web/services.py`, `web/tasks.py`, `web/guards.py` | Enchaîner les étapes, gérer annulation, saisies et vérifications manuelles, plafonds et blocages. |
 | Domaine | `nlp.py`, `trends.py`, `matching.py`, `profile.py`, `application.py`, `report.py`, `interpreter.py`, `settings.py` | Calculs et règles, sans I/O réseau. |
-| Intégrations | `browser.py`, `session.py`, `scraper.py`, `apply_bot.py`, `contacts.py`, `outreach.py`, `profile_sync.py`, `cv_pdf.py` ; `sources/france_travail.py` `[CIBLE]` | Accès aux systèmes externes ; lèvent des exceptions métier lisibles (`BlockedError`, `OutreachError`, `ProfileSyncError`). |
+| Intégrations | `browser.py`, `session.py`, `scraper.py`, `apply_bot.py`, `contacts.py`, `outreach.py`, `profile_sync.py`, `cv_pdf.py` ; `sources/` (France Travail, Malt, WTTJ) `[ACTUEL]` | Accès aux systèmes externes ; lèvent des exceptions métier lisibles (`BlockedError`, `OutreachError`, `ProfileSyncError`). |
 | Persistance | `storage.py`, `activity.py`, `config.py` ; `db/models.py`, `db/session.py`, `db/repositories/*`, `db/import_json.py`, `db/bootstrap.py`, `migrations/` (Alembic) `[ACTUEL]` | Lecture / écriture des données ; seul endroit autorisé à toucher la base ou `DATA_DIR`. |
 
 Règle de dépendance : `Entrées → Orchestration → Domaine / Intégrations → Persistance`. Le domaine n'importe

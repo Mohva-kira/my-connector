@@ -81,7 +81,7 @@ Aucun point en arbitrage au 2026-10-09. Tout nouveau point touchant un invariant
 ## Tests et vérifications (depuis la racine du dépôt)
 - Tout changement de comportement : test pytest, hors ligne (fixtures HTML, aucun appel réel à LinkedIn,
   France Travail, Claude ou SMTP). `LM_TEST_DATABASE_URL=<base _test> .venv/bin/python -m pytest linkedin_market/tests`
-  (0 test ignoré exigé, ~2 min, 252 tests). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`,
+  (0 test ignoré exigé, ~2 min, 348 tests). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`,
   réservé à email_analyzer). Depuis la vague 2, `conftest.py` retire aussi `LINKEDIN_*`/`SMTP_*`/`ANTHROPIC_API_KEY`
   de l'environnement du processus de test : aucune tâche lancée par un test ne peut atteindre un vrai service.
 - Front : `npx tsc --noEmit` ou `npm run build` dans `linkedin_market/web/frontend`. `npm run lint` (ESLint 9, 0 erreur et 0 avertissement exigés).

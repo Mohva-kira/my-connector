@@ -67,8 +67,8 @@ Calculs purs (sans réseau) :
 | `outreach.send_email` | SMTP de l'utilisateur | `OutreachError` |
 | `interpreter.ClaudeInterpreter` | API Anthropic | toute exception du SDK, `RuntimeError("Claude a refusé la requête.")` |
 | `cv_pdf.py` | — (génération locale de `cv.pdf`) | — |
-| `sources/france_travail.py` `[CIBLE]` | API Offres d'emploi v2 | `SourceUnavailable` (l'analyse continue sans cette source) |
-| `sources/malt.py`, `sources/wttj.py` `[CIBLE]` | Malt, WTTJ (navigateur) | `BlockedError` partagée |
+| `sources/france_travail.py` `[ACTUEL]` | API Offres d'emploi v2 | `SourceFetchError` (l'analyse continue sans cette source ; distincte de `consent.SourceUnavailable`) |
+| `sources/malt.py`, `sources/wttj.py`, `sources/base.py` `[ACTUEL]` | Malt, WTTJ (navigateur, lecture seule) | blocage : `BrowserJobSource.blocked` ⇒ source arrêtée, événement `blocked` ; `pipeline.collect` orchestre les sources, `pipeline.guard_source_rest` nomme la source en repos |
 
 `[CIBLE]` unifier la détection de blocage : une seule exception `BlockedError` (aujourd'hui `PermissionError`,
 `BlockedError` et un simple booléen selon le module) et un seul helper `browser.assert_not_blocked(driver, where)`

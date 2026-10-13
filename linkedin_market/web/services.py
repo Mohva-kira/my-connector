@@ -35,6 +35,7 @@ from ..db.repositories import settings as settings_repo
 from ..db.repositories import sources as sources_repo
 from ..db.repositories import user_transaction
 from ..models import SearchRequest
+from ..sources import label_of, source_of_ref
 from .tasks import RUNNING, TaskContext
 
 
@@ -166,6 +167,8 @@ def jobs_overview(results: dict) -> list[dict]:
         rows.append(
             {
                 **repair_identity(job),
+                # Un rapport antérieur à la vague 5 n'a pas de source_code (jamais réécrit, I-02) : LinkedIn.
+                "source_code": job.get("source_code") or "linkedin",
                 "label": labels.get(job["id"]),
                 "application_status": entry["status"] if entry else None,
             }
@@ -174,28 +177,47 @@ def jobs_overview(results: dict) -> list[dict]:
 
 
 # ------------------------------------------------------------- exécution
-def run_analysis(ctx: TaskContext, request: SearchRequest, *, scrape: bool, interpreter_name: str) -> dict:
-    """Collecte (facultative) puis analyse et rapport.
+def run_analysis(
+    ctx: TaskContext,
+    request: SearchRequest,
+    *,
+    scrape: bool,
+    interpreter_name: str,
+    sources: list[str] | None = None,
+) -> dict:
+    """Collecte (facultative) des ``sources`` demandées, puis analyse et rapport.
 
-    Blocage pendant la collecte (E-4, option A) : la navigation s'arrête net (I-06), la tâche finit ``terminée``
-    avec un rapport établi sur les données déjà collectées et ``result.blocked = true``.
+    Blocage d'une source pendant la collecte (E-4, option A) : sa navigation s'arrête net (I-06), les autres sources
+    continuent, la tâche finit ``terminée`` avec un rapport établi sur les données déjà collectées et
+    ``result.blocked = true`` (``blocked_sources`` liste les sources bloquées). Une source en échec réseau (France
+    Travail) est ignorée et journalisée. Le profil LinkedIn n'est lu que si ``linkedin`` fait partie des sources.
     """
-    linkedin_text, blocked = "", False
+    codes = list(sources or ["linkedin"])
+    linkedin_text = ""
+    reports: list[dict] = []
+    blocked_sources: list[str] = []
     if scrape:
-        want_profile = request.profile_source == "linkedin" or (
-            request.profile_source == "auto" and pipeline.profile_mod.find_profile_file() is None
+        want_profile = "linkedin" in codes and (
+            request.profile_source == "linkedin"
+            or (request.profile_source == "auto" and pipeline.profile_mod.find_profile_file() is None)
         )
-        outcome = pipeline.scrape(
+        outcome = pipeline.collect(
             request,
+            codes,
             want_profile,
             interactive=False,
             on_manual_check=ctx.manual_check,
             should_stop=ctx.should_stop,
             on_ready=lambda: ctx.set_status(RUNNING),
         )
-        linkedin_text, blocked = outcome.profile_text, outcome.blocked
-        if blocked:
-            ctx.log("Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées.")
+        linkedin_text, blocked_sources = outcome.profile_text, outcome.blocked_sources
+        reports = [row.public() for row in outcome.sources]
+        for row in outcome.sources:
+            label = label_of(row.code)
+            if row.status == pipeline.STATUS_BLOCKED:
+                ctx.log(f"Collecte interrompue par {label} : rapport établi sur les données déjà collectées.")
+            elif row.status != pipeline.STATUS_OK:
+                ctx.log(f"{label} ignorée : {row.detail}")
     ctx.check()
     prof = pipeline.build_profile(request, linkedin_text)
     ctx.log(f"Profil ({prof.origin}) : {len(prof.skills)} compétences.")
@@ -208,7 +230,15 @@ def run_analysis(ctx: TaskContext, request: SearchRequest, *, scrape: bool, inte
     _, json_path = report.write(results)
     activity.record("run", keyword=request.keyword, scrape=scrape, jobs=len(scored))
     ctx.log(f"Rapport enregistré : {json_path.name}")
-    result = {"report": json_path.stem, "jobs": len(scored), "counts": results["counts"], "blocked": blocked}
+    blocked = bool(blocked_sources)
+    result = {
+        "report": json_path.stem,
+        "jobs": len(scored),
+        "counts": results["counts"],
+        "blocked": blocked,
+        "blocked_sources": blocked_sources,
+        "sources": reports,
+    }
     if blocked:
         result["blocked_where"] = "collecte"
     return result
@@ -256,11 +286,38 @@ def prepare_application(ctx: TaskContext, job_id: str) -> dict:
     return {"job_id": job_id, "folder": str(folder), "generator": app.generator}
 
 
+def job_source_code(job_id: str) -> str:
+    """Source d'une offre : préfixe de l'identifiant (``ft-``, ``malt-``…), sinon source de l'élément de l'historique.
+
+    Une offre créée a minima par une candidature héritée porte ``linkedin`` par défaut : le préfixe fait foi.
+    """
+    code = source_of_ref(job_id)
+    if code != "linkedin":
+        return code
+    item = storage.find_item(job_id)
+    return item.source_code if item else "linkedin"
+
+
+def linkedin_only_error(job_id: str, action: str) -> str | None:
+    """Message du ``422`` si l'action LinkedIn (``apply`` ou ``contacts``) vise une offre d'une autre source."""
+    code = job_source_code(job_id)
+    if code == "linkedin":
+        return None
+    if action == "apply":
+        return (
+            "La candidature simplifiée n'existe que pour LinkedIn : "
+            f"ouvre l'offre sur {label_of(code)} et postule toi-même."
+        )
+    return "La recherche de recruteurs n'existe que pour les offres LinkedIn."
+
+
 def apply_job(ctx: TaskContext, job_id: str) -> dict:
     """Candidature simplifiée LinkedIn ; s'arrête à la relecture et attend la confirmation explicite."""
     from ..browser import create_driver
 
     entry = application.get_application(job_id)
+    if error := linkedin_only_error(job_id, "apply"):
+        raise RuntimeError(error)
     # Préconditions revérifiées au début de la tâche (I-07, I-16) : l'API a pu accepter d'autres candidatures, ou le
     # consentement a pu être révoqué, entre la création de la tâche et son démarrage.
     consent.require("linkedin")
@@ -312,6 +369,8 @@ def lookup_contacts(ctx: TaskContext, job_id: str) -> dict:
     from ..browser import create_driver
 
     entry = application.get_application(job_id)
+    if error := linkedin_only_error(job_id, "contacts"):
+        raise RuntimeError(error)
     consent.require("linkedin")
     activity.guard_not_blocked()
     caution = config.CAUTION_LEVELS[settings.load_settings()["caution"]]

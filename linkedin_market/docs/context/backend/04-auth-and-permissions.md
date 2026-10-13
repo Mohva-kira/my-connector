@@ -83,8 +83,8 @@ LinkedIn présents ; **Cons.** = consentement aux risques de la source `[CIBLE]`
 | Lever un blocage | `POST /api/block/clear` | | | | | | (UI) | — |
 | Analyse sans collecte | `POST /api/runs` `scrape=false` | | | | | ✓ | | 409 |
 | Collecte navigateur | `POST /api/runs` `scrape=true` | ✓ | ✓ | ✓ | prudence | ✓ | | 409 / 428 |
-| Collecte France Travail `[CIBLE]` | `POST /api/runs` `sources` ∋ `france_travail` | | | | prudence | ✓ | | 409 ; source ignorée si non configurée |
-| Import manuel Indeed `[CIBLE]` | `POST /api/items/import` | | | | | | | 409 / 422 |
+| Collecte France Travail `[ACTUEL]` | `POST /api/runs` `sources` ∋ `france_travail` | | | | prudence | ✓ | | 409 identifiants absents (à l'API et au début de la tâche : source ignorée, `status = "indisponible"`) |
+| Import manuel Indeed `[ACTUEL]` | `POST /api/items/import` | | | | | | | 409 / 422 |
 | Recalcul, entraînement, préparation | `/runs/rescore`, `/model/train`, `/jobs/{id}/prepare` | | | | | ✓ | | 409 |
 | Importer le profil LinkedIn | `POST /api/profile/import-linkedin` | ✓ | ✓ | ✓ | | ✓ | | 409 / 428 |
 | Ajouter une compétence sur LinkedIn | effet de `POST /api/profile/skills` | ✓ | ✓ | ✓ | | ✓ | | `linkedin_sync.status` |
@@ -112,7 +112,7 @@ Aucune limitation de débit HTTP : le seul client est l'interface locale de l'ut
 | Période de repos après blocage | 6 h (`BLOCK_COOLDOWN_HOURS`) | 409 | I-06 |
 | Un seul navigateur à la fois | verrou `TaskManager._browser_lock` | tâche `en_attente` | lot 1 `00` § 4 |
 | Une tâche par type / clé | `has_active` | 409 | — |
-| API France Travail `[CIBLE]` | ≤ 10 appels/s documentés par l'éditeur ; le client se limite à 2 appels/s et respecte `Retry-After` | — | `05` § 2.5 |
+| API France Travail `[ACTUEL]` | ≤ 10 appels/s documentés par l'éditeur ; le client se limite à 2 appels/s et respecte `Retry-After` | — | `05` § 2.5 |
 
 Message 429 actuel : `Plafond quotidien atteint (<limite> <candidatures|messages> par jour) : réessaie demain ou
 relève-le dans les paramètres.` `[CIBLE]` ajouter `Retry-After` (secondes jusqu'à minuit local).

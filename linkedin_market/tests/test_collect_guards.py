@@ -125,7 +125,12 @@ def test_run_blocked_pendant_la_collecte(client, fast, monkeypatch, accept_risks
     task = wait_final(client, client.post("/api/runs", json=RUN).json()["id"])
     assert task["status"] == "terminée", task
     result = task["result"]
-    assert set(result) == {"report", "jobs", "counts", "blocked", "blocked_where"}
+    assert set(result) == {"report", "jobs", "counts", "blocked", "blocked_where", "blocked_sources", "sources"}
+    assert result["blocked_sources"] == ["linkedin"]
+    assert result["sources"] == [
+        {"code": "linkedin", "items": 2, "status": "bloquée", "detail": result["sources"][0]["detail"]}
+    ]
+    assert "repos de 6 h" in result["sources"][0]["detail"]
     assert re.fullmatch(r"data-engineer-\d{4}-\d{2}-\d{2}", result["report"])
     assert result["jobs"] == 2 and result["counts"] == {"job": 2, "post": 0, "person": 0}
     assert result["blocked"] is True and result["blocked_where"] == "collecte"
@@ -143,7 +148,10 @@ def test_run_blocked_false_sans_blocage(client, fast, monkeypatch, accept_risks)
     use_driver(monkeypatch, FakeLinkedIn(IDS))
     task = wait_final(client, client.post("/api/runs", json=RUN).json()["id"])
     assert task["status"] == "terminée", task
-    assert set(task["result"]) == {"report", "jobs", "counts", "blocked"}  # pas de blocked_where
+    assert set(task["result"]) == {"report", "jobs", "counts", "blocked", "blocked_sources", "sources"}
+    assert "blocked_where" not in task["result"]
+    assert task["result"]["blocked_sources"] == []
+    assert task["result"]["sources"] == [{"code": "linkedin", "items": 5, "status": "ok", "detail": ""}]
     assert task["result"]["blocked"] is False and task["result"]["jobs"] == 5
     assert activity.block_status() is None
 
@@ -155,6 +163,7 @@ def test_run_blocked_false_sans_collecte(client, fast, monkeypatch, accept_risks
     assert first["status"] == "terminée"
     task = wait_final(client, client.post("/api/runs", json={**RUN, "scrape": False}).json()["id"])
     assert task["result"]["blocked"] is False and "blocked_where" not in task["result"]
+    assert task["result"]["sources"] == [] and task["result"]["blocked_sources"] == []  # aucune collecte
 
 
 # ------------------------------------------------------------------------ G-8

@@ -142,7 +142,7 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | Code | Usage réel |
 | :--- | :--- |
 | `200 OK` | Lecture, mise à jour synchrone (`PUT /api/settings`, `PATCH /api/applications/{id}`, `PUT /api/jobs/{id}/label`…), action synchrone (`POST /api/block/clear`, `/api/smtp/test`, `/api/tasks/{id}/cancel`, `/api/tasks/{id}/answer`, `/api/profile/skills`). |
-| `201 Created` | `[ACTUEL]` `POST /api/sources/{code}/consent`, `POST /api/suppressions` ; `[CIBLE]` `POST /api/items/import`. Aucune route actuelle ne renvoie 201. |
+| `201 Created` | `[ACTUEL]` `POST /api/sources/{code}/consent`, `POST /api/suppressions` ; `[ACTUEL]` `POST /api/items/import` (vague 5). |
 | `202 Accepted` | Tâche créée : `POST /api/runs`, `/api/runs/rescore`, `/api/model/train`, `/api/jobs/{id}/prepare`, `/api/profile/import-linkedin`, `/api/applications/{id}/apply`, `/contacts/lookup`, `/messages`. |
 | `204 No Content` | `[CIBLE]` `DELETE /api/sources/{code}/consent`. |
 | `400 Bad Request` | Non utilisé (FastAPI renvoie 422 pour un corps invalide). |
@@ -335,7 +335,7 @@ ne peut pas être annulée (pas de contexte) ⇒ 409.
 | `caution` | `str \| null` | réglage | `prudent`/`normal`/`agressif`. |
 | `max_items` | `int \| null` | `Caution.max_items` | Entier ≥ 1, ≤ `Caution.max_items` de la prudence retenue, valeur supérieure refusée (422, G-3/G-11, E-3). |
 | `interpreter` | `str \| null` | réglage | `claude`/`local` ; `none` ⇒ `422 interpreter doit être l'un de : claude, local.` (G-4, E-7). |
-| `sources` `[CIBLE]` | `list[str]` | `["linkedin"]` | Codes de `GET /api/sources` ; `indeed` refusé (import manuel). |
+| `sources` | `list[str]` | `["linkedin"]` | Codes de `GET /api/sources` ; `indeed` refusé (import manuel). Vague 5 : `france_travail`, `malt`, `wttj` acceptés (§ 5.8.2). |
 
 Exemple :
 ```http
@@ -559,14 +559,14 @@ Types d'historique écrits par le code : `statut`, `candidature`, `contacts`, `m
   ligne « Origine de l'adresse » ; `PATCH contacts` ignore `opposed` et ne peut pas réécrire l'email ni l'URL d'un
   contact opposé (`422 Ce contact s'est opposé à tout contact : ses coordonnées ne peuvent plus être saisies.`).
 
-### 5.8 Sources et consentements `[ACTUEL]` (vague 3 : `/sources`, consentements, 428, `block/clear`, `RunBody.sources` ; vague 4 : `suppressions`, § 5.7.1 ; `[CIBLE]` : `items/import`)
+### 5.8 Sources et consentements `[ACTUEL]` (vague 3 : `/sources`, consentements, 428, `block/clear`, `RunBody.sources` ; vague 4 : `suppressions`, § 5.7.1 ; vague 5 : `items/import`, collecte France Travail / Malt / WTTJ, § 5.8.2)
 
 | Méthode & chemin | Corps | Succès | Erreurs |
 | :--- | :--- | :--- | :--- |
 | `GET /api/sources` | — | `200` liste | — |
 | `POST /api/sources/{code}/consent` | `ConsentBody {risk_version: str, accepted: Literal[True]}` | `201` consentement | `404 Source inconnue.` ; `422 Cette source ne demande pas de consentement.` (mode `api_officielle`/`import_manuel`) ; `409 Le texte des risques a changé : relis la nouvelle version.` |
 | `DELETE /api/sources/{code}/consent` | — | `204` (révocation : `revoked_at = now()`) | `404 Aucun consentement actif pour cette source.` |
-| `POST /api/items/import` | `ManualItem {source_code: Literal["indeed"], url: HttpUrl, title: str, company: str = "", location: str = "", text: str}` | `201` élément créé | `422` ; `409 Cette offre est déjà dans l'historique.` |
+| `POST /api/items/import` `[ACTUEL]` vague 5 (§ 5.8.2) | `ManualItem {source_code: Literal["indeed"], url: str, title: str, company: str = "", location: str = "", text: str, keyword: str = ""}` | `201` élément créé | `422` ; `409 Cette offre est déjà dans l'historique.` |
 | `POST /api/suppressions` | `SuppressionBody {recipient: str, reason: Literal["désinscription", "refus_oral", "plainte"]}` | `201 {"ok": true}` (aucune donnée en clair renvoyée) | `422` |
 
 `GET /api/sources` :
@@ -624,6 +624,59 @@ Pour `POST /api/profile/skills`, l'absence de consentement ne lève pas d'erreur
   risques liés à LinkedIn (version 2026-10) dans l'interface web : Paramètres → Sources et consentements. » ;
   `--no-scrape` reste utilisable sans consentement. Le texte des risques n'existe qu'à un seul endroit
   (`src/content/risks.ts`).
+
+#### 5.8.2 Contrat de la vague 5 (brief du 2026-10-13, accepté le 2026-10-13) `[ACTUEL]`
+- **Activation** : révision Alembic `0003_enable_new_sources` : `UPDATE sources SET enabled = true WHERE code IN
+  ('france_travail', 'malt', 'wttj', 'indeed')` (aucune autre colonne ; `downgrade` remet `false`).
+- **`RunBody.sources`** (`scrape = true`) : mêmes `422` qu'en § 5.8.1 (le message « pas encore disponible » reste
+  valable si une source est désactivée en base). Ordre des contrôles : `404` → `422` → **`428`** (première source
+  `navigateur` sans consentement, ordre de la liste) → **`409` identifiants** (LinkedIn seulement si `linkedin` ∈
+  `sources` : `Identifiants LinkedIn absents : …` inchangé ; France Travail si ∈ `sources` :
+  `Identifiants France Travail absents : renseigne FRANCE_TRAVAIL_CLIENT_ID et FRANCE_TRAVAIL_CLIENT_SECRET dans le
+  fichier .env.`) → **`409` blocage** (une source `navigateur` de la liste en repos : `guard_not_blocked(code)`, premier
+  code de la liste ; Malt / WTTJ n'ont aucun identifiant). Une collecte `["france_travail"]` seule n'exige ni
+  identifiants LinkedIn ni consentement, et sa tâche n'est pas `browser`. Tout est revérifié au début de la tâche.
+- **Tâche `run`** : chaque source de la liste est collectée dans l'ordre. Une source bloquée (navigateur) s'arrête
+  seule (événement `blocked` avec `data.source`), les autres continuent ; une source en échec réseau
+  (`SourceFetchError`, France Travail) est ignorée et journalisée. La tâche finit `terminée` ; le résultat ajoute
+  (champs additifs) : `blocked` (vrai si au moins une source bloquée), `blocked_where = "collecte"`,
+  `blocked_sources: list[str]` et `sources: [{"code", "items": int, "status": "ok" | "bloquée" | "indisponible" |
+  "annulée", "detail": str}]` (`detail` vide si `ok`). Profil LinkedIn (`want_profile`) lu seulement si `linkedin` ∈
+  `sources`.
+- **Plafond (I-07)** : `max_items` offres **par source** ; Malt, WTTJ et France Travail ne collectent que des `job`
+  (ni posts ni profils : I-09, I-11).
+- **`POST /api/items/import`** : `ManualItem` : `source_code` `Literal["indeed"]` (sinon G-1
+  `source_code : doit être l'un de : indeed`) ; `url` texte `https://`, hôte `indeed.com` ou sous-domaine, ≤ 2000
+  caractères (`url : colle l'adresse https de l'offre Indeed.`) ; `title` 1 à 150 ; `company` ≤ 80 ; `location` ≤ 120 ;
+  `text` 200 à 20 000 après `strip` (`text : colle le texte complet de l'offre (200 caractères minimum).` /
+  `text : texte trop long (20 000 caractères maximum).`, validateurs `value_error`) ; `keyword` facultatif (≤ 80). Mot-clé retenu : `keyword`
+  du corps, sinon mot-clé du dernier rapport, sinon mot-clé des réglages, sinon `422 keyword : renseigne le mot-clé
+  du poste visé (Paramètres ou ce formulaire).` Élément créé : `kind = "job"`, `source_code = "indeed"`,
+  `external_id = "indeed-" + sha256(url normalisée)[:16]` (URL normalisée : schéma `https`, hôte en minuscules, sans
+  fragment, requête réduite aux paramètres `jk` / `vjk` s'ils existent), `purge_after` = 90 j (I-10). **Aucun appel
+  réseau** (R-6). Réponse `201 {"id": "job:indeed-…", "source_code": "indeed", "title", "company", "location",
+  "url", "keyword"}`. `409 Cette offre est déjà dans l'historique.` (contrainte d'unicité, aucune réécriture).
+  L'offre est scorée au prochain `POST /api/runs/rescore` (ou analyse) ; aucune tâche n'est créée.
+  Précisions constatées à la revue : l'`url` stockée et renvoyée est l'adresse **normalisée** ; `posted_at` = date du
+  jour UTC (l'offre entre dans la fenêtre de tendances) ; autres `422` : `title : renseigne le titre de l'offre (150
+  caractères maximum).`, `company : entreprise trop longue (80 caractères maximum).`, `location : lieu trop long (120
+  caractères maximum).`, `keyword : mot-clé trop long (80 caractères maximum).`.
+- **Forme du résultat de tâche `run`** : `sources` et `blocked_sources` sont **toujours présents** (`[]` si `scrape =
+  false`) ; `blocked_where` n'apparaît que si `blocked` est vrai.
+- **Limite connue** : les adresses de recherche et les formes de liens d'offre de Malt et WTTJ (`sources/malt.py`,
+  `sources/wttj.py`) ne sont **pas vérifiées en réel** (R-6) ; une page non reconnue donne 0 offre et un
+  avertissement. L'analyse du HTML lit `driver.page_source` (`HTMLParser`), sans `find_element` ni sélecteur CSS.
+- **Identifiants d'offre** : le `ref` `job:<external_id>` ignore `source_code` (`find_item`) ; les `external_id` des
+  nouvelles sources sont donc préfixés : `ft-<id France Travail>`, `malt-<id>`, `wttj-<id>`, `indeed-<hash>`
+  (LinkedIn reste numérique, sans préfixe).
+- **`top_jobs` d'un rapport** : chaque offre porte `source_code` (absent d'un ancien rapport ⇒ lu comme `linkedin`
+  par `jobs_overview`, I-02 : aucun rapport réécrit). `GET /api/jobs` renvoie `source_code` et accepte
+  `?source=<code>` (filtre exact ; code inconnu ⇒ liste vide).
+- **Actions LinkedIn sur une offre d'une autre source** : `POST /api/applications/{job_id}/apply` et
+  `/contacts/lookup` ⇒ `422 La candidature simplifiée n'existe que pour LinkedIn : ouvre l'offre sur {label} et
+  postule toi-même.` / `422 La recherche de recruteurs n'existe que pour les offres LinkedIn.` Ordre : `404` → `422` →
+  `409` d'état → `428`. Revérifié au début de la tâche (`RuntimeError` du même texte). `prepare` et `messages`
+  canal `email` restent permis pour toute source.
 
 ### 5.9 Route SPA
 

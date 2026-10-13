@@ -252,6 +252,7 @@ def score_jobs(features: list[JobFeatures], model: MatchingModel) -> list[dict]:
         rows.append(
             {
                 "id": f.item.id,
+                "source_code": f.item.source_code,
                 "title": f.item.title,
                 "company": f.item.company,
                 "url": f.item.url,

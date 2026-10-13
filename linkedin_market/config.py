@@ -86,6 +86,20 @@ def linkedin_credentials() -> tuple[str | None, str | None]:
     return os.environ.get("LINKEDIN_EMAIL"), os.environ.get("LINKEDIN_PASSWORD")
 
 
+def france_travail_credentials() -> tuple[str | None, str | None]:
+    """``FRANCE_TRAVAIL_CLIENT_ID`` et ``FRANCE_TRAVAIL_CLIENT_SECRET`` (API officielle : ni popup ni blocage)."""
+    return (
+        (os.environ.get("FRANCE_TRAVAIL_CLIENT_ID") or "").strip() or None,
+        (os.environ.get("FRANCE_TRAVAIL_CLIENT_SECRET") or "").strip() or None,
+    )
+
+
+def france_travail_configured() -> bool:
+    """Les deux identifiants de l'API France Travail sont renseignés dans l'environnement."""
+    client_id, client_secret = france_travail_credentials()
+    return bool(client_id and client_secret)
+
+
 def browser_name() -> str:
     """``auto`` (Chrome puis Firefox), ``chrome`` ou ``firefox``."""
     return (os.environ.get("LINKEDIN_BROWSER") or "auto").strip().lower()

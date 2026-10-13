@@ -115,6 +115,8 @@ def cv_html(job_id: str):
 @router.post("/applications/{job_id}/apply", status_code=202)
 def apply(request: Request, job_id: str) -> dict:
     entry = _entry(job_id)
+    if error := services.linkedin_only_error(job_id, "apply"):
+        raise HTTPException(422, error)
     tasks = tasks_of(request)
     if tasks.has_active("apply", job_id):
         raise HTTPException(409, "Une candidature est déjà en cours pour cette offre.")
@@ -135,6 +137,8 @@ def apply(request: Request, job_id: str) -> dict:
 @router.post("/applications/{job_id}/contacts/lookup", status_code=202)
 def lookup_contacts(request: Request, job_id: str) -> dict:
     _entry(job_id)
+    if error := services.linkedin_only_error(job_id, "contacts"):
+        raise HTTPException(422, error)
     tasks = tasks_of(request)
     if tasks.has_active("contacts", job_id):
         raise HTTPException(409, "Une recherche de contacts est déjà en cours pour cette offre.")

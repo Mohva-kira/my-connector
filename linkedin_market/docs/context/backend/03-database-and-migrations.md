@@ -175,7 +175,8 @@ linkedin_market/migrations/
 └── versions/
     ├── 0001_initial.py        # schéma complet + données de référence sources + trigger d'immuabilité
     ├── 0002_contact_opposed_at.py  # [ACTUEL] vague 4 : company_contacts.opposed_at timestamptz NULL (I-13)
-    └── 0003_<objet>.py        # évolutions de schéma suivantes
+    ├── 0003_enable_new_sources.py  # [ACTUEL] vague 5 : sources.enabled = true (france_travail, malt, wttj, indeed)
+    └── 0004_<objet>.py        # évolutions de schéma suivantes
 linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_market_data/ (pas une révision Alembic)
 ```
 - Identifiants de révision **séquentiels sur 4 chiffres** (`alembic revision --rev-id 0002 -m "…"`,

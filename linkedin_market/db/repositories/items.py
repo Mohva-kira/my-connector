@@ -95,6 +95,22 @@ def upsert_items(session: Session, user_id: UUID, rows: list[dict[str, Any]]) ->
     return len(values)
 
 
+def insert_new_item(session: Session, user_id: UUID, row: dict[str, Any]) -> bool:
+    """Insère un élément **sans jamais réécrire** un élément existant (import manuel) ; ``False`` si déjà présent.
+
+    Même colonnes que ``upsert_items`` ; ``purge_after`` calculé ici (90 jours pour une offre, I-10).
+    """
+    value = {**row, "user_id": user_id, "purge_after": purge_after(row["kind"], row["collected_at"])}
+    value["keywords"] = normalize_keywords(row.get("keywords") or [])
+    inserted = session.execute(
+        insert(CollectedItem)
+        .values(value)
+        .on_conflict_do_nothing(constraint="uq_collected_items_user_id_source_code_kind_external_id")
+        .returning(CollectedItem.id)
+    ).scalar_one_or_none()
+    return inserted is not None
+
+
 def window_items(session: Session, user_id: UUID, keyword: str, window_days: int) -> list[CollectedItem]:
     """Éléments collectés sous ce mot-clé (insensible à la casse) dans la fenêtre glissante (tendances : 30 jours).
 

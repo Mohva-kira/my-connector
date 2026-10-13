@@ -161,7 +161,29 @@ def test_alembic_check_sans_ecart(db_schema):
 
 
 @pytest.mark.db
-def test_cinq_sources_de_reference_seule_linkedin_activee():
+def test_revision_0003_active_puis_desactive_les_nouvelles_sources(db_schema):
+    def enabled(conn) -> dict[str, bool]:
+        return dict(conn.execute(select(models.Source.code, models.Source.enabled)).all())
+
+    with db_schema.begin() as conn:
+        cfg = alembic_config(conn)
+        try:
+            command.downgrade(cfg, "0002")
+            assert enabled(conn) == {
+                "linkedin": True,
+                "malt": False,
+                "wttj": False,
+                "france_travail": False,
+                "indeed": False,
+            }
+        finally:
+            command.upgrade(cfg, "head")
+        assert all(enabled(conn).values())
+        command.check(alembic_config(conn))  # modèles == migrations : alembic check vide
+
+
+@pytest.mark.db
+def test_cinq_sources_de_reference_toutes_activees():
     with session.transaction() as s:
         rows = s.execute(
             select(models.Source.code, models.Source.access_mode, models.Source.risk_version, models.Source.enabled)
@@ -169,10 +191,10 @@ def test_cinq_sources_de_reference_seule_linkedin_activee():
     assert sorted(rows) == sorted(
         [
             ("linkedin", "navigateur", "2026-10", True),
-            ("malt", "navigateur", "2026-10", False),
-            ("wttj", "navigateur", "2026-10", False),
-            ("france_travail", "api_officielle", None, False),
-            ("indeed", "import_manuel", None, False),
+            ("malt", "navigateur", "2026-10", True),
+            ("wttj", "navigateur", "2026-10", True),
+            ("france_travail", "api_officielle", None, True),
+            ("indeed", "import_manuel", None, True),
         ]
     )
 

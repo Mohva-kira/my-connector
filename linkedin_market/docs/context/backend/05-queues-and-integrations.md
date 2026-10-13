@@ -185,7 +185,7 @@ supprimé et connexion par identifiants (`/login`, attente du champ email 30 s, 
 
 Après un blocage : **repos de 6 h** pour **toutes** les actions navigateur (`guard_not_blocked`, HTTP 409 avec
 l'heure de fin), levée uniquement par l'utilisateur (`POST /api/block/clear`) après vérification de son compte dans
-un navigateur normal. Aucune nouvelle tentative automatique. `[CIBLE]` : le repos s'applique par source
+un navigateur normal. Aucune nouvelle tentative automatique. `[ACTUEL]` (vagues 3 et 5) : le repos s'applique par source
 (`activity_events.data.source_code`), un blocage LinkedIn ne bloquant pas Malt.
 
 ### 2.3 Claude (API Anthropic) — `interpreter.py`, `application.py`
@@ -252,7 +252,7 @@ Conformité prospection B2B `[ACTUEL]` (vague 4, 2026-10-12 ; `outreach.compose_
 - **Volume** : `message_daily_max` (15), pas de séquence de relances automatiques, un message par action
   confirmée (I-04).
 
-### 2.5 API France Travail « Offres d'emploi v2 » (source `france_travail`, mode `api_officielle`) `[CIBLE]`
+### 2.5 API France Travail « Offres d'emploi v2 » (source `france_travail`, mode `api_officielle`) `[ACTUEL]`
 Module `linkedin_market/sources/france_travail.py` (client `httpx` synchrone, appelé dans la tâche `run`).
 
 | Élément | Valeur |
@@ -263,26 +263,26 @@ Module `linkedin_market/sources/france_travail.py` (client `httpx` synchrone, ap
 | Pagination | `range=p-d` : 150 offres maximum par appel ; premier indice ≤ 1000, dernier ≤ 1149. Le plafond de la prudence (≤ 60) tient en **un seul appel**. En-tête `Content-Range: offres 0-59/1234` (total disponible, affiché dans les logs). |
 | Codes | `200` toutes les offres du périmètre renvoyées ; `206 Partial Content` résultats partiels (d'autres pages existent) — traité comme un succès ; `204` aucune offre ; `400` paramètre ou `range` invalide (erreur de programmation, pas de relance) ; `401` jeton expiré ; `429` / `5xx` relance. |
 | Débit | limite documentée 10 appels/s ; le client s'impose ≤ 2 appels/s (une recherche par analyse en pratique). |
-| Délais et relances | timeout 10 s ; 3 tentatives avec backoff exponentiel 1 s, 2 s, 4 s sur `429`, `500`, `502`, `503`, `504` et erreurs réseau ; `Retry-After` respecté s'il est présent. Échec définitif ⇒ `SourceUnavailable` journalisée, **l'analyse continue** avec les autres sources. |
+| Délais et relances | timeout 10 s ; **3 essais au total** (attentes de 1 s puis 2 s entre eux) sur `429`, `500`, `502`, `503`, `504` et erreurs réseau ; `Retry-After` (secondes) remplace l'attente s'il est présent et ≤ 30 s, sinon abandon immédiat ; le renouvellement du jeton après `401` n'est pas un essai. Échec définitif ⇒ `SourceFetchError` journalisée, **l'analyse continue** avec les autres sources. |
 | Correspondance | `id` → `external_id` ; `intitule` → `title` ; `description` → `text` ; `entreprise.nom` → `company` ; `lieuTravail.libelle` → `location` ; `dateCreation` → `posted_at` ; `origineOffre.urlOrigine` → `url` ; `competences[].libelle` complètent les compétences extraites par `nlp` ; `kind="job"`, `source_code="france_travail"`. |
 | Risques | Aucun risque de compte (API officielle) : pas de popup, pas de blocage, pas de repos. Respect des conditions d'utilisation de l'API (réutilisation des offres pour l'usage personnel de l'utilisateur). |
 
-### 2.6 Malt et Welcome to the Jungle (sources `malt`, `wttj`, mode `navigateur`) `[CIBLE]`
+### 2.6 Malt et Welcome to the Jungle (sources `malt`, `wttj`, mode `navigateur`) `[ACTUEL]` (adresses non vérifiées en réel)
 - Pas d'API publique de lecture des offres (R-6) : collecte par le navigateur de l'utilisateur, avec **les mêmes
   règles que LinkedIn** : consentement versionné (I-16, HTTP 428), compte propre (I-08), plafonds de prudence
   (I-07), arrêt et repos de 6 h au premier blocage (I-06), aucune action d'écriture (pas de candidature ni de
   message automatisés sur ces plateformes).
-- Interface commune `Source` (`code`, `access_mode`, `collect(request, ctx) -> list[Item]`) ; un module par
-  plateforme, sélecteurs par texte/`aria-label`, fixtures HTML hors ligne.
+- Classe commune `sources.base.BrowserJobSource` (`collect()` ; un module par plateforme) : HTML lu via
+  `driver.page_source` (`HTMLParser`), repérage par balises sémantiques, `href` et `aria-label`, fixtures HTML hors ligne.
 - Détection de blocage propre à chaque plateforme (page de connexion, défi anti-robot, code HTTP 403/429 affiché) ⇒
-  `BlockedError(where="collecte malt")`. Aucune tentative de contourner un défi.
+  `BrowserJobSource.blocked` et événement `blocked(where="collecte", source="malt")`. Aucune tentative de contourner un défi.
 
-### 2.7 Indeed (source `indeed`, mode `import_manuel`) `[CIBLE]`
+### 2.7 Indeed (source `indeed`, mode `import_manuel`) `[ACTUEL]`
 - L'API *Job Sync* d'Indeed est réservée aux partenaires approuvés et son contrat développeur interdit le
   scraping (R-6) : **aucun appel réseau vers Indeed**, ni API ni navigateur, ni même téléchargement de l'URL
   fournie.
 - L'utilisateur colle l'offre (URL pour mémoire, titre, entreprise, lieu, texte) : `POST /api/items/import` ⇒
-  `collected_items(kind="job", source_code="indeed", external_id = sha256(url normalisée)[:16])` ; `409` si déjà
+  `collected_items(kind="job", source_code="indeed", external_id = "indeed-" + sha256(url normalisée)[:16])` ; `409` si déjà
   présente. L'offre est ensuite scorable et éligible à une préparation de candidature comme les autres (pas
   d'Easy Apply : `apply` refusé pour une source autre que `linkedin`, 422).
 
@@ -297,7 +297,7 @@ Module `linkedin_market/sources/france_travail.py` (client `httpx` synchrone, ap
 | Message LinkedIn (éléments attendus) | 12 s | 0 | `OutreachError`, ou `UncertainDelivery` après le clic « Envoyer » (§ 2.4) |
 | SMTP | 25 s | 0 | `OutreachError` ⇒ `échec` |
 | Claude | défaut SDK (`timeout=120` s `[CIBLE]`) | 2 (SDK) | interprète / rédacteur local |
-| France Travail (jeton, recherche) `[CIBLE]` | 10 s | 3, backoff 1-2-4 s, `Retry-After` | source ignorée pour cette analyse |
+| France Travail (jeton, recherche) `[ACTUEL]` | 10 s | 3 essais, attentes 1 s puis 2 s, `Retry-After` | source ignorée pour cette analyse |
 | Blocage navigateur | — | **jamais** | repos de 6 h, levée manuelle |
 
 ## 4. Sources

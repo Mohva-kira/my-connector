@@ -77,6 +77,12 @@ def append_items(items: list[Item]) -> None:
             items_repo.upsert_items(s, uid, batch[start : start + items_repo.BATCH_SIZE])
 
 
+def import_item(item: Item) -> bool:
+    """Ajoute **un** élément saisi à la main sans rien réécrire (``False`` s'il est déjà dans l'historique)."""
+    with user_transaction() as (s, uid):
+        return items_repo.insert_new_item(s, uid, _row(item, utcnow()))
+
+
 def load_items(keyword: str, window_days: int = config.TREND_WINDOW_DAYS) -> list[Item]:
     """Éléments du mot-clé publiés (ou collectés) dans la fenêtre glissante."""
     with user_transaction() as (s, uid):

@@ -127,9 +127,9 @@ def create_app(*, tasks: TaskManager | None = None, token: str | None = "auto", 
     def health() -> dict:
         return {"ok": True}
 
-    from .routers import applications, core, jobs, sources
+    from .routers import applications, core, items, jobs, sources
 
-    for module in (core, jobs, applications, sources):
+    for module in (core, jobs, applications, sources, items):
         app.include_router(module.router, prefix="/api")
 
     @app.get("/{path:path}", include_in_schema=False)

@@ -215,7 +215,7 @@ quotidiens et aux périodes de repos. Un événement = `{at, kind, ...data}`.
 | Saisie utilisateur attendue | `INPUT_TIMEOUT_SECONDS = 600` ; au-delà ⇒ tâche `échec`. |
 | Blocage plateforme | Arrêt immédiat, événement `blocked`, repos de **6 h** (`BLOCK_COOLDOWN_HOURS`) ; levée manuelle uniquement après vérification du compte dans un navigateur normal. |
 | Claude indisponible / erreur | Bascule automatique sur `LocalInterpreter` ; le rapport indique `interpreter_used="local"`. |
-| API France Travail | Timeout 10 s, 3 tentatives avec backoff exponentiel (1 s, 2 s, 4 s) sur `429` / `5xx` ; respect de `Retry-After` ; en échec, l'analyse continue avec les autres sources. `[CIBLE]` |
+| API France Travail | Timeout 10 s, 3 essais (attentes de 1 s puis 2 s) sur `429` / `5xx` ; respect de `Retry-After` ; en échec, l'analyse continue avec les autres sources. `[ACTUEL]` (vague 5) |
 | SMTP | Timeout 25 s (`SMTP_TIMEOUT`), **aucune** relance automatique (éviter les doublons) ; statut `échec` et nouvel envoi manuel. |
 | Arrêt de l'application pendant une tâche | `[ACTUEL]` (vague 1) : au redémarrage, les tâches non finales de la table `tasks` sont marquées `échec` (« Tâche interrompue par l'arrêt de l'application. »). |
 | Annulation | `POST /api/tasks/{id}/cancel` ; vérifiée entre deux sources / deux étapes (`Cancelled`). |
