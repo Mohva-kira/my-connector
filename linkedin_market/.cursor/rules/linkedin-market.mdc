@@ -19,7 +19,7 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
 3. Backend :
    - invariants et cas d'usage : `docs/context/backend/00-backend-business-context.md` ;
    - contrats d'API (codes, `detail` exacts) : `docs/context/backend/01-api-contracts.md` ;
-   - services, transactions, écarts `E-n` (seul E-21 ouvert au 2026-10-13) : `docs/context/backend/02-business-logic-services.md` § 4 ;
+   - services, transactions, écarts `E-n` (aucun ouvert au 2026-10-13) : `docs/context/backend/02-business-logic-services.md` § 4 ;
    - sécurité et plafonds : `04` ; tâches et intégrations : `05`.
 4. Architecture et données : consulte `docs/context/schemas-architecture/01` à `04` et
    `docs/context/backend/03-database-and-migrations.md` avant toute modification de structure, d'entité, de
@@ -50,6 +50,7 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
   dans la transaction de réservation avant le 429 et au début de la tâche, `POST /api/suppressions`, `opposed_at`.
 - I-15 : aucun secret, cookie ou jeton versionné ou journalisé.
 - I-16 : aucune action sur une source `navigateur` sans consentement à la version courante de la popup de risques `[ACTUEL]` (vague 3 : HTTP 428, revérifié au début de la tâche, repos 6 h par source).
+  CLI (`--sources`, défaut `linkedin`) : refus avant collecte = code de sortie 1 ; blocage pendant la collecte = rapport partiel, code 0.
 - I-01, I-02, I-03 : `user_id` sur chaque table et dans chaque requête (PostgreSQL 18) ; rapports immuables
   (trigger `trg_reports_immutable`) ; pas de régression automatique de statut.
 
@@ -83,7 +84,7 @@ Aucun point en arbitrage au 2026-10-09. Tout nouveau point touchant un invariant
 ## Tests et vérifications (depuis la racine du dépôt)
 - Tout changement de comportement : test pytest, hors ligne (fixtures HTML, aucun appel réel à LinkedIn,
   France Travail, Claude ou SMTP). `LM_TEST_DATABASE_URL=<base _test> .venv/bin/python -m pytest linkedin_market/tests`
-  (0 test ignoré exigé, ~2 min, 425 tests). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`,
+  (0 test ignoré exigé, ~2 min, 465 tests). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`,
   réservé à email_analyzer). Depuis la vague 2, `conftest.py` retire aussi `LINKEDIN_*`/`SMTP_*`/`ANTHROPIC_API_KEY`
   de l'environnement du processus de test : aucune tâche lancée par un test ne peut atteindre un vrai service.
 - Front : `npx tsc --noEmit` ou `npm run build` dans `linkedin_market/web/frontend`. `npm run lint` (ESLint 9, 0 erreur et 0 avertissement exigés).

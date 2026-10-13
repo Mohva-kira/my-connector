@@ -2,9 +2,9 @@
 
 > **Statut** : §§ 1 à 4 et 8 `[ACTUEL]` depuis l'acceptation de la vague 1 (2026-10-09) ; § 5.1 (réservation de
 > message) et § 5.2 (plafond `apply`) `[ACTUEL]` depuis l'acceptation de la vague 2 (2026-10-09), § 5.1 complété par la
-> `suppression_list` et la révision `0002` (`opposed_at`) à l'acceptation de la vague 4 (2026-10-12) ; le reste de la
-> généralisation « transaction par cas d'usage », § 6 (purge, vague 6) et la sauvegarde automatique du § 7
-> restent `[CIBLE]`. Le schéma de référence est
+> `suppression_list` et la révision `0002` (`opposed_at`) à l'acceptation de la vague 4 (2026-10-12) ; § 6 (purge) et
+> révisions `0003` / `0004` `[ACTUEL]` depuis les vagues 5-6 (2026-10-13) ; le reste de la généralisation
+> « transaction par cas d'usage », la dépendance `get_db` et la sauvegarde automatique du § 7 restent `[CIBLE]`. Le schéma de référence est
 > `schemas-architecture/03-database-erd.md` (tables, colonnes, contraintes, rétention, correspondance des
 > fichiers). Ce document fixe **comment** l'implémenter.
 
@@ -30,7 +30,7 @@ def dispose_engine() -> None: ...
 
 - `pool_size=5` ≥ `TaskManager(max_workers=4)` + requêtes HTTP. `[ACTUEL]` une transaction courte par appel de
   façade (`db.session.transaction()`, `db.repositories.user_transaction()` qui résout aussi `user_id`) ; une
-  `Session` n'est jamais partagée entre threads. `[CIBLE]` dépendance FastAPI `get_db` (vague 2).
+  `Session` n'est jamais partagée entre threads. `[CIBLE]` dépendance FastAPI `get_db` (non livrée).
 - Le CLI ouvre ses propres sessions via les mêmes services.
 - Au démarrage (`db/bootstrap.py::prepare_database()`, appelé par le CLI et par `python -m linkedin_market.web`) :
   `alembic upgrade head` (programmatique), puis l'import JSON s'il reste des fichiers non suffixés `.migrated`,
@@ -68,8 +68,19 @@ vague 1 : `advance_status()` lit et écrit le statut dans **une** transaction av
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import (TIMESTAMP, CheckConstraint, ForeignKey, Index, MetaData, Numeric, String, Text,
-                        UniqueConstraint, func, text)
+from sqlalchemy import (
+    TIMESTAMP,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    MetaData,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 NAMING = {
@@ -102,8 +113,9 @@ class Application(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "item_id"),
         CheckConstraint(f"status IN {APPLICATION_STATUSES!r}", name="status"),
-        CheckConstraint("apply_state IN ('', 'en_cours', 'postulée', 'déjà_postulée', 'incertaine', 'échec')",
-                        name="apply_state"),
+        CheckConstraint(
+            "apply_state IN ('', 'en_cours', 'postulée', 'déjà_postulée', 'incertaine', 'échec')", name="apply_state"
+        ),
         CheckConstraint("generator IN ('claude', 'local')", name="generator"),
     )
 
@@ -118,8 +130,9 @@ class Application(Base):
     prepared_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
-    events: Mapped[list["ApplicationEvent"]] = relationship(back_populates="application", cascade="all, delete-orphan",
-                                                            order_by="ApplicationEvent.id")
+    events: Mapped[list["ApplicationEvent"]] = relationship(
+        back_populates="application", cascade="all, delete-orphan", order_by="ApplicationEvent.id"
+    )
 
 
 class OutreachMessage(Base):
@@ -128,7 +141,7 @@ class OutreachMessage(Base):
         CheckConstraint("channel IN ('email', 'linkedin')", name="channel"),
         CheckConstraint("status IN ('confirmé', 'envoyé', 'échec')", name="status"),
         CheckConstraint("status <> 'envoyé' OR sent_at IS NOT NULL", name="sent_has_date"),
-        Index(None, "user_id", "sent_at"),            # plafond message_daily_max
+        Index(None, "user_id", "sent_at"),  # plafond message_daily_max
     )
 
     id: Mapped[UUID] = uuid_pk()
@@ -187,7 +200,7 @@ linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_ma
   modèles ↔ migrations).
 - Les migrations sont appliquées **automatiquement au lancement** de l'application et du CLI. Elles doivent donc
   être sûres sans intervention : pas de question, pas de suppression de données sans sauvegarde préalable.
-- `[ACTUEL]` `alembic check` passe sur `0001_initial` (modèles == migration) ; à relancer pour chaque révision.
+- `[ACTUEL]` `alembic check` passe à la révision `0004` (head) : modèles == migrations (vérifié le 2026-10-13) ; à relancer pour chaque révision.
 
 ### 3.2 Compatibilité
 - Les utilisateurs mettent à jour par `git pull` et peuvent revenir à la version précédente : chaque migration
@@ -436,7 +449,7 @@ Le nombre de lignes supprimées par table est journalisé (sans contenu, I-15) e
   connexion LinkedIn).
 - **Restauration** : `pg_restore --clean --if-exists -d linkedin_market sauvegarde.dump`, puis lancement normal
   (`alembic upgrade head` rattrape le schéma si la sauvegarde est plus ancienne).
-- **Sauvegarde automatique** avant une migration destructive : `linkedin_market_data/backups/avant-<rev>.dump`,
+- **Sauvegarde automatique** `[CIBLE]` (aucun code à ce jour) avant une migration destructive : `linkedin_market_data/backups/avant-<rev>.dump`,
   5 dernières conservées.
 - Les sauvegardes contiennent des données personnelles de tiers : même niveau de protection que la base
   (disque de l'utilisateur, jamais dans le dépôt Git — `linkedin_market_data/` est dans `.gitignore`).

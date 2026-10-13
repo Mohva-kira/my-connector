@@ -44,6 +44,7 @@ export function ManualImportModal({ onClose, onImported }: ManualImportModalProp
   const [serverErrors, setServerErrors] = useState<Partial<Record<FieldName, string>>>({});
   const [otherError, setOtherError] = useState<unknown>(null);
   const urlRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const importItem = useImportItem();
 
   const checked = manualImportSchema.safeParse(form);
@@ -78,6 +79,10 @@ export function ManualImportModal({ onClose, onImported }: ManualImportModalProp
           if (error instanceof ApiError && error.status === 422) {
             const { byField, rest: others } = splitServerErrors(error.detail);
             setServerErrors(byField);
+            // Une erreur rattachée à un champ y déplace le focus (le champ est relié à son message par aria-describedby).
+            if (Object.keys(byField).length > 0) {
+              setTimeout(() => formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus(), 0);
+            }
             setOtherError(others.length > 0 ? others.join(" ; ") : Object.keys(byField).length > 0 ? null : error);
           } else {
             setServerErrors({});
@@ -91,6 +96,7 @@ export function ManualImportModal({ onClose, onImported }: ManualImportModalProp
   return (
     <Modal title="Importer une offre Indeed" onClose={onClose} initialFocus={urlRef} wide>
       <form
+        ref={formRef}
         className="space-y-3"
         noValidate
         onSubmit={(event) => { event.preventDefault(); submit(); }}
@@ -121,7 +127,7 @@ export function ManualImportModal({ onClose, onImported }: ManualImportModalProp
           <textarea className={`${inputClass} font-sans`} rows={10} value={form.text}
             onChange={(e) => set("text", e.target.value)} onBlur={() => touch("text")} />
         </Field>
-        <p className="-mt-2 text-right text-xs text-text-muted" aria-live="off">
+        <p className="-mt-2 text-right text-xs text-text-muted">
           {textLength.toLocaleString("fr-FR")} / {MANUAL_TEXT_MAX.toLocaleString("fr-FR")}
         </p>
         <ErrorBox error={otherError} />

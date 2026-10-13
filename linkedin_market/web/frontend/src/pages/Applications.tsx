@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApplicationDetail, Contact, FINAL_STATUSES, SOURCE_LABEL, Task, api, authedUrl, enc, sourceOfRef } from "../api";
 import { ComposeModal } from "../components/ComposeModal";
 import { OppositionDialog } from "../components/OppositionDialog";
@@ -257,13 +257,26 @@ export default function Applications() {
   const { jobId } = useParams();
   const navigate = useNavigate();
   const { data: apps = [], error } = useApplications();
-  const [filter, setFilter] = useState("");
+  // Filtre de statut dans l'URL (`/candidatures/{id}?statut=postulée`) : lien partageable, conservé en changeant de dossier.
+  const [params, setParams] = useSearchParams();
+  const filter = params.get("statut") ?? "";
+  const setFilter = (value: string) =>
+    setParams((current) => {
+      const next = new URLSearchParams(current);
+      if (value) next.set("statut", value);
+      else next.delete("statut");
+      return next;
+    }, { replace: true });
+  const search = params.toString() ? `?${params.toString()}` : "";
   const rows = apps.filter((a) => !filter || a.status === filter);
+  // Valeur d'URL sans candidature correspondante : gardée dans la liste pour que le sélecteur reste cohérent.
+  const statuses = [...new Set([...apps.map((a) => a.status), ...(filter ? [filter] : [])])];
   const selected = jobId ? decodeURIComponent(jobId) : undefined;
 
+  const firstId = rows[0]?.id;
   useEffect(() => {
-    if (!selected && apps.length > 0) navigate(`/candidatures/${enc(apps[0].id)}`, { replace: true });
-  }, [selected, apps, navigate]);
+    if (!selected && firstId) navigate({ pathname: `/candidatures/${enc(firstId)}`, search }, { replace: true });
+  }, [selected, firstId, navigate, search]);
 
   return (
     <>
@@ -274,12 +287,13 @@ export default function Applications() {
           <div>
             <select className={`${inputClass} mb-2`} value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filtrer par statut">
               <option value="">Tous les statuts</option>
-              {[...new Set(apps.map((a) => a.status))].map((s) => <option key={s} value={s}>{s}</option>)}
+              {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
+            {rows.length === 0 && <Empty>Aucune candidature avec ce statut.</Empty>}
             <ul className="space-y-2">
               {rows.map((a) => (
                 <li key={a.id}>
-                  <button onClick={() => navigate(`/candidatures/${enc(a.id)}`)} aria-current={a.id === selected}
+                  <button onClick={() => navigate({ pathname: `/candidatures/${enc(a.id)}`, search })} aria-current={a.id === selected}
                     className={`w-full rounded-md border p-3 text-left hover:bg-bg-secondary ${a.id === selected ? "border-accent-primary bg-accent-soft" : "border-border-default bg-surface"}`}>
                     <div className="truncate text-sm font-medium">{a.title || "Sans titre"}</div>
                     <div className="truncate text-xs text-text-secondary">{a.company}</div>

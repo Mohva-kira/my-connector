@@ -193,7 +193,7 @@ export default function SettingsPage() {
           {status?.smtp_configured && (
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <Button small onClick={() => testMail.mutate()} loading={testMail.isPending}>Envoyer un email de test à moi-même</Button>
-              {testMail.isSuccess && <span className="text-sm text-success">Envoyé à {testMail.data.to}.</span>}
+              {testMail.isSuccess && <span role="status" className="text-sm text-success">Envoyé à {testMail.data.to}.</span>}
             </div>
           )}
           <ErrorBox error={testMail.error} />

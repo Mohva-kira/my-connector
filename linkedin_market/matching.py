@@ -43,10 +43,32 @@ _LOCATION_BLOCKERS = re.compile(
     r"us only|usa only|must be (?:based|located) in|resident of|eligible to work in the (?:us|uk|eu)"
     r"|sur site|on-?site|presentiel|hybride|hybrid|uniquement en france|work permit"
 )
-_LOCATION_OK = re.compile(r"worldwide|anywhere|monde|international|afrique|africa|cote d.ivoire|abidjan|emea|remote")
+# Mentions géographiques neutres, valables pour tout utilisateur. Le lieu de l'utilisateur (``home_location``, fuseau)
+# n'est jamais codé en dur : il s'ajoute via ``location_ok_pattern`` (E-18) ; sans réglage, aucun lieu n'est privilégié.
+_LOCATION_OK_GENERIC = r"worldwide|anywhere|monde|international|emea|remote"
 _FREELANCE = re.compile(
     r"freelance|independant|contract(?:or)?|contrat de mission|\bmission\b|consultant|portage|\btjm\b|daily rate|b2b"
 )
+
+
+def _home_terms(home_location: str, timezone: str) -> list[str]:
+    """Lieux de l'utilisateur normalisés (« Lyon, France » -> « lyon », « france » ; « Europe/Paris » -> « paris »)."""
+    parts = re.split(r"[,;/()\n]+", home_location or "")
+    if timezone and "/" in timezone:
+        parts.append(timezone.rsplit("/", 1)[1].replace("_", " "))  # ville du fuseau IANA, pas sa région
+    terms = {" ".join(nlp.normalize(p).replace("-", " ").split()) for p in parts}
+    return sorted((t for t in terms if len(t) >= 3), key=len, reverse=True)
+
+
+def location_ok_pattern(home_location: str = "", timezone: str = "") -> re.Pattern[str]:
+    """Motif des mentions de lieu compatibles : mentions neutres + lieu de l'utilisateur s'il est renseigné.
+
+    Comportement neutre quand ``home_location`` et ``timezone`` sont vides : seules les mentions génériques
+    (télétravail, monde entier, international…) comptent, aucun lieu n'est privilégié. Les réglages sont passés par
+    l'appelant (le domaine ne lit pas la base).
+    """
+    extra = [rf"(?<![a-z]){re.escape(term)}(?![a-z])" for term in _home_terms(home_location, timezone)]
+    return re.compile("|".join([_LOCATION_OK_GENERIC, *extra]))
 
 
 def _token_jaccard(a: str, b: str) -> float:
@@ -62,9 +84,16 @@ class JobFeatures:
     missing_skills: list[str]
 
 
-def build_features(jobs: list[Item], profile: Profile, keyword: str) -> list[JobFeatures]:
+def build_features(
+    jobs: list[Item], profile: Profile, keyword: str, home_location: str, timezone: str
+) -> list[JobFeatures]:
+    """Critères de chaque offre ; ``home_location`` / ``timezone`` (réglages) pilotent la compatibilité de lieu.
+
+    Les deux paramètres sont obligatoires : un oubli ferait retomber le lieu en neutre sans erreur (E-18).
+    """
     if not jobs:
         return []
+    location_ok = location_ok_pattern(home_location, timezone)
     tfidf = nlp.TfIdf([profile.text] + [f"{j.title} {j.text}" for j in jobs])
     vectors = tfidf.transform([profile.text] + [f"{j.title} {j.text}" for j in jobs])
     similarities = vectors[1:] @ vectors[0]
@@ -93,7 +122,7 @@ def build_features(jobs: list[Item], profile: Profile, keyword: str) -> list[Job
         if _LOCATION_BLOCKERS.search(norm):
             location = 0.0
         else:
-            location = 1.0 if _LOCATION_OK.search(norm) else 0.5
+            location = 1.0 if location_ok.search(norm) else 0.5
 
         values = np.array(
             [
@@ -228,14 +257,19 @@ class MatchingModel:
 
 
 def train_from_labels(
-    profile: Profile, keyword: str, labels: dict[str, int], labeled_items: dict[str, Item]
+    profile: Profile,
+    keyword: str,
+    labels: dict[str, int],
+    labeled_items: dict[str, Item],
+    home_location: str,
+    timezone: str,
 ) -> MatchingModel | None:
     """Réentraîne sur toutes les annotations ; None si pas assez d'exemples."""
     items = [labeled_items[i] for i in labels if i in labeled_items]
     y = np.array([labels[i.id] for i in items], dtype=float)
     if len(items) < MIN_LABELS or y.min() == y.max():
         return None
-    feats = build_features(items, profile, keyword)
+    feats = build_features(items, profile, keyword, home_location, timezone)
     model = MatchingModel()
     model.fit(np.vstack([f.values for f in feats]), y)
     model.save()

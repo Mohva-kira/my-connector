@@ -110,10 +110,12 @@ export function ErrorBox({ error }: { error: unknown }) {
   return <div role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger-strong">{message}</div>;
 }
 
-/** Bandeau ; les tons `success` et `info` sont annoncés poliment aux lecteurs d'écran (WCAG 4.1.3). */
+/**
+ * Bandeau annoncé aux lecteurs d'écran quand il apparaît (WCAG 4.1.3) : `alert` (assertif) pour le ton `danger`,
+ * `status` (poli) pour les autres. Ne pas l'envelopper dans un autre `role="alert"`.
+ */
 export function Notice({ tone = "info", children }: { tone?: Tone; children: ReactNode }) {
-  const announced = tone === "success" || tone === "info";
-  return <div role={announced ? "status" : undefined} className={`rounded-md px-3 py-2 text-sm ${TONES[tone]}`}>{children}</div>;
+  return <div role={tone === "danger" ? "alert" : "status"} className={`rounded-md px-3 py-2 text-sm ${TONES[tone]}`}>{children}</div>;
 }
 
 export function Empty({ children }: { children: ReactNode }) {

@@ -53,8 +53,9 @@ modales, remplace `bg-black/40`). Valeurs claires : celles du § 4.1 ; valeurs s
 
 Type `Tone = "neutral" | "success" | "warning" | "danger" | "info" | "accent"`, table `TONES` partagée par
 `Badge` et `Notice` : fond à 15 % + texte en jeton `*-strong` (`bg-success/15 text-success-strong`…), `neutral` =
-`bg-bg-tertiary text-text-secondary`, `accent` = `bg-accent-soft text-accent-strong`. `Notice` de ton `success` /
-`info` porte `role="status"`.
+`bg-bg-tertiary text-text-secondary`, `accent` = `bg-accent-soft text-accent-strong`. `Notice` porte `role="alert"`
+(assertif) pour le ton `danger` et `role="status"` (poli) pour tous les autres tons (`success`, `info`, `warning`, `neutral`,
+`accent`) ; ne jamais l'envelopper dans un autre `role="alert"`.
 
 | Fonction | Règle |
 | :--- | :--- |
@@ -174,8 +175,8 @@ automatisé de contraste des jetons (aujourd'hui seul `eslint-plugin-jsx-a11y` e
   `aria-describedby` + `aria-invalid` ; les champs sans `Field` ont un `aria-label` (« Rechercher », « Annotation »,
   « Message de candidature », « Nouvelle compétence », « Filtrer par statut », « Statut », « Rapport »). Les boutons
   d'annotation des pages Offres et Marché portent `aria-label` + `aria-pressed`.
-- **Annonce des changements (4.1.3, AA)** : `ErrorBox` `role="alert"` ; `Notice` `success` / `info`
-  `role="status"` ; statut courant du tiroir des tâches dans une région `aria-live="polite"`.
+- **Annonce des changements (4.1.3, AA)** : `ErrorBox` `role="alert"` ; `Notice` : `role="alert"` si `danger`,
+  `role="status"` sinon ; statut courant du tiroir des tâches dans une région `aria-live="polite"`.
 - **Onglets** : `Tabs` complet (WAI-ARIA) : flèches, Début / Fin, `tabIndex` itinérant, `role="tabpanel"` +
   `aria-controls` quand le contenu est passé en `children` (candidature, `ComposeModal`).
 - **Graphiques** : SVG avec `role="img"` + `aria-label` et `<title>` par barre / point `[ACTUEL]` ;

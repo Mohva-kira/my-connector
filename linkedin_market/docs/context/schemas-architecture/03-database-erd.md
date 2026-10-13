@@ -1,7 +1,7 @@
 # Schéma Entité-Relation (ERD)
 
 > **Statut** : schéma **PostgreSQL 18** `[ACTUEL]` depuis la vague 1 (SQLAlchemy 2.x + Alembic, révision
-> `migrations/versions/0001_initial.py`, modèles `db/models.py`). La section 4 indique, pour chaque table, le fichier
+> `migrations/versions/0001_initial.py`, puis `0002` à `0004` (vagues 4 à 6), modèles `db/models.py`). La section 4 indique, pour chaque table, le fichier
 > JSON/JSONL de `linkedin_market_data/` qu'elle remplace et la règle d'import (`db/import_json.py`). Colonnes et
 > tables annoncées pour une vague ultérieure : marquées `[CIBLE]`.
 
@@ -67,6 +67,8 @@ erDiagram
         text contact_phone
         text signature
         boolean linkedin_skill_sync "défaut true"
+        text home_location "vide par défaut (vague 6, révision 0004)"
+        text timezone "IANA ou vide (vague 6, révision 0004)"
         timestamptz updated_at
     }
 
@@ -102,7 +104,7 @@ erDiagram
         text label
         text access_mode "api_officielle|navigateur|import_manuel"
         text risk_version "ex. 2026-10, NULL si sans popup"
-        boolean enabled "seule linkedin à true en vague 1"
+        boolean enabled "toutes à true depuis la révision 0003 (vague 5)"
     }
 
     SOURCE_CONSENTS {
@@ -125,7 +127,7 @@ erDiagram
     TASKS {
         uuid id PK
         uuid user_id FK
-        text kind "run|rescore|train|prepare|apply|contacts|message|import_profile|profile_skill"
+        text kind "run|rescore|train|prepare|apply|contacts|message|import_profile|profile_skill|purge (interne)"
         text title
         text status "en_attente|en_cours|attente_saisie|attente_verification_manuelle|terminée|échec|annulée"
         boolean browser

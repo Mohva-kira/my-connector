@@ -77,10 +77,17 @@ def get_profile() -> dict:
     results = services.latest_results()
     profile["suggestions"] = services.skill_suggestions(results, profile["skills"])
     # Les scores des offres reflètent le profil de la dernière analyse : à recalculer si les compétences ont changé.
-    profile["scores_outdated"] = (
-        bool(results)
-        and profile["available"]
-        and sorted(profile["skills"]) != sorted(results.get("profile", {}).get("skills", []))
+    # Il le sont aussi si le lieu ou le fuseau ont changé depuis (E-18) ; un rapport sans `scoring_context` n'est
+    # jamais jugé obsolète pour ce motif.
+    prefs = settings.load_settings()
+    context = (results or {}).get("scoring_context")
+    context_changed = isinstance(context, dict) and (
+        context.get("home_location", prefs["home_location"]) != prefs["home_location"]
+        or context.get("timezone", prefs["timezone"]) != prefs["timezone"]
+    )
+    profile["scores_outdated"] = bool(results) and (
+        context_changed
+        or (profile["available"] and sorted(profile["skills"]) != sorted(results.get("profile", {}).get("skills", [])))
     )
     return profile
 

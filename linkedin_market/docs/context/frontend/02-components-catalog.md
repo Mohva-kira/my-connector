@@ -39,7 +39,7 @@ src/
     └── SettingsPage.tsx
 ```
 
-### 1.2 Organisation cible `[CIBLE]`
+### 1.2 Organisation `[ACTUEL]` et cible `[CIBLE]`
 > `[ACTUEL]` : `components/ErrorBoundary.tsx`, `src/schemas.ts` (vague 2), `components/RiskConsentDialog.tsx`,
 > `components/SourcePicker.tsx`, `src/content/risks.ts` (vague 3), `components/OppositionDialog.tsx` (vague 4),
 > `components/ManualImportModal.tsx` (vague 5), `components/InterpreterBadge.tsx` (vague 6).
@@ -106,7 +106,8 @@ type ButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "type"> & {
 ### 3.5 `ErrorBox`, `Notice`, `Empty`, `PageHeader` `[ACTUEL]`
 - `ErrorBox { error: unknown }` : rien si `error` est falsy ; sinon `errorMessage(error)` = `ApiError.detail`
   (chaîne normalisée G-1) et, pour un 429 avec `Retry-After`, « Réessaie dans X h / min » (G-2). `role="alert"`.
-- `Notice { tone?: Tone = "info"; children }` : bandeau ; `role="status"` pour `success` / `info`.
+- `Notice { tone?: Tone = "info"; children }` : bandeau ; `role="alert"` pour le ton `danger`, `role="status"` pour tous les
+  autres tons (WCAG 4.1.3).
 - `Empty { children }` : état vide.
 - `PageHeader { title: string; subtitle?: string; actions?: ReactNode }` : `<h1 tabIndex={-1}>` de page (focus au
   changement de section). Marché a son propre en-tête (animé), mais garde un `<h1>`.
@@ -147,13 +148,14 @@ activation immédiate ; si `children` est fourni, il est rendu dans un `role="ta
 `{ name: IconName; className?: string = "h-4 w-4" }` — SVG `stroke="currentColor"`, `aria-hidden`. Noms :
 `chart, trend, target, scale, user, info, spark, play, external, download, copy, check, plus, thumbUp,
 thumbDown, doc, users, clock, pin, refresh, arrowRight`. Choisi pour éviter les emojis — la page Offres utilise
-encore 👍 / 👎 / ✓ / ✗ en texte : `[CIBLE]` remplacer par `Icon thumbUp` / `thumbDown`.
+des icônes `thumbUp` / `thumbDown` pour l'annotation `[ACTUEL]` ; les « ✓ » / « ✗ » restent du texte dans les badges de
+compétences acquises / manquantes (accompagnés d'un libellé, 1.4.1).
 
 ## 4. Composants Métier
 
-### 4.1 `RiskConsentDialog` — popup de risques d'une source `[ACTUEL]` côté UI, backend `[CIBLE]` (I-16, R-1, R-3, R-6)
-> **`[ACTUEL]` côté frontend (vagues 3-4, revue ACCEPTÉE le 2026-10-09)**, vérifié contre l'API simulée ; les routes
-> `GET /api/sources`, `POST|DELETE /api/sources/{code}/consent` et le 428 restent `[CIBLE]` côté backend : `risks.ts` recopié tel quel ; popup montée
+### 4.1 `RiskConsentDialog` — popup de risques d'une source `[ACTUEL]` (I-16, R-1, R-3, R-6)
+> **`[ACTUEL]` côté frontend et backend (vague 3, revue ACCEPTÉE le 2026-10-09 ; routes `GET /api/sources`,
+> `POST|DELETE /api/sources/{code}/consent` et 428 livrées côté serveur)** : `risks.ts` recopié tel quel ; popup montée
 > globalement par un `ConsentGate` qui écoute `onConsentRequired()` (abonnement exposé par `api()` sur tout 428) ;
 > aucun rejeu (bandeau « Relancer : … ») ; case « Passer la prudence à « prudent » » cochée par défaut si la
 > prudence courante est plus risquée — **conforme** (décision 2026-10-09 : la règle « aucune case pré-cochée »
@@ -318,11 +320,11 @@ Pied commun : « Version des risques : 2026-10 » ; case « J'ai lu ces risques 
   `Soumettre` comme une annulation) ; focus initial sur « Annuler » s'il est proposé, sinon sur le titre, jamais sur
   « Soumettre ». Le tiroir des tâches n'affiche **aucune** option d'un champ `confirm*` : seule cette modale, avec le
   texte `review`, permet de répondre.
-- Reste `[CIBLE]` : afficher le titre de l'offre et l'entreprise, et le délai restant (600 s,
-  `INPUT_TIMEOUT_SECONDS`).
+- Reste `[CIBLE]` (non vérifié dans la modale au 2026-10-13) : afficher le titre de l'offre et l'entreprise, et le délai
+  restant (600 s, `INPUT_TIMEOUT_SECONDS`).
 
 **b) Message à l'entreprise — `ComposeModal`** `[ACTUEL]` (I-12 / I-13 côté UI depuis la vague 4 ; backend
-`message-draft?to=`, pied serveur et 409 d'opposition `[CIBLE]`)
+`message-draft?to=`, pied serveur et 409 d'opposition `[ACTUEL]`, vague 4)
 - Props : `{ app: ApplicationDetail; contact?: Contact; onClose: () => void; initial?: ComposeInitial }` —
   `initial` (canal, destinataire, objet, corps, pièce jointe ; jamais `confirm`) ouvre directement la relecture,
   case décochée, après une relance explicite consécutive à un 428. `Modal` en `dismissible = false` ; fermer
@@ -368,14 +370,14 @@ Pied commun : « Version des risques : 2026-10 » ; case « J'ai lu ces risques 
   (`TaskDetail`).
 - **Ouverture automatique** une seule fois par couple tâche / question quand une tâche passe en
   `attente_saisie` (hors `confirm*`) ou `attente_verification_manuelle`.
-- **Invalidation globale** : quand une tâche observée passe à un statut final, `client.invalidateQueries()`.
+- **Invalidation** : quand une tâche observée passe à un statut final, `invalidateAfterTask(client, task)` (table
+  `INVALIDATE_BY_KIND` selon `task.kind`, `03` § 2.3 ; kind inconnu ⇒ tout le cache).
 - **`TaskDetail`** (`{ id: string }`) : badge, bouton « Annuler » (`POST /api/tasks/{id}/cancel`) tant que la tâche
   n'est pas finale, message de vérification manuelle, question (`needs_input`) avec boutons d'options **ou** champ
   libre + « Envoyer » (`remember: true`, suggestion en placeholder), erreur de tâche, `result` JSON, journal
   (`logs`, défilement automatique en bas, `font-mono`).
 
-Libellés de statut : affichés aujourd'hui par `status.replace(/_/g, " ")` (« attente saisie »). `[CIBLE]` table
-de libellés : `en_attente` « En attente », `en_cours` « En cours », `attente_saisie` « Réponse attendue »,
+Libellés de statut `[ACTUEL]` (vague 7, `TASK_STATUS_LABEL` de `TaskDrawer.tsx`) : `en_attente` « En attente », `en_cours` « En cours », `attente_saisie` « Réponse attendue »,
 `attente_verification_manuelle` « Vérification manuelle à faire », `terminée` « Terminée », `échec` « Échec »,
 `annulée` « Annulée ».
 
@@ -411,13 +413,14 @@ stateDiagram-v2
     annulee --> [*]
 ```
 
-`[CIBLE]` pour `attente_verification_manuelle`, le détail affiche : « {Source} demande une vérification.
-Termine-la toi-même dans la fenêtre du navigateur ouverte par l'outil : l'outil reprendra seul. Il ne remplit
-jamais un CAPTCHA à ta place. » — sans bouton « Continuer » (la reprise est détectée côté serveur).
+`[ACTUEL]` pour `attente_verification_manuelle`, le détail affiche : « {Source} demande une vérification : termine-la
+dans la fenêtre du navigateur ouverte par l'outil. » (« Le site » si la source n'est pas déterminée), sans bouton
+« Continuer » (la reprise est détectée côté serveur). `[CIBLE]` : ajouter « l'outil reprendra seul. Il ne remplit jamais
+un CAPTCHA à ta place. »
 
 ### 4.4 `RunModal` `[ACTUEL]`
 > Vague 2 : `max_items` borné selon la prudence choisie (15 / 30 / 60, message G-3), validation `runBodySchema`.
-> Vague 3 (UI `[ACTUEL]`, backend `[CIBLE]`) : `SourcePicker` (si `GET /api/sources` répond ; sinon le serveur prend
+> Vague 3 (UI et backend `[ACTUEL]`) : `SourcePicker` (si `GET /api/sources` répond ; sinon le serveur prend
 > `["linkedin"]`), popup de risques préventive pour la première source cochée qui l'exige, aucun lancement
 > automatique après acceptation ; `onAccepted({ switchedToPrudent })` aligne la prudence du formulaire. Reste
 > `[CIBLE]` : choix de l'interprète.
@@ -425,10 +428,11 @@ jamais un CAPTCHA à ta place. » — sans bouton « Continuer » (la reprise es
 Props `{ onClose: () => void }`. Lit `useSettings()` (rend `null` tant qu'ils ne sont pas chargés), état local
 `Partial<Settings> & { scrape: boolean }` superposé aux réglages, `POST /api/runs`
 `{ scrape, keyword, location, remote_only, caution }` puis `track(task)` et fermeture. Détails de validation :
-`05-forms-and-validation.md` § 3.3. `[CIBLE]` : `SourcePicker`, champ `max_items`, choix de l'interprète
-(`claude` / `local`), popup de risques, état de chargement visible.
+`05-forms-and-validation.md` § 3.3. `SourcePicker`, champ `max_items` (« Éléments par source ») et popup de risques sont
+`[ACTUEL]` ; le corps envoyé contient aussi `sources` et `max_items` (omis s'il est vide). `[CIBLE]` : choix de l'interprète
+(`claude` / `local`), état de chargement visible (le bouton affiche « … » pendant l'appel).
 
-### 4.5 `SourcePicker` `[ACTUEL]` côté UI, backend `[CIBLE]` (vague 3)
+### 4.5 `SourcePicker` `[ACTUEL]` (vague 3)
 > Props `{ sources; value: SourceCode[]; onChange; onReadRisks(source); error? }`. Sources de `GET /api/sources`
 > hors `import_manuel` (Indeed jamais proposée, R-6) ; `enabled = false` affichée « bientôt » et non cochable ;
 > France Travail non cochable si `configured = false` ; défaut `linkedin` ; bouton « Lire et accepter les risques »
@@ -449,7 +453,7 @@ anciens rapports) et en indice de la section « Analyse ». `SectionHeading.hint
 (et non plus seulement une chaîne) pour recevoir ce badge. Un rapport sans interprétation affiche toujours
 « Pas d'interprétation pour ce rapport. ».
 
-### 4.7 `OppositionDialog` `[ACTUEL]` côté UI, backend `[CIBLE]` (I-13, vague 4)
+### 4.7 `OppositionDialog` `[ACTUEL]` (I-13, vague 4)
 > Props `{ contact: Contact; applicationId: string; onClose }` ; `Modal` `dismissible = false`, focus initial sur le
 > motif, jamais présélectionné ; rien n'est envoyé avant « Enregistrer l'opposition ». Une requête
 > `POST /api/suppressions` par coordonnée renseignée (email puis profil), 201 idempotent ; le serveur bloque en plus

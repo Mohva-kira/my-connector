@@ -221,9 +221,9 @@ def run_analysis(
     ctx.check()
     prof = pipeline.build_profile(request, linkedin_text)
     ctx.log(f"Profil ({prof.origin}) : {len(prof.skills)} compétences.")
-    results, scored = pipeline.analyse(request, prof)
-    ctx.check()
     prefs = settings.load_settings()
+    results, scored = pipeline.analyse(request, prof, prefs["home_location"], prefs["timezone"])
+    ctx.check()
     text, used = interpreter.interpret(
         pipeline.summary_for_interpreter(results), interpreter_name, prefs["home_location"], prefs["timezone"]
     )
@@ -252,7 +252,8 @@ def rescore(ctx: TaskContext) -> dict:
     previous = require_results()
     request = SearchRequest(**previous["request"])
     prof = pipeline.build_profile(request)
-    results, scored = pipeline.analyse(request, prof)
+    prefs = settings.load_settings()
+    results, scored = pipeline.analyse(request, prof, prefs["home_location"], prefs["timezone"])
     for key in ("interpretation", "interpreter", "interpreter_model"):
         results[key] = previous.get(key, "")
     _, json_path = report.write(results)
@@ -264,7 +265,15 @@ def train_model(ctx: TaskContext) -> dict:
     previous = require_results()
     request = SearchRequest(**previous["request"])
     prof = pipeline.build_profile(request)
-    model = matching.train_from_labels(prof, request.keyword, storage.load_labels(), storage.load_labeled_items())
+    prefs = settings.load_settings()
+    model = matching.train_from_labels(
+        prof,
+        request.keyword,
+        storage.load_labels(),
+        storage.load_labeled_items(),
+        prefs["home_location"],
+        prefs["timezone"],
+    )
     if model is None:
         raise ValueError(f"Pas encore assez d'annotations (min. {matching.MIN_LABELS}, des deux types) pour entraîner.")
     ctx.log(

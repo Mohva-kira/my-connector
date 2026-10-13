@@ -51,7 +51,7 @@
 | Cookies LinkedIn | `platform_sessions.cookies_encrypted` = `Fernet(LM_SECRET_KEY).encrypt(json(cookies))`, `expires_at = last_login_at + 72 h` ; la réutilisation ne prolonge pas la session ; ligne supprimée à l'expiration (vague 1 ; l'ancien `session.json` est importé chiffré s'il a moins de 72 h) | inchangé | versionnés, journalisés, renvoyés par l'API |
 | `SMTP_USER` / `SMTP_PASSWORD` | `.env` | inchangé | journalisés (seul `smtp_configured` est exposé) |
 | `ANTHROPIC_API_KEY` | `.env`, lu par le SDK `anthropic` | inchangé | envoyés ailleurs qu'à `api.anthropic.com` |
-| `FRANCE_TRAVAIL_CLIENT_ID` / `_SECRET` | — | `.env` ; jeton d'accès en **mémoire** seulement (jamais en base) | journalisés |
+| `FRANCE_TRAVAIL_CLIENT_ID` / `_SECRET` | `.env` (vague 5) ; jeton d'accès en **mémoire** seulement (jamais en base), renouvelé avant expiration | inchangé | journalisés |
 | `LM_SECRET_KEY` | `.env` ; si absente au premier lancement, `Fernet.generate_key()` est ajoutée à `.env` (droits `0600`) avec un message invitant à la sauvegarder (`db/crypto.py`, refusé sous pytest) | inchangé | dans la base ou les sauvegardes `pg_dump` |
 | `LM_DATABASE_URL` / `LM_DB_PASSWORD` | `.env` racine (`LM_DB_PASSWORD` lu par `compose.yaml`) ; mot de passe masqué dans le message « Base PostgreSQL injoignable » (`db/bootstrap.py`) | inchangé | journalisés (masquer le mot de passe dans tout message d'erreur de connexion) |
 | Jeton local | mémoire du processus (`app.state.token`) | inchangé | écrit sur disque (sauf choix explicite `LINKEDIN_UI_TOKEN`) |
@@ -73,7 +73,7 @@ connexion LinkedIn). Cookies expirés (> 72 h) : ligne supprimée à la lecture 
 ### 2.2 Matrice des garde-fous par action (les vraies « permissions »)
 
 Toutes les routes exigent Host local + jeton (sauf `/api/health`, sans jeton). Colonnes : **Id.** = identifiants
-LinkedIn présents ; **Cons.** = consentement aux risques de la source `[CIBLE]` ; **Bloc.** = aucun blocage depuis
+LinkedIn présents ; **Cons.** = consentement aux risques de la source `[ACTUEL]` (vague 3) ; **Bloc.** = aucun blocage depuis
 6 h ; **Plaf.** = plafond quotidien ; **Unic.** = pas de tâche identique active ; **Conf.** = confirmation explicite.
 
 | Action | Route | Id. | Cons. | Bloc. | Plaf. | Unic. | Conf. | Code si refus |
@@ -90,11 +90,11 @@ LinkedIn présents ; **Cons.** = consentement aux risques de la source `[CIBLE]`
 | Ajouter une compétence sur LinkedIn | effet de `POST /api/profile/skills` | ✓ | ✓ | ✓ | | ✓ | | `linkedin_sync.status` |
 | Postuler (Easy Apply) | `POST /api/applications/{id}/apply` | ✓ | ✓ | ✓ | `apply_daily_max` | ✓ | `confirm_submit` | 409 / 428 / 429 |
 | Chercher les recruteurs | `POST …/contacts/lookup` | ✓ | ✓ | ✓ | | ✓ | | 409 / 428 |
-| Email de prospection | `POST …/messages` `channel=email` | | | | `message_daily_max` | ✓ | `confirm: true` + opposition `[CIBLE]` | 409 / 422 / 429 / 503 |
-| Message LinkedIn | `POST …/messages` `channel=linkedin` | ✓ | ✓ | ✓ | `message_daily_max` | ✓ | `confirm: true` + opposition `[CIBLE]` | 409 / 422 / 428 / 429 |
+| Email de prospection | `POST …/messages` `channel=email` | | | | `message_daily_max` | ✓ | `confirm: true` + opposition `[ACTUEL]` (vague 4) | 409 / 422 / 429 / 503 |
+| Message LinkedIn | `POST …/messages` `channel=linkedin` | ✓ | ✓ | ✓ | `message_daily_max` | ✓ | `confirm: true` + opposition `[ACTUEL]` (vague 4) | 409 / 422 / 428 / 429 |
 | Email de test | `POST /api/smtp/test` | | | | | | destinataire = soi | 422 / 502 / 503 |
-| Accepter / révoquer des risques `[CIBLE]` | `POST`/`DELETE /api/sources/{code}/consent` | | | | | | case cochée (UI) + `accepted: true` | 409 / 422 |
-| Enregistrer une opposition `[CIBLE]` | `POST /api/suppressions` | | | | | | | 422 |
+| Accepter / révoquer des risques `[ACTUEL]` | `POST`/`DELETE /api/sources/{code}/consent` | | | | | | case cochée (UI) + `accepted: true` | 409 / 422 |
+| Enregistrer une opposition `[ACTUEL]` | `POST /api/suppressions` | | | | | | | 422 |
 
 ## 3. Rate Limiting & Protection Anti-Abus
 
@@ -115,7 +115,7 @@ Aucune limitation de débit HTTP : le seul client est l'interface locale de l'ut
 | API France Travail `[ACTUEL]` | ≤ 10 appels/s documentés par l'éditeur ; le client se limite à 2 appels/s et respecte `Retry-After` | — | `05` § 2.5 |
 
 Message 429 actuel : `Plafond quotidien atteint (<limite> <candidatures|messages> par jour) : réessaie demain ou
-relève-le dans les paramètres.` `[CIBLE]` ajouter `Retry-After` (secondes jusqu'à minuit local).
+relève-le dans les paramètres.` `[ACTUEL]` (vague 2, G-2) : en-tête `Retry-After` (secondes jusqu'à minuit local).
 
 Relever un plafond reste possible dans les réglages (0–200) : c'est un choix conscient de l'utilisateur, affiché
 avec l'avertissement R-1 / R-4. Les volumes de prudence, eux, ne sont **pas** configurables au-delà de `agressif`

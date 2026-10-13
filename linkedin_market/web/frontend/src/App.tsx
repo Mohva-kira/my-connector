@@ -296,7 +296,7 @@ export default function App() {
           </div>
         )}
         {tokenExpired && (
-          <div className="mb-4" role="alert">
+          <div className="mb-4">
             <Notice tone="danger">
               Le jeton local a changé : recharge la page.{" "}
               <button type="button" className="font-medium underline" onClick={() => window.location.reload()}>Recharger</button>
@@ -309,7 +309,7 @@ export default function App() {
             <Route path="/offres" element={<Jobs />} />
             <Route path="/candidatures" element={<Applications />} />
             <Route path="/candidatures/:jobId" element={<Applications />} />
-            <Route path="/marche" element={<Suspense fallback={<div role="status" aria-label="Chargement du marché" className="h-40 animate-pulse rounded-xl bg-bg-secondary" />}><Market /></Suspense>} />
+            <Route path="/marche" element={<Suspense fallback={<div role="status" className="h-40 animate-pulse rounded-xl bg-bg-secondary"><span className="sr-only">Chargement du marché…</span></div>}><Market /></Suspense>} />
             <Route path="/competences" element={<Skills />} />
             <Route path="/parametres" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />

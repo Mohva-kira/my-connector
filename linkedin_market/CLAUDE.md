@@ -20,7 +20,7 @@ Chemins relatifs à `linkedin_market/docs/context/`. Le lot 1 (`schemas-architec
 | :--- | :--- |
 | Toute tâche | `schemas-architecture/00-domain-architecture-context.md` (glossaire, invariants, risques) |
 | Architecture, nouveau module, dépendance | `schemas-architecture/01-system-overview.md` → `02-data-flow-and-events.md` → `04-infrastructure-and-deployment.md` |
-| Backend (routeur, service, tâche) | `backend/00-backend-business-context.md` → `01-api-contracts.md` → `02-business-logic-services.md` (§ 4 : écarts `E-n` ; seul **E-21** reste ouvert au 2026-10-13) → `05-queues-and-integrations.md` |
+| Backend (routeur, service, tâche) | `backend/00-backend-business-context.md` → `01-api-contracts.md` → `02-business-logic-services.md` (§ 4 : écarts `E-n` ; aucun ouvert au 2026-10-13) → `05-queues-and-integrations.md` |
 | Sécurité, jeton, plafonds, secrets | `backend/04-auth-and-permissions.md` |
 | Données, PostgreSQL, migrations, rétention | `schemas-architecture/03-database-erd.md` → `backend/03-database-and-migrations.md` |
 | Frontend | `frontend/00-frontend-business-context.md` → `01-ui-design-system.md` → `02-components-catalog.md` → `03-state-and-data-fetching.md` → `04-routing-and-pages.md` → `05-forms-and-validation.md` |
@@ -41,6 +41,7 @@ python3.14 -m venv .venv                                   # Windows : .venv\Scr
 
 # CLI
 .venv/bin/python -m linkedin_market -k "Data Engineer" --caution prudent
+.venv/bin/python -m linkedin_market -k "Data Engineer" --sources linkedin,france_travail   # défaut : linkedin
 .venv/bin/python -m linkedin_market -k "Data Engineer" --no-scrape --interpreter local   # sans navigateur
 
 # Interface web
@@ -57,7 +58,7 @@ npx tsc --noEmit       # contrôle de types seul
 docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
 # LM_DATABASE_URL (et non DATABASE_URL, déjà lu par email_analyzer dans le même .env)
 
-# Tests (hors ligne, ~2 min, 425 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
+# Tests (hors ligne, ~2 min, 465 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
 # sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré). Depuis la
 # vague 2, conftest retire du processus LINKEDIN_*/SMTP_*/ANTHROPIC_API_KEY (identifiants réels du .env racine) :
 # aucune tâche lancée par un test ne peut se connecter à un vrai service.
@@ -68,7 +69,8 @@ LM_TEST_DATABASE_URL=postgresql+psycopg://<user>:<mdp>@127.0.0.1:<port>/linkedin
 
 # Lint Python : config linkedin_market/ruff.toml (py314, 120 colonnes, règles E F W I UP B),
 # outils dans linkedin_market/requirements-dev.txt (hors image Docker d'email_analyzer).
-# Dette existante au 2026-10-08 : 224 avertissements, 40 fichiers non formatés : ne corrige que ce que tu touches.
+# Dette soldée (2026-10-13) : `ruff check` et `ruff format --check` passent à 0 sur tout `linkedin_market` ; tout
+# avertissement nouveau bloque. Exceptions `# noqa` existantes : voir « Exceptions ruff » plus bas.
 .venv/bin/ruff check linkedin_market
 .venv/bin/ruff format --check linkedin_market
 # Lint front (dans linkedin_market/web/frontend) : ESLint 9 en configuration plate (eslint.config.js).
@@ -123,7 +125,7 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
   cookies valables 72 h.
 - **I-16** Source en mode `navigateur` (LinkedIn, Malt, WTTJ) utilisable seulement après acceptation de la version
   courante du texte de risques dans la **popup de risques** (HTTP 428 sinon) `[ACTUEL]` depuis la vague 3 (`consent.py`, revérifié au début de la tâche ; repos de 6 h par
-  source). Le CLI avec collecte refuse de démarrer sans ce consentement et renvoie vers Paramètres → Sources et consentements (décidé le 2026-10-09).
+  source). Le CLI avec collecte (`--sources`, défaut `linkedin`) refuse de démarrer sans ce consentement et renvoie vers Paramètres → Sources et consentements (décidé le 2026-10-09) : tout refus avant collecte (consentement, repos de 6 h, source inconnue, Indeed, identifiants France Travail absents) = code de sortie 1 ; un blocage pendant la collecte = rapport partiel et code 0 (`backend/01` § 5.8.1).
 
 ### Points en arbitrage
 Aucun au 2026-10-13 (E-4, désinscription, E-6 tranchés et livrés). Désinscription : réponse « STOP » + en-tête
@@ -179,6 +181,12 @@ touche un invariant ou un risque se soumet à l'utilisateur avant le code.
   du processus de test (`tests/conftest.py`, `_REAL_SECRETS`) : un test qui en a besoin pose une valeur factice
   avec `monkeypatch.setenv`.
 - Lancer la suite complète avant de conclure ; `npx tsc --noEmit` (ou `npm run build`) après toute modification du front.
+- **Exceptions ruff** (`# noqa`, relevées le 2026-10-13, chacune justifiée sur la ligne ; n'en ajoute pas sans raison) :
+  `E501` sur 11 blocs de texte embarqué qu'on ne coupe pas (scripts JavaScript : `apply_bot.py` ×3,
+  `profile_sync.py` ×1, `scraper.py` ×1, `contacts.py` ×2, `outreach.py` ×2 ; gabarit HTML de `report.py` ; liste de
+  mots de `nlp.py`) ; `BLE001` sur les `except Exception` volontaires (`retention.py`, `__main__.py`, `settings.py`,
+  `nlp.py`, `web/tasks.py` ×3, `tests/browser_fixtures.py`) ; `B018` (`web/routers/items.py`, lecture de `parts.port`
+  pour lever `ValueError`) ; `F401` / `F811` dans les tests qui réimportent des fixtures pytest.
 
 ## Marqueurs `[ACTUEL]` / `[CIBLE]`
 `[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (CI/CD, `ConfirmDialog`…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie

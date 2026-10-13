@@ -5,7 +5,8 @@
 > (`docs/context/schemas-architecture/00` à `04`) — glossaire, invariants **I-01…I-16**, risques **R-1…R-8**.
 >
 > **Marqueurs** : `[ACTUEL]` = vérifié dans le code de `web/frontend/src` ; `[CIBLE]` = décidé, pas encore
-> implémenté (popup de risques, sources France Travail / Malt / WTTJ / Indeed, opposition, gestion fine des erreurs).
+> implémenté (au 2026-10-13 : bandeau 403, lien « Régler les plafonds », message 500 générique ; popup de risques, sources
+> France Travail / Malt / WTTJ / Indeed et opposition sont `[ACTUEL]`).
 >
 > **Langue** : toute l'interface est en **français** (`<html lang="fr">`, libellés, messages d'erreur) et tutoie
 > l'utilisateur (« Lance une première analyse », « Vérifie ton compte ») `[ACTUEL]`. Ce ton est conservé.
@@ -43,13 +44,13 @@ dans `index.html` (`<meta name="lm-token">`) et que `api.ts` renvoie dans l'en-t
 
 - **Persona secondaire (indirect) — le recruteur / l'entreprise** : n'utilise pas l'interface, mais reçoit les
   messages. Ses droits imposent des contraintes visibles dans l'UI : origine de l'adresse, mention de
-  désinscription, respect de l'opposition (I-12, I-13, R-4) `[CIBLE]`.
+  désinscription, respect de l'opposition (I-12, I-13, R-4) `[ACTUEL]` (vague 4).
 
 ## 2. Parcours Clés & Actions Utilisateur
 
 Les noms d'actions reprennent la matrice du lot 1 (`00-domain-architecture-context.md` § 3).
 
-### Parcours 0 : Accepter les risques d'une source navigateur (`AccepterRisquesSource`) `[CIBLE]`
+### Parcours 0 : Accepter les risques d'une source navigateur (`AccepterRisquesSource`) `[ACTUEL]` (vague 3)
 - **Déclencheur** : première action qui utilise une source en mode `navigateur` (`linkedin`, `malt`, `wttj`) —
   « Lancer » une analyse avec collecte, « Lancer la candidature », « Chercher les recruteurs », message LinkedIn,
   « Importer depuis LinkedIn », ajout d'une compétence synchronisée ; ou réponse **HTTP 428** de l'API ; ou
@@ -72,8 +73,8 @@ Les noms d'actions reprennent la matrice du lot 1 (`00-domain-architecture-conte
      prudence, « Full remote uniquement » `[ACTUEL]` ;
   2. case « Collecter de nouvelles données sur LinkedIn » cochée par défaut ; décochée = réanalyse de l'historique
      sans navigateur (`scrape: false`) `[ACTUEL]` ;
-  3. `[CIBLE]` choix des **sources** (LinkedIn / Malt / WTTJ en `navigateur`, France Travail en `api_officielle`)
-     avec l'état du consentement de chacune ; popup de risques si nécessaire (Parcours 0) ;
+  3. `[ACTUEL]` choix des **sources** (`SourcePicker` : LinkedIn / Malt / WTTJ en `navigateur`, France Travail en
+     `api_officielle`) avec l'état du consentement de chacune ; popup de risques si nécessaire (Parcours 0) ;
   4. « Lancer » → `POST /api/runs` → **202** + tâche → le **tiroir des tâches** s'ouvre sur cette tâche `[ACTUEL]`.
 - **Feedback** : bouton « Lancer » désactivé si le mot-clé est vide, libellé remplacé par « … » pendant l'appel ;
   avertissement CGU visible quand la collecte est cochée `[ACTUEL]` ; suivi des statuts de tâche (polling 1,5 s)
@@ -121,10 +122,10 @@ Les noms d'actions reprennent la matrice du lot 1 (`00-domain-architecture-conte
      chargé depuis `GET /api/applications/{id}/message-draft` `[ACTUEL]` ;
   3. « Relire avant l'envoi » → **écran de relecture** (canal, destinataire, objet, pièce jointe, message) →
      « Confirmer l'envoi » → `POST …/messages` avec `confirm: true` `[ACTUEL]` ;
-  4. `[CIBLE]` l'écran de relecture affiche aussi l'**origine de l'adresse**, la **mention de désinscription**
+  4. `[ACTUEL]` (vague 4) l'écran de relecture affiche aussi l'**origine de l'adresse**, la **mention de désinscription**
      imposée (non supprimable), exige la case « J'ai relu ce message et je confirme l'envoi », et **bloque** l'envoi
      vers une adresse présente dans la liste d'opposition (I-12, I-13) ;
-  5. `[CIBLE]` « Ce contact refuse d'être recontacté » enregistre une **opposition** définitive.
+  5. `[ACTUEL]` (vague 4) « Ce contact refuse d'être recontacté » enregistre une **opposition** définitive.
 - **Feedback** : compteur de caractères, avertissement au-delà de 300 caractères en LinkedIn (note de connexion
   tronquée), bandeau « Plafond quotidien de messages atteint (x / y) », bandeau SMTP non configuré `[ACTUEL]`.
 
@@ -134,7 +135,7 @@ Les noms d'actions reprennent la matrice du lot 1 (`00-domain-architecture-conte
 - **Feedback** : le bandeau disparaît après rafraîchissement de `["status"]` `[ACTUEL]`. L'UI ne propose **aucun**
   moyen de contourner la vérification (I-06, R-1).
 
-### Parcours 7 : Importer une offre Indeed à la main `[CIBLE]`
+### Parcours 7 : Importer une offre Indeed à la main `[ACTUEL]` (vague 5)
 - **Déclencheur** : bouton « Importer une offre » de la page **Offres**.
 - **Étapes** : formulaire URL de l'offre + texte collé (+ titre, entreprise, localisation facultatifs) → création
   d'un élément `source_code = indeed`, mode `import_manuel` (R-6) → l'offre apparaît après « Recalculer les scores ».
@@ -147,24 +148,25 @@ Les noms d'actions reprennent la matrice du lot 1 (`00-domain-architecture-conte
   - `[ACTUEL]` pas de système de *toast* : les succès s'affichent par un `Notice` vert contextuel
     (« Paramètres enregistrés. », « Envoyé à {adresse}. », « Ajoutée à ton profil : … ») ou par le passage de la
     tâche au statut `terminée` dans le tiroir (badge vert, `result` JSON affiché).
-  - `[ACTUEL]` à la fin d'une tâche, `TaskProvider` invalide **toutes** les requêtes : listes, profil, monitoring
-    et rapports se rafraîchissent sans rechargement.
+  - `[ACTUEL]` à la fin d'une tâche, `TaskProvider` invalide les requêtes selon son type (`INVALIDATE_BY_KIND`,
+    `03` § 2.3) : listes, profil, monitoring et rapports concernés se rafraîchissent sans rechargement.
   - `[ACTUEL]` navigation après action : « Voir la candidature » mène à `/candidatures/{jobId}` ; l'ouverture de
     `/candidatures` sélectionne automatiquement la première candidature.
-  - `[CIBLE]` le rapport affiché indique toujours **quel interprète** a produit l'interprétation (« Lecture rédigée
+  - `[ACTUEL]` (vague 6, `InterpreterBadge`) le rapport affiché indique toujours **quel interprète** a produit l'interprétation (« Lecture rédigée
     par Claude » / « Lecture rédigée par l'interprète local ») — l'interprétation n'est jamais vide (I-11).
 - **Résilience & gestion des échecs** :
   - `[ACTUEL]` les erreurs API sont affichées via `ErrorBox` (`role="alert"`) avec le `detail` français renvoyé
     par FastAPI ; les erreurs de validation Pydantic (tableau) sont concaténées par « · ».
   - `[ACTUEL]` la saisie est préservée en cas d'erreur : formulaires en état local, non réinitialisés sur échec
     (`RunModal`, `ComposeModal`, Paramètres, Contacts).
-  - `[CIBLE]` traitement par code (401 jeton périmé après redémarrage → « Recharge la page » ; 409 ; 422 ; 428 →
-    popup de risques ; 429 → plafond) et message en cas d'API injoignable — cf. `03-state-and-data-fetching.md` § 3.
-  - `[CIBLE]` aucun texte technique brut : les messages `422` de `settings.py` (« apply_daily_max doit être compris
+  - `[ACTUEL]` partiel : 401 (jeton périmé → « Recharge la page », polling suspendu), 428 (popup de risques), 429
+    (`detail` + « Réessaie dans X h ») et API injoignable (`ApiError` de statut 0) sont traités ; 403, lien « Régler les
+    plafonds » et message 500 générique restent `[CIBLE]` — cf. `03-state-and-data-fetching.md` § 3.
+  - `[ACTUEL]` (vague 2, `src/schemas.ts`) aucun texte technique brut : les messages `422` de `settings.py` (« apply_daily_max doit être compris
     entre 0 et 200. ») sont précédés d'une validation client qui affiche le libellé du champ.
 - **Accessibilité & conformité** :
   - navigation complète au clavier sur les parcours critiques (popup de risques, relecture, réponse à une tâche) ;
-    `[CIBLE]` piège de focus et restitution du focus dans toutes les modales ;
+    piège de focus et restitution du focus dans toutes les modales `[ACTUEL]` (`Modal` sur `<dialog>` + `showModal()`) ;
   - aucune action irréversible sans relecture (I-04) ; aucun envoi vers une adresse opposée (I-13) ;
   - aucune fonctionnalité d'UX ne propose de contourner une protection de plateforme (CAPTCHA, empreinte, proxy,
     comptes multiples — I-06, I-08, R-7).

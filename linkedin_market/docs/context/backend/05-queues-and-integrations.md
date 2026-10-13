@@ -76,7 +76,7 @@ Règles d'implémentation (`TaskManager._run`) :
 
 | `kind` | `browser` | `meta.key` (unicité) | Fonction (`web/services.py`) | Titre | `result` en `terminée` |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `run` | `= scrape` | — (une seule) | `run_analysis` | `Collecte et analyse — <mot-clé>` / `Analyse de l'historique — <mot-clé>` | `{"report", "jobs", "counts", "blocked", "blocked_where"?}` (G-10, E-4 ; `blocked_where` absent si `blocked = false`) |
+| `run` | `= scrape` | — (une seule) | `run_analysis` | `Collecte et analyse — <mot-clé>` / `Analyse de l'historique — <mot-clé>` | `{"report", "jobs", "counts", "blocked", "blocked_sources", "sources", "blocked_where"?}` (G-10, E-4, vague 5 : `sources` = `[{"code", "items", "status", "detail"}]`, `blocked_sources` = codes bloqués ; `blocked_where = "collecte"` absent si `blocked = false`) |
 | `rescore` | non | — | `rescore` | `Recalcul des scores` | `{"report", "jobs"}` |
 | `train` | non | — | `train_model` | `Entraînement du modèle de matching` | `{"report", "jobs", "n_labels", "accuracy"}` |
 | `prepare` | non | `job_id` | `prepare_application` | `Préparer : <titre>` | `{"job_id", "folder", "generator"}` |
@@ -86,6 +86,11 @@ Règles d'implémentation (`TaskManager._run`) :
 | `import_profile` | oui | — | `import_linkedin_profile` | `Importer le profil LinkedIn` | `{"skills"}` |
 | `profile_skill` | oui | compétence normalisée | `sync_skill_to_linkedin` | `Ajouter « <compétence> » au profil LinkedIn` | `{"skill", "linkedin_name", "state"}` |
 | `purge` `[ACTUEL]` (vague 6) | non | — | `retention.purge_current_user` (`RetentionService.purge`) | `Purge de rétention` | `{"deleted": {"collected_items": 12, …}}` |
+
+`purge` est un `kind` **interne** : aucun routeur ne le soumet (pas de route `POST`). Il est soumis uniquement par
+`retention.submit_purge()` (appelée par `PurgeScheduler` au démarrage de `python -m linkedin_market.web`, puis toutes les 24 h) ;
+le CLI appelle `retention.purge_current_user()` directement, sans tâche. `submit_purge` ne crée pas de seconde tâche si une purge est active.
+Il figure dans `ck_tasks_kind` (migration `0004`) et dans `INVALIDATE_BY_KIND` du frontend (`frontend/03` § 2.3), mais l'interface n'en déclenche jamais.
 
 ### 1.4 Saisie utilisateur et vérification manuelle
 
@@ -176,7 +181,7 @@ supprimé et connexion par identifiants (`/login`, attente du champ email 30 s, 
 
 | Module | Détection | Effet `[ACTUEL]` | Cible |
 | :--- | :--- | :--- | :--- |
-| `session.login` | URL ≠ `/feed` après `FEED_TIMEOUT` = 20 s, puis vérification manuelle (`MANUAL_CHECK_TIMEOUT` = 180 s) ; reprise par cookies (`_restore`) : `/checkpoint` après la pause de restauration (`RESTORE_PAUSE` = 4 s) | `[ACTUEL]` (vague 2, G-7/E-5) `attente_verification_manuelle` puis, si les 180 s sont dépassées (ou checkpoint après restauration par cookies), événement `blocked(where="connexion")` **puis** `VerificationNotDoneError` (`session._blocked_at_login()`) ⇒ tâche `échec` avec le message de G-7 (`01` § 1.2) | livré |
+| `session.login` | URL ≠ `/feed` après `FEED_TIMEOUT` = 20 s, puis vérification manuelle (`MANUAL_CHECK_TIMEOUT` = 180 s) ; reprise par cookies (`_restore`) : `/checkpoint` après la pause de restauration (`RESTORE_PAUSE` = 4 s) | `[ACTUEL]` (vague 2, G-7/E-5) `attente_verification_manuelle` puis, si les 180 s sont dépassées (ou checkpoint après restauration par cookies), événement `blocked(where="connexion")` **puis** `VerificationNotDoneError` (`session._blocked_at_login()`) ⇒ tâche `échec` avec le message de G-7 (`01` § 1.2) ; au CLI : refus avant collecte, `sys.exit(message)`, code 1, aucun rapport (`01` § 5.8.1) | livré |
 | `scraper` (collecte) | `_blocked()` **avant chaque page** (`LinkedInScraper._get`, § 1.5) | `[ACTUEL]` (vague 2, G-10/E-4, option A) arrêt immédiat de la navigation, `blocked(where="collecte")`, **analyse poursuivie** sur les données déjà obtenues, `result.blocked = true` (`01` § 1.2 G-10) | livré |
 | `apply_bot` | avant d'ouvrir l'offre et à chaque étape | `BlockedError` ⇒ `blocked(where="candidature", job)`, `apply_state="échec"`, tâche `échec`, fenêtre de candidature fermée sans envoi | inchangé |
 | `contacts` | après chaque page | `PermissionError` ⇒ `blocked(where="recherche de contacts")` ⇒ tâche `échec` | `BlockedError` unique |
@@ -302,7 +307,7 @@ Module `linkedin_market/sources/france_travail.py` (client `httpx` synchrone, ap
 | Étape Easy Apply / confirmation d'envoi | 10 s / 20 s | l'étape est repassée tant que les erreurs affichées changent (12 étapes max) | `ApplyError` / état `incertaine` |
 | Message LinkedIn (éléments attendus) | 12 s | 0 | `OutreachError`, ou `UncertainDelivery` après le clic « Envoyer » (§ 2.4) |
 | SMTP | 25 s | 0 | `OutreachError` ⇒ `échec` |
-| Claude | défaut SDK (`timeout=120` s `[CIBLE]`) | 2 (SDK) | interprète / rédacteur local |
+| Claude | `timeout=120` s `[ACTUEL]` (`interpreter.CLAUDE_TIMEOUT_SECONDS`) | 2 (SDK) | interprète / rédacteur local |
 | France Travail (jeton, recherche) `[ACTUEL]` | 10 s | 3 essais, attentes 1 s puis 2 s, `Retry-After` | source ignorée pour cette analyse |
 | Blocage navigateur | — | **jamais** | repos de 6 h, levée manuelle |
 

@@ -42,9 +42,12 @@ def from_file(path: Path) -> Profile:
         skills = [nlp.normalize(s) for s in data.get("skills", [])]
         text = f"{data.get('title', '')}\n{' '.join(data.get('skills', []))}\n{text}"
         return Profile(
-            text=text, origin=str(path), title=data.get("title", ""),
+            text=text,
+            origin=str(path),
+            title=data.get("title", ""),
             skills=sorted(set(skills) | set(nlp.extract_skills(text))),
-            years_experience=data.get("years_experience"), seniority=data.get("seniority", ""),
+            years_experience=data.get("years_experience"),
+            seniority=data.get("seniority", ""),
         )
     text = _read_pdf(path) if path.suffix.lower() == ".pdf" else path.read_text(encoding="utf-8")
     return Profile(text=text, origin=str(path))
@@ -56,12 +59,14 @@ def from_text(text: str, origin: str) -> Profile:
 
 def finalize(profile: Profile, request: SearchRequest, use_overrides: bool = True) -> Profile:
     """Complète le profil par extraction et par les réponses de la saisie."""
-    first_line = next((l.strip() for l in profile.text.splitlines() if l.strip()), "")
+    first_line = next((line.strip() for line in profile.text.splitlines() if line.strip()), "")
     profile.title = profile.title or first_line[:120]
     extracted = nlp.extract_skills(profile.text)
     extra = [nlp.normalize(s) for s in request.extra_skills]
     # Une compétence saisie qui correspond à une compétence connue prend son nom canonique.
-    extra_canonical = {s for e in extra for s in nlp.extract_skills(e)} | {e for e in extra if not nlp.extract_skills(e)}
+    extra_canonical = {s for e in extra for s in nlp.extract_skills(e)} | {
+        e for e in extra if not nlp.extract_skills(e)
+    }
     profile.skills = sorted(set(profile.skills) | set(extracted) | extra_canonical)
     if request.years_experience is not None:
         profile.years_experience = request.years_experience

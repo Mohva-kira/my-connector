@@ -104,18 +104,23 @@ export const useTask = (id?: string) =>
     refetchInterval: (query) => (query.state.data && isFinal(query.state.data) ? false : 1500),
   });
 
-/** Clés périmées à la fin d'une tâche, selon son type (frontend/03 § 2.3). */
+/**
+ * Clés périmées à la fin d'une tâche, selon son type (frontend/03 § 2.3). `sources` : une tâche pilotant un navigateur
+ * peut avoir posé un repos de 6 h (I-06) que le bandeau de blocage lit dans `GET /api/sources`. `reports` / `report` :
+ * `run`, `rescore` et `train` écrivent un nouveau rapport (le précédent perd son statut de dernier rapport).
+ */
 const INVALIDATE_BY_KIND: Record<string, string[][]> = {
-  run: [["reports"], ["jobs"], ["monitor"], ["profile"], ["status"]],
-  rescore: [["jobs"], ["report"], ["monitor"]],
-  train: [["jobs"], ["report"], ["monitor"]],
-  prepare: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"]],
-  apply: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"]],
-  contacts: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"]],
-  message: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"]],
-  import_profile: [["profile"]],
-  profile_skill: [["profile"]],
-  purge: [["jobs"]],
+  run: [["reports"], ["report"], ["jobs"], ["monitor"], ["profile"], ["status"], ["sources"]],
+  rescore: [["reports"], ["report"], ["jobs"], ["monitor"], ["profile"]],
+  train: [["reports"], ["report"], ["jobs"], ["monitor"], ["profile"]],
+  prepare: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"], ["sources"]],
+  apply: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"], ["sources"]],
+  contacts: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"], ["sources"]],
+  message: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"], ["sources"]],
+  import_profile: [["profile"], ["status"], ["sources"]],
+  profile_skill: [["profile"], ["status"], ["sources"]],
+  // Purge de rétention (I-10) : offres supprimées (liste, détail) et compteurs du tableau de bord.
+  purge: [["jobs"], ["job"], ["monitor"]],
 };
 
 /** Invalide le cache après la fin d'une tâche ; type inconnu ⇒ tout le cache (sûr par défaut). */

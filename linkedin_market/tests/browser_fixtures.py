@@ -52,7 +52,9 @@ class FakeHooks:
         pass
 
     def ask(self, question, field_id="", options=None, *, suggestion="", review=""):
-        self.asked.append({"question": question, "field": field_id, "options": options, "suggestion": suggestion, "review": review})
+        self.asked.append(
+            {"question": question, "field": field_id, "options": options, "suggestion": suggestion, "review": review}
+        )
         if field_id == "confirm_submit":
             return self.confirm
         for needle, reply in self.replies.items():

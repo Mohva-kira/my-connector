@@ -56,8 +56,8 @@ flowchart LR
     settings -.->|"UI vague 3"| sources["Carte Sources et consentements"]
 ```
 
-### 1.3 Évolutions `[CIBLE]`
-> **`[ACTUEL]` côté UI (revue du 2026-10-09 ; backend des vagues 3-4 encore `[CIBLE]`)** :
+### 1.3 Évolutions des vagues 3 à 6 `[ACTUEL]`
+> **`[ACTUEL]` (UI et backend, vagues 3-4, revue du 2026-10-09)** :
 > - Paramètres : carte « Sources et consentements » (`#sources`, défilement vers l'ancre une fois les sources
 >   chargées) : mode d'accès, « bientôt » si `enabled = false`, identifiants France Travail, version et date du
 >   consentement, « nouvelle version à relire », « Lire les risques », « Révoquer » (modale de confirmation) ;
@@ -65,7 +65,7 @@ flowchart LR
 > - Candidatures › Contacts : badge « Opposé », bouton « Ce contact refuse d'être recontacté » (`OppositionDialog`),
 >   champs Email / Profil d'un contact opposé désactivés, « Écrire » désactivé ; origine de l'adresse affichée à la
 >   relecture du message.
-> - Filtres dans l'URL : `/offres?q=&min_score=&label=&status=`, `/marche?rapport={name}`.
+> - Filtres dans l'URL : `/offres?q=&min_score=&label=&status=&source=`, `/marche?rapport={name}`, `/candidatures/{id}?statut={statut}` (filtre de la liste des candidatures, conservé en changeant de dossier ; paramètre `statut` en français, distinct du paramètre API `status` d'Offres).
 > - Bandeaux de blocage par source (`BlockBanners`, d'après `GET /api/sources`, repli sur `/api/status.blocked` si
 >   `/sources` échoue : V4-5) ; bouton « Lever le blocage » par source.
 > - Bandeau « Relancer : {action} » après acceptation des risques sur un 428 (`ConsentGate`).
@@ -85,8 +85,9 @@ Aucune nouvelle route n'est nécessaire ; les nouveautés s'intègrent aux pages
   (`source_code`) ; le lien « Ouvrir sur LinkedIn » devient « Ouvrir l'offre » (libellé selon la source).
 - **Marché** : `InterpreterBadge` dans l'en-tête ; filtre par source si plusieurs sources dans le rapport.
 - **Candidatures › Contacts** : origine de l'adresse, badge « Opposé », `OppositionDialog`.
-- **Filtres dans l'URL** : `/offres?q=&min_score=&label=&status=`, `/marche?rapport={name}` (lien direct vers un
-  rapport, bouton Retour du navigateur cohérent).
+- **Filtres dans l'URL** : `/offres?q=&min_score=&label=&status=&source=`, `/marche?rapport={name}` (lien direct vers un
+  rapport, bouton Retour du navigateur cohérent), `/candidatures/{id}?statut={statut}` (valeur sans candidature correspondante
+  conservée dans le sélecteur ; la première candidature du filtre est sélectionnée automatiquement).
 - **Bandeau de blocage** générique par source (« {Source} a interrompu la navigation… ») au lieu du texte figé
   « LinkedIn ».
 
@@ -110,7 +111,7 @@ dans Paramètres.
   - `smtp_configured = false` → canal Email bloqué dans `ComposeModal`, bouton d'email de test masqué.
   `RunModal` n'applique aucune de ces gardes : identifiants absents ou blocage actif ⇒ 409 affiché après clic.
   `[CIBLE]` même garde préventive dans `RunModal` (case « Collecter » désactivée avec explication).
-- **Garde de consentement** `[ACTUEL]` côté UI (backend `[CIBLE]`, vague 3) : pas de route ; popup de risques
+- **Garde de consentement** `[ACTUEL]` (UI et backend, vague 3) : pas de route ; popup de risques
   **préventive** (`RunModal` pour les sources cochées, `useConsentGuard()` pour « Lancer la candidature »,
   « Chercher les recruteurs », « Importer depuis LinkedIn », ajout de compétence si `linkedin_skill_sync`, relecture
   et envoi d'un message LinkedIn) et, sur réponse 428, popup globale `ConsentGate` sans rejeu (cf. `02` § 4.1).
@@ -184,7 +185,7 @@ Dépendances ajoutées : `zod` `^4.6.5` (vague 2) ; police Inter auto-hébergée
 | typescript-eslint / eslint-plugin-react-hooks | 8.71.1 / 7.1.1 | |
 | Zod | 4.6.5 | Cf. `05-forms-and-validation.md`. |
 
-### 4.3 Recommandations `[CIBLE]`
+### 4.3 Recommandations (1 `[ACTUEL]`, 2 à 4 `[CIBLE]`)
 > État au 2026-10-09 : la recommandation 1 (ESLint) est `[ACTUEL]` et sa dette soldée (0 / 0, aucune exception
 > `warn` restante) ; Zod 4 est installé (`src/schemas.ts`). Les montées de version 2 à 4 restent optionnelles et
 > non planifiées.

@@ -8,7 +8,7 @@ Lève ``ProfileSyncError`` avec un message lisible quand l'ajout échoue.
 from __future__ import annotations
 
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
@@ -26,7 +26,7 @@ for (const root of [document.querySelector('[role="dialog"]'), document]) {
   for (const el of root.querySelectorAll(sel)) { if (el.getClientRects().length && !el.disabled) return el; }
 }
 return null;
-"""
+"""  # noqa: E501 - script JavaScript embarqué
 _JS_OPTIONS = """
 const out = [];
 for (const el of document.querySelectorAll('[role="listbox"] [role="option"], .basic-typeahead__selectable')) {
@@ -91,9 +91,16 @@ def _click(driver, el) -> None:
         driver.execute_script("arguments[0].click();", el)
 
 
-def add_skill(driver, skill: str, caution: config.Caution, *, check: Callable[[], None] = lambda: None,
-              log_fn: Callable[[str], None] = lambda m: None, timeout: float = 15.0,
-              resolve: Callable[[str], str] = lambda u: u) -> dict:
+def add_skill(
+    driver,
+    skill: str,
+    caution: config.Caution,
+    *,
+    check: Callable[[], None] = lambda: None,
+    log_fn: Callable[[str], None] = lambda m: None,
+    timeout: float = 15.0,
+    resolve: Callable[[str], str] = lambda u: u,
+) -> dict:
     """Ajoute ``skill`` au profil connecté, sauf si une compétence équivalente y figure déjà.
 
     ``resolve`` traduit les URL LinkedIn (tests : pages locales).
@@ -135,11 +142,15 @@ def add_skill(driver, skill: str, caution: config.Caution, *, check: Callable[[]
     if save is None:
         raise ProfileSyncError("Bouton « Enregistrer » introuvable dans le formulaire de compétence.")
     _click(driver, save)
-    closed = _wait(lambda: driver.execute_script(_JS_ERROR) or not driver.execute_script(_JS_SKILL_INPUT), timeout, check)
+    closed = _wait(
+        lambda: driver.execute_script(_JS_ERROR) or not driver.execute_script(_JS_SKILL_INPUT), timeout, check
+    )
     error = driver.execute_script(_JS_ERROR)
     if error:
         raise ProfileSyncError(f"LinkedIn a refusé la compétence : {error}")
     if not closed:
-        raise ProfileSyncError("L'enregistrement n'a pas pu être confirmé : vérifie la section Compétences de ton profil LinkedIn.")
+        raise ProfileSyncError(
+            "L'enregistrement n'a pas pu être confirmé : vérifie la section Compétences de ton profil LinkedIn."
+        )
     log_fn(f"Compétence « {name} » ajoutée au profil LinkedIn.")
     return {"skill": skill, "linkedin_name": name, "state": "ajoutée"}

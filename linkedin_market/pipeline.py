@@ -9,6 +9,8 @@ from datetime import datetime
 
 from . import activity, config, consent, matching, sources, storage, trends
 from . import profile as profile_mod
+from .db.repositories import sources as sources_repo
+from .db.repositories import user_transaction
 from .models import Profile, SearchRequest
 
 log = logging.getLogger("linkedin_market")
@@ -170,6 +172,43 @@ def guard_source_rest(source_code: str) -> None:
     )
 
 
+class SourceRefused(ValueError):
+    """Source refusée par le CLI (inconnue, import manuel, indisponible, identifiants absents) : message actionnable."""
+
+
+def check_cli_sources(source_codes: list[str]) -> None:
+    """Préconditions d'une collecte lancée par le CLI, vérifiées avant toute saisie (P-3, I-16, I-06).
+
+    ``SourceRefused`` : source inconnue, ``import_manuel`` (Indeed s'importe uniquement depuis l'interface web), source
+    non encore activée, identifiants France Travail absents. ``consent.SourceConsentRequired`` : consentement courant
+    manquant pour une source navigateur (le CLI renvoie vers l'interface web, il n'affiche aucun texte de risques).
+    ``activity.BlockedByLinkedIn`` : source en repos de 6 h. ``collect`` les revérifie au début de la collecte.
+    """
+    with user_transaction() as (s, _uid):
+        known = {source.code: source for source in sources_repo.all_sources(s)}
+    for code in dict.fromkeys(source_codes):
+        source = known.get(code)
+        if source is None:
+            raise SourceRefused(f"Source inconnue « {code} » : choisis parmi {', '.join(sorted(known))}.")
+        if source.access_mode == "import_manuel":
+            raise SourceRefused(
+                f"{source.label} ne se collecte pas : importe tes offres à la main depuis l'interface web "
+                "(python -m linkedin_market.web)."
+            )
+        if not source.enabled:
+            raise SourceRefused(f"La source « {source.label} » n'est pas encore disponible.")
+    for code in dict.fromkeys(source_codes):
+        consent.require(code)  # 428 côté API : ici, le CLI renvoie vers Paramètres → Sources et consentements
+    if "france_travail" in source_codes and not config.france_travail_configured():
+        raise SourceRefused(
+            "Identifiants France Travail absents : renseigne FRANCE_TRAVAIL_CLIENT_ID et "
+            "FRANCE_TRAVAIL_CLIENT_SECRET dans le fichier .env."
+        )
+    for code in dict.fromkeys(source_codes):
+        if code == "linkedin" or code in sources.BROWSER_SOURCES:
+            guard_source_rest(code)
+
+
 def collect(
     request: SearchRequest,
     source_codes: list[str],
@@ -300,19 +339,21 @@ def build_profile(request: SearchRequest, linkedin_text: str = "", use_overrides
     else:
         raise ProfileMissingError(
             "Aucun profil : dépose profil.md / profil.json / cv.pdf à la racine du projet, "
-            "ou importe ton profil LinkedIn (sans --no-scrape)."
+            "ou importe ton profil LinkedIn (CLI : relance avec --sources linkedin, sans --no-scrape ; "
+            "interface web : lance l'import du profil LinkedIn depuis la page Profil)."
         )
     return profile_mod.finalize(prof, request, use_overrides)
 
 
-def analyse(request: SearchRequest, prof: Profile) -> tuple[dict, list]:
+def analyse(request: SearchRequest, prof: Profile, home_location: str, timezone: str) -> tuple[dict, list]:
+    """Analyse l'historique ; ``home_location`` / ``timezone`` viennent des réglages (obligatoires, E-18)."""
     items = storage.load_items(request.keyword)
     jobs = [i for i in items if i.kind == "job"]
     counts = {s: sum(1 for i in items if i.kind == s) for s in ("job", "post", "person")}
     log.info("Analyse de %d éléments (%s).", len(items), counts)
 
     model = matching.MatchingModel.load()
-    features = matching.build_features(jobs, prof, request.keyword)
+    features = matching.build_features(jobs, prof, request.keyword, home_location, timezone)
     scored = matching.score_jobs(features, model)
     demand = trends.skill_demand(items)
     rising = trends.rising_terms(items)
@@ -331,6 +372,7 @@ def analyse(request: SearchRequest, prof: Profile) -> tuple[dict, list]:
             "seniority": prof.seniority,
         },
         "counts": counts,
+        "scoring_context": {"home_location": home_location, "timezone": timezone},
         "top_terms": trends.top_terms(items),
         "skill_demand": demand,
         "rising": rising,

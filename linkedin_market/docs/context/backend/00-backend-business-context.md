@@ -4,8 +4,9 @@
 > **Source de vérité** : `docs/context/schemas-architecture/00` à `04` (lot 1). Les identifiants du glossaire,
 > les invariants **I-01…I-16** et les risques **R-1…R-8** y sont définis ; ce document précise **où et comment**
 > le backend les applique.
-> **Marqueurs** : `[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, non implémenté (sources
-> France Travail / Malt / WTTJ / Indeed, popup de risques, liste d'opposition).
+> **Marqueurs** : `[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, non implémenté (au 2026-10-13 :
+> traçabilité par `task_id` dans `activity_events.data`, une transaction par cas d'usage complet, `get_db`). Sources
+> France Travail / Malt / WTTJ / Indeed, popup de risques et liste d'opposition sont `[ACTUEL]` (vagues 3 à 5).
 >
 > **Modèle de déploiement** : une instance = un utilisateur, sur son poste. Il n'y a ni organisation ni
 > *tenant* : l'isolation se fait par la machine. La colonne `user_id` (I-01) existe (PostgreSQL 18, vague 1) pour garder un modèle
@@ -99,10 +100,11 @@ un rang égal) ; un message envoyé sur une candidature `postulée` la laisse `p
 ### Message de prospection (`outreach_messages`)
 - **Définition** : email (SMTP de l'utilisateur) ou message LinkedIn (message direct ou demande de connexion avec
   note ≤ 300 caractères) envoyé à un contact au sujet d'une offre.
-- **Statuts** `[CIBLE]` : `confirmé → envoyé | échec`. `[ACTUEL]` table créée mais non alimentée : l'envoi est tracé
-  par `activity_events` (`message_email` / `message_linkedin`) et l'historique de la candidature (`kind="message"`).
+- **Statuts** `[ACTUEL]` (vague 2) : `confirmé → envoyé | échec`, ligne réservée dans la transaction de plafond puis
+  mise à jour par la tâche (`outreach_repo.mark_sent` / `mark_failed`) ; l'envoi est aussi tracé par `activity_events`
+  (`message_email` / `message_linkedin`) et l'historique de la candidature (`kind="message"`).
 
-### Consentement aux risques (`source_consents`) `[CIBLE]`
+### Consentement aux risques (`source_consents`) `[ACTUEL]` (vague 3)
 - **Définition** : acceptation, pour une source en mode `navigateur` (`linkedin`, `malt`, `wttj`), de la version
   courante du texte de risques (`sources.risk_version`, ex. `2026-10`).
 - **Statuts** : actif (`revoked_at IS NULL`) ou révoqué. Un changement de `risk_version` rend le consentement
@@ -140,16 +142,16 @@ Les invariants sont ceux du lot 1. Ce tableau indique leur **point d'application
 | I-04 | Candidature : `TaskContext.ask(..., "confirm_submit", ["Soumettre", "Annuler"], review=…)` dans `apply_bot._steps` ; seule la réponse exacte `Soumettre` clique. Message : `MessageBody.confirm` sinon 422. Les champs `confirm*` ne sont jamais mémorisés (`answer_task`). | `[ACTUEL]` |
 | I-05 | `EasyApply._auto_answer()` : `contact_email`, `contact_phone`, `settings.find_answer()` ; tout le reste passe par `ask()`. Cases à cocher jamais cochées. | `[ACTUEL]` |
 | I-06 | `activity.guard_not_blocked()` avant chaque action navigateur (routeurs via `require_browser_ready`, services en début de tâche) ; `BlockedError` / `PermissionError` ⇒ `activity.record("blocked", where=…)`. | `[ACTUEL]` partiel — voir écarts § 5 de `05-queues-and-integrations.md` |
-| I-07 | `activity.check_quota()` (API **et** début de tâche) ; volumes de collecte = `Caution.max_items`. | `[ACTUEL]` partiel — en base `CHECK max_items ≤ plafond de la prudence` et défaut `prudent` (vague 1) ; contrôle 422 à l'API et `min()` dans `pipeline` restent à livrer (E-3, vague 2) |
+| I-07 | `activity.check_quota()` (API **et** début de tâche) ; volumes de collecte = `Caution.max_items`. | `[ACTUEL]` — en base `CHECK max_items ≤ plafond de la prudence` et défaut `prudent` (vague 1) ; contrôle 422 à l'API et garde `pipeline.capped()` livrés (E-3, vague 2) |
 | I-08 | Un seul couple `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` lu dans `.env` (`config.linkedin_credentials`). | `[ACTUEL]` |
 | I-09 | Filtre à l'ingestion de `person` (texte mis à `NULL`, compétences seules) + `CHECK (kind <> 'person' OR text IS NULL)`. | `[ACTUEL]` (vague 1, E-16) |
 | I-10 | `RetentionService` (`retention.py`) : tâche `purge` au démarrage puis toutes les 24 h (cf. `03-database-and-migrations.md` § 6). | `[ACTUEL]` (vague 6) — `purge_after` posé à l'ingestion (`NULL` pour une offre annotée ou candidatée) ; une offre avec candidature est conservée ; `suppression_list`, `reports` et `applications` ne sont jamais purgés |
 | I-11 | `interpreter.interpret()` bascule sur `LocalInterpreter` si Claude est absent ou échoue ; `pipeline.summary_for_interpreter()` n'envoie que des agrégats ; `nlp.redact_third_parties` appliqué au texte de l'offre avant la génération de CV. | `[ACTUEL]` (vague 6, E-6) — profil de l'utilisateur envoyé intact, aucune donnée `person` ni contact ; `interpreter = "none"` n'existe plus que sur d'anciens rapports |
-| I-12 | Gabarit imposé : mention d'origine de l'adresse + désinscription ajoutées par le backend et vérifiées avant envoi. | `[CIBLE]` |
-| I-13 | Contrôle `suppression_list` dans la transaction d'envoi ⇒ 409. | `[CIBLE]` |
+| I-12 | Pied imposé : `outreach.compose_footer` (origine de l'adresse, objet lié à l'offre, désinscription « STOP ») ajouté par le serveur à la réservation, jamais saisi ; `List-Unsubscribe` mailto. | `[ACTUEL]` (vague 4) |
+| I-13 | Contrôle `suppression_list` / `opposed_at` dans la transaction de réservation (avant le 429) et au début de la tâche ⇒ 409. | `[ACTUEL]` (vague 4) |
 | I-14 | `company_contacts.purge_after = last_contacted_at + 3 ans`, supprimé par la tâche `purge`. | `[ACTUEL]` (vague 6) |
 | I-15 | `.env` hors Git ; cookies chiffrés Fernet (`LM_SECRET_KEY`, générée dans le `.env` en `0o600` si absente) dans `platform_sessions` ; mot de passe de la base masqué dans les messages. TTL 72 h (`SESSION_TTL_HOURS`). | `[ACTUEL]` (vague 1) |
-| I-16 | `SourceConsentService.require(source_code)` avant toute tâche `browser=True` sur une source `navigateur` ⇒ 428. | `[CIBLE]` |
+| I-16 | `consent.require(source_code)` avant toute tâche `browser=True` sur une source `navigateur` ⇒ 428 ; revérifié au début de la tâche ; le CLI renvoie vers l'interface web. | `[ACTUEL]` (vague 3) |
 
 Règles complémentaires vérifiées dans le code `[ACTUEL]` :
 - **Une seule tâche active par (type, clé)** : `TaskManager.has_active(kind, key)` ⇒ 409 (`run`, `rescore`, `train`,
@@ -165,20 +167,22 @@ Règles complémentaires vérifiées dans le code `[ACTUEL]` :
 - **Conditions préalables** :
   - aucune tâche `run` active (sinon 409 « Une analyse est déjà en cours. ») ;
   - mot-clé non vide après fusion avec les réglages (sinon 422) ; `caution`, `max_items`, `interpreter` valides ;
-  - si `scrape=true` : identifiants LinkedIn présents (409), aucun blocage dans les 6 h (409) ;
-    `[CIBLE]` consentement actif à la version courante pour chaque source `navigateur` demandée (428).
-- **Exécution** (tâche `run`, `browser=scrape`) : `pipeline.scrape()` (jobs, posts, profils jusqu'à `max_items`
-  chacun, `human_pause` de la prudence) → `pipeline.build_profile()` → `pipeline.analyse()` (fenêtre 30 j,
+  - si `scrape=true` : `sources` valides (422), consentement actif à la version courante pour chaque source
+    `navigateur` demandée (428), identifiants LinkedIn / France Travail présents (409), aucune source `navigateur`
+    en repos de 6 h (409) — ordre exact : `01` § 5.8.2.
+- **Exécution** (tâche `run`, `browser=scrape` seulement si une source `navigateur` est demandée) :
+  `pipeline.collect()` (LinkedIn : jobs, posts, profils jusqu'à `max_items` chacun, `human_pause` de la prudence ;
+  Malt / WTTJ / France Travail : offres seulement) → `pipeline.build_profile()` → `pipeline.analyse()` (fenêtre 30 j,
   TF-IDF, tendances, scoring) → `interpreter.interpret()` → `report.write()`.
   `[ACTUEL]` : insertion des éléments en `INSERT … ON CONFLICT (user_id, source_code, kind, external_id) DO UPDATE`
   par lot (une transaction par lot) ; `[CIBLE]` rapport + événement dans **une** transaction.
 - **Effets de bord autorisés** : événement `activity_events(kind="run", keyword, scrape, jobs)` ; en cas de blocage
-  `kind="blocked", where="collecte"` ; mise à jour de `candidate_profiles.text` si le profil LinkedIn a été lu.
+  `kind="blocked", where="collecte", source=<code>` ; mise à jour de `candidate_profiles.text` si le profil LinkedIn a été lu.
 
 ### Cas d'Usage : `PostulerEasyApply` (`POST /api/applications/{job_id}/apply`)
 - **Conditions préalables** : candidature existante (404) ; pas déjà `postulée`/`entretien` (409) ; aucune tâche
   `apply` active pour cette offre (409) ; identifiants (409) ; `count_today("apply") < apply_daily_max` (429) ;
-  aucun blocage (409) ; `[CIBLE]` consentement `linkedin` (428).
+  aucun blocage (409) ; consentement `linkedin` (428, `[ACTUEL]` vague 3).
 - **Exécution** (tâche `apply`, `browser=True`) : nouveau contrôle de plafond et de blocage dans la tâche,
   génération de `cv.pdf`, `apply_state="en_cours"`, connexion, `EasyApply.run()`, arrêt à l'écran de relecture,
   question `confirm_submit`. Résultat appliqué par `_record_apply_result()` :
@@ -199,23 +203,24 @@ Règles complémentaires vérifiées dans le code `[ACTUEL]` :
 - **Conditions préalables** : candidature existante (404) ; `confirm=true` (422) ; email : SMTP configuré (503),
   destinataire valide (422), objet non vide sur une ligne (422), plafond `message_daily_max` (429) ; LinkedIn :
   identifiants, plafond, blocage (409/429) ; aucune tâche `message` active pour l'offre (409).
-  `[CIBLE]` : destinataire absent de `suppression_list` (409), mention d'origine et de désinscription présentes
-  dans le corps (422), consentement `linkedin` pour le canal `linkedin` (428).
-- **Exécution transactionnelle** `[CIBLE]` : `BEGIN` → `SELECT … FROM applications WHERE id = :id FOR UPDATE` →
+  `[ACTUEL]` (vagues 3-4) : destinataire absent de `suppression_list` et contact non opposé (409), consentement
+  `linkedin` pour le canal `linkedin` (428) ; le pied imposé (origine de l'adresse, désinscription) n'est pas
+  contrôlé dans le corps : le serveur l'ajoute lui-même (`outreach.compose_footer`, I-12).
+- **Exécution transactionnelle** `[ACTUEL]` (vague 2, `web/services.py::reserve_message`) : `BEGIN` → `SELECT … FROM applications WHERE id = :id FOR UPDATE` →
   contrôle d'opposition → comptage du jour → `INSERT outreach_messages(status='confirmé')` → `COMMIT` ; la tâche
   transmet ensuite le message et passe la ligne à `envoyé` ou `échec` (détail dans `03` § 5).
 - **Effets de bord autorisés** : `activity_events(kind="message_email"|"message_linkedin", job, to, title)`,
   historique `kind="message"` (canal, destinataire, 120 premiers caractères, mode LinkedIn), statut
-  `advance_status("contactée")`, `company_contacts.last_contacted_at` `[CIBLE]`.
+  `advance_status("contactée")`, `company_contacts.last_contacted_at` (+ `purge_after` à 3 ans) `[ACTUEL]` au passage à `envoyé`.
 
-### Cas d'Usage : `AccepterRisquesSource` `[CIBLE]` (`POST /api/sources/{code}/consent`)
+### Cas d'Usage : `AccepterRisquesSource` `[ACTUEL]` vague 3 (`POST /api/sources/{code}/consent`)
 - **Conditions préalables** : source existante et en mode `navigateur` (404 / 422) ; `risk_version` du corps égale
   à `sources.risk_version` (409 si l'utilisateur a lu une version périmée) ; `accepted=true` (422).
 - **Exécution transactionnelle** : révocation du consentement actif éventuel (`revoked_at = now()`) puis insertion
   du nouveau, dans la même transaction (contrainte `UNIQUE (user_id, source_code) WHERE revoked_at IS NULL`).
 - **Effets de bord** : aucun appel externe.
 
-### Cas d'Usage : `EnregistrerOpposition` `[CIBLE]` (`POST /api/suppressions`)
+### Cas d'Usage : `EnregistrerOpposition` `[ACTUEL]` vague 4 (`POST /api/suppressions`)
 - **Conditions préalables** : email ou URL de profil fourni.
 - **Exécution transactionnelle** : `INSERT suppression_list(recipient_hash = sha256(normalisé)) ON CONFLICT DO NOTHING`
   puis suppression des emails correspondants dans `company_contacts` (le contact reste sans coordonnée).

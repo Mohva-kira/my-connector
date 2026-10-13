@@ -38,7 +38,7 @@
 - **Erreurs serveur** : un 422 qui correspond à un champ connu est rattaché au champ (table de correspondance
   clé serveur → libellé : `apply_daily_max` → « Candidatures / jour », etc.) ; sinon `ErrorBox`.
 - **Préservation de la saisie** : jamais de réinitialisation sur erreur (déjà le cas) ; les valeurs numériques
-  vides ne sont pas transformées silencieusement en `0` (écart actuel, cf. § 3.1).
+  vides ne sont pas transformées silencieusement en `0` `[ACTUEL]` (`num("")` donne `NaN`, refusé par `settingsSchema`, cf. § 3.1).
 - **Prévention des erreurs pour les actions engageantes** (3.3.4, AA) : envoi de message et soumission de
   candidature passent par une étape de relecture réversible (« Modifier » / « Annuler ») — I-04.
 
@@ -69,22 +69,18 @@ page). Succès : Notice « Paramètres enregistrés. » ; erreur : `ErrorBox` (e
 | Signature des emails | `signature` | `textarea` 3 lignes | chaîne, `strip()` | — |
 | Réponses mémorisées (« Oublier ») | `answers` | liste + bouton | objet ; clé normalisée tronquée à 200, réponse à 500 caractères | « answers doit être un objet question -> réponse. » |
 
-Écarts relevés :
-- l'option **« Aucune » (`none`)** est encore proposée alors que le lot 1 la déprécie (I-11) → `[CIBLE]` retirer
-  l'option ; afficher pour `claude` l'avertissement existant (« ton profil complet et le texte des offres sont
-  envoyés à l'API Anthropic pour rédiger les CV ») et préciser que l'interprète local prend le relais si Claude
-  échoue ;
-- un champ numérique vidé devient **0** (`num("")`) : vider « Candidatures / jour » désactive silencieusement les
-  candidatures → `[CIBLE]` champ requis ;
-- `max_items` jusqu'à 200 contourne le plafond de la prudence (60 en `agressif`), en contradiction avec I-07 et
-  R-2 (« volumes non configurables au-delà de `agressif` ») → `[CIBLE]` **décidé** : borne max = plafond de la prudence choisie
-  (15 / 30 / 60), côté serveur et côté UI (E-3) ;
+Écarts relevés (état au 2026-10-13) :
+- l'option « Aucune » (`none`) de l'interprète a disparu `[ACTUEL]` (G-4) : le `select` propose « Claude » et « Local
+  (règles) » ; l'avertissement s'affiche quand `claude` est choisi ;
+- un champ numérique vidé n'est plus transformé en 0 `[ACTUEL]` : `num("")` donne `NaN`, la valeur est affichée vide et
+  refusée par `settingsSchema` (champ requis) ;
+- `max_items` borné par la prudence choisie (15 / 30 / 60) `[ACTUEL]` côté serveur et côté UI (E-3, G-3, I-07) ;
 - « Oublier » une réponse envoie seulement `{ answers }`, affiche « Paramètres enregistrés. », puis l'invalidation
   de `["settings"]` recharge les réglages et le `useEffect` écrase le formulaire : les **autres modifications non
-  enregistrées sont perdues** sans avertissement → `[CIBLE]` « Oublier » désactivé tant que le formulaire est
-  modifié, ou fusion des réglages rechargés avec les champs modifiés ;
-- la prudence par défaut du serveur est `normal` (`config.DEFAULT_CAUTION`) → `[CIBLE]` **décidé** : `prudent` par
-  défaut (R-1) ; la case « Passer la prudence à prudent » de la popup reste utile si l'utilisateur l'a relevée.
+  enregistrées sont perdues** sans avertissement (toujours vrai au 2026-10-13 : toute nouvelle version des réglages enregistrés remplace le formulaire) → `[CIBLE]` « Oublier »
+  désactivé tant que le formulaire est modifié, ou fusion des réglages rechargés avec les champs modifiés ;
+- la prudence par défaut du serveur est `prudent` `[ACTUEL]` (`config.DEFAULT_CAUTION`, E-3, R-1) ; la case « Passer la
+  prudence à prudent » de la popup reste utile si l'utilisateur l'a relevée.
 
 ### 3.2 Profil candidat (`Skills`)
 
@@ -118,10 +114,11 @@ Les libellés de séniorité sont affichés bruts (`confirme` sans accent, ident
 | Prudence anti-blocage | `settings.caution` | `select` (« Prudent (15 offres) », « Normal (30) », « Agressif (60) ») | ∈ `CAUTION_LEVELS` |
 | Full remote uniquement | `settings.remote_only` | case | `bool` |
 | Collecter de nouvelles données sur LinkedIn | `true` | case ; avertissement CGU si cochée | `scrape: true` ⇒ `require_browser_ready()` : 409 identifiants absents ou blocage actif |
-| — (non exposé) | `max_items`, `interpreter` | — | acceptés par `RunBody` : `max_items` validé 1–200, `interpreter` validé |
+| Éléments par source `[ACTUEL]` | `max_items` (vide = plafond de la prudence) | `number` 1 à plafond de la prudence | `max_items` ≤ plafond (G-3) |
+| — (non exposé) | `interpreter` | — | accepté par `RunBody`, validé |
 
 Autres réponses : 409 « Une analyse est déjà en cours. ».
-`[ACTUEL]` côté UI (backend des vagues 2-3 `[CIBLE]`) : `SourcePicker` (au moins une source si collecte, message
+`[ACTUEL]` (UI et backend, vagues 2-3) : `SourcePicker` (au moins une source si collecte, message
 client « Choisis au moins une source. ») ; champ « Éléments par source » borné par la prudence (vide = plafond) ;
 popup de risques **avant** la requête pour la première source `navigateur` cochée sans consentement à jour, sans
 lancement automatique après acceptation ; si la popup a passé la prudence à « prudent »
@@ -157,7 +154,7 @@ Gardes : plafond `message_daily_max` (bouton désactivé + Notice ; serveur 429)
 serveur 503), envoi déjà en cours (409). Le brouillon est chargé depuis `message-draft` : objet
 « Candidature — {titre} », corps = message du dossier + signature.
 
-`[ACTUEL]` côté UI (I-12, I-13 ; backend vague 4 `[CIBLE]`, revue du 2026-10-09) :
+`[ACTUEL]` (UI et backend, I-12, I-13, vague 4, revue du 2026-10-09) :
 - relecture : origine de l'adresse et pied imposé lus par `GET …/message-draft?to=` à chaque relecture, affichés
   en lecture seule ; « Confirmer l'envoi » désactivé tant qu'ils ne sont pas chargés ;
 - case obligatoire « J'ai relu ce message et je confirme l'envoi », jamais pré-cochée, décochée à chaque retour à
@@ -187,11 +184,12 @@ Reste `[CIBLE]` : validation de l'URL LinkedIn côté client avant la relecture.
 
 ### 3.7 Import manuel d'une offre Indeed `[ACTUEL]` (R-6, vague 5)
 `ManualImportModal` ; schéma `manualImportSchema` (`src/schemas.ts`, § 4) ; les messages reprennent ceux du serveur
-(`champ : message`, `backend/01` § 5.8.2). Le champ `keyword` (≤ 80, facultatif) est omis du corps s'il est vide.
+(`champ : message`, `backend/01` § 5.8.2). Sur un 422 rattaché à un champ, le message s'affiche sous ce champ (`aria-describedby`) et
+le **focus** passe au premier champ en erreur (`aria-invalid="true"`). Le champ `keyword` (≤ 80, facultatif) est omis du corps s'il est vide.
 
 | Champ | Règle |
 | :--- | :--- |
-| URL de l'offre | requise, `https://`, hôte `indeed.com` ou sous-domaine national (`fr.indeed.com`…) |
+| URL de l'offre | requise, `https://`, hôte `indeed.com` ou sous-domaine national (`fr.indeed.com`…), port numérique admis, ≤ 2 000 points de code |
 | Texte de l'offre (collé) | requis, 200 à 20 000 caractères |
 | Titre | requis, ≤ 150 caractères (`ManualItem.title`) |
 | Entreprise, localisation, mot-clé | facultatifs (≤ 80 / 120 / 80 caractères) |
@@ -199,15 +197,17 @@ Reste `[CIBLE]` : validation de l'URL LinkedIn côté client avant la relecture.
 
 ## 4. Schémas Zod `[ACTUEL]` (vagues 2 à 6)
 > Vague 5 `[ACTUEL]` : `manualImportSchema` (champs `url`, `title`, `company`, `location`, `text`, `keyword` ; `url` :
-> `INDEED_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*indeed\.com(\/|$|\?|#)/i`, ≤ 2 000 ; `text` : `MANUAL_TEXT_MIN` 200 à
+> `INDEED_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*indeed\.com(:\d+)?(\/|$|\?|#)/i` (un port numérique est admis, comme côté serveur), ≤ 2 000 ; `text` : `MANUAL_TEXT_MIN` 200 à
 > `MANUAL_TEXT_MAX` 20 000 ; messages en minuscule initiale, comme le `detail` serveur : `url : colle l'adresse https
 > de l'offre Indeed.`…). La forme Zod 4 ci-dessous est indicative ; le fichier fait foi.
 > Vague 6 `[ACTUEL]` : `settingsSchema` gagne `home_location` (espaces internes réduits puis ≤ 80 ; sans caractère de
 > contrôle ; messages `home_location ne peut pas dépasser 80 caractères.` et `home_location ne doit contenir ni saut de
 > ligne ni caractère de contrôle.`) et `timezone` (vide ou nom connu d'`Intl.DateTimeFormat` ; message `timezone doit
 > être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide.`), identiques mot pour mot aux 422 de
-> `settings.validate_settings` (`backend/01` § 5.2). Seul écart de confort : le client ne détecte pas les séparateurs
-> de ligne/paragraphe Unicode (U+2028/2029), que le serveur refuse ; le serveur reste juge.
+> `settings.validate_settings` (`backend/01` § 5.2). Le client refuse aussi les séparateurs de ligne et de paragraphe Unicode
+> (U+2028 / U+2029), comme le serveur (catégories Unicode `Cc`, `Zl`, `Zp`) ; les longueurs de `home_location` et des champs
+> de l'import Indeed sont comptées en **points de code** (`Array.from(valeur).length`, comme le `len()` du serveur : un
+> emoji compte 1, non 2) ; le serveur reste juge.
 > Vague 4 `[ACTUEL]` : `suppressionSchema` (`recipient` après `trim` = `EMAIL_RE` ou `LINKEDIN_PROFILE_RE`, message
 > `recipient : adresse email ou URL de profil LinkedIn attendue.` — avec point final, comme le message du
 > validateur serveur repris tel quel par G-1 `value_error` ; `reason` ∈ `désinscription`, `refus_oral`, `plainte`,

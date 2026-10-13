@@ -34,14 +34,34 @@ SUBMIT_TIMEOUT = 20.0
 
 EASY_APPLY_WORDS = ("easy apply", "candidature simplifiée", "candidature simplifiee")
 SUBMIT_WORDS = ("submit application", "envoyer la candidature", "soumettre la candidature", "submit")
-REVIEW_WORDS = ("review your application", "vérifier votre candidature", "verifier votre candidature", "review", "vérifier")
-NEXT_WORDS = ("continue to next step", "passer à l'étape suivante", "passer a l'etape suivante", "next", "suivant", "continuer")
+REVIEW_WORDS = (
+    "review your application",
+    "vérifier votre candidature",
+    "verifier votre candidature",
+    "review",
+    "vérifier",
+)
+NEXT_WORDS = (
+    "continue to next step",
+    "passer à l'étape suivante",
+    "passer a l'etape suivante",
+    "next",
+    "suivant",
+    "continuer",
+)
 DISMISS_WORDS = ("dismiss", "ignorer", "fermer", "close")
 DISCARD_WORDS = ("discard", "abandonner", "supprimer", "ne pas enregistrer")
-SENT_WORDS = ("application was sent", "your application was sent", "candidature a été envoyée", "candidature envoyée",
-              "votre candidature a bien été envoyée", "application submitted")
+SENT_WORDS = (
+    "application was sent",
+    "your application was sent",
+    "candidature a été envoyée",
+    "candidature envoyée",
+    "votre candidature a bien été envoyée",
+    "application submitted",
+)
 _ALREADY_APPLIED = re.compile(
-    r"\bapplied\s+\d+\s*(?:minute|hour|day|week|month)s?\s+ago|candidature\s+envoy[ée]e\s+il\s+y\s+a|vous\s+avez\s+postul[ée]")
+    r"\bapplied\s+\d+\s*(?:minute|hour|day|week|month)s?\s+ago|candidature\s+envoy[ée]e\s+il\s+y\s+a|vous\s+avez\s+postul[ée]"
+)
 PLACEHOLDERS = ("select an option", "sélectionner une option", "selectionner une option", "choisir", "select", "choose")
 
 
@@ -58,13 +78,20 @@ class Hooks(Protocol):
 
     def log(self, message: str) -> None: ...
     def check(self) -> None: ...
-    def ask(self, question: str, field_id: str = "", options: list[str] | None = None, *,
-            suggestion: str = "", review: str = "") -> str: ...
+    def ask(
+        self,
+        question: str,
+        field_id: str = "",
+        options: list[str] | None = None,
+        *,
+        suggestion: str = "",
+        review: str = "",
+    ) -> str: ...
 
 
 @dataclass
 class ApplyResult:
-    state: str                       # postulée | externe | déjà_postulée | annulée | incertaine
+    state: str  # postulée | externe | déjà_postulée | annulée | incertaine
     detail: str = ""
     answers: dict[str, str] = field(default_factory=dict)
 
@@ -80,7 +107,7 @@ for (const el of root.querySelectorAll('button, [role="button"]')) {
   if (words.some(w => text.includes(w))) out.push(el);
 }
 return out;
-"""
+"""  # noqa: E501 - script JavaScript embarqué
 
 _JS_DIALOG = """
 for (const el of document.querySelectorAll('[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal')) {
@@ -137,7 +164,7 @@ for (const el of root.querySelectorAll('input, select, textarea')) {
   fields.push(field);
 }
 return fields;
-"""
+"""  # noqa: E501 - script JavaScript embarqué
 
 _JS_TEXT = "return (arguments[0] || document.body).innerText || '';"
 
@@ -196,7 +223,11 @@ class EasyApply:
         if any(w in norm for w in ("email", "e-mail", "courriel")) and self.cfg.get("contact_email"):
             return self.cfg["contact_email"]
         is_code = any(w in norm for w in ("country", "pays", "indicatif", "code"))
-        if not is_code and any(w in norm for w in ("phone", "telephone", "mobile", "portable")) and self.cfg.get("contact_phone"):
+        if (
+            not is_code
+            and any(w in norm for w in ("phone", "telephone", "mobile", "portable"))
+            and self.cfg.get("contact_phone")
+        ):
             return self.cfg["contact_phone"]
         return settings.find_answer(label)
 
@@ -249,7 +280,10 @@ class EasyApply:
             self.driver.execute_script(
                 "arguments[0].selectedIndex = arguments[1];"
                 "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
-                "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", element, index)
+                "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
+                element,
+                index,
+            )
             return
         # champ texte, nombre, email, téléphone, zone de texte
         if (field["value"] or "").strip():
@@ -274,7 +308,10 @@ class EasyApply:
                 "const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;"
                 "Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, arguments[1]);"
                 "el.dispatchEvent(new Event('input', {bubbles: true}));"
-                "el.dispatchEvent(new Event('change', {bubbles: true}));", element, value)
+                "el.dispatchEvent(new Event('change', {bubbles: true}));",
+                element,
+                value,
+            )
 
     @staticmethod
     def _match_option(options: list[str], choice: str) -> int | None:
@@ -289,9 +326,9 @@ class EasyApply:
 
     def _fill_step(self, dialog) -> None:
         fields = self.driver.execute_script(_JS_FIELDS, dialog) or []
-        for field in fields:
+        for described in fields:
             self.hooks.check()
-            self._fill_field(field)
+            self._fill_field(described)
 
     def _errors(self, dialog) -> list[str]:
         script = """
@@ -323,7 +360,7 @@ class EasyApply:
           const text = ((lab ? lab.innerText : '') + ' ' + (box.getAttribute('aria-label') || '')).toLowerCase();
           if (box.checked && (text.includes('follow') || text.includes('suivre'))) { (lab || box).click(); return true; }
         }
-        return false;"""
+        return false;"""  # noqa: E501 - script JavaScript embarqué
         if self.driver.execute_script(script, dialog):
             self.hooks.log("« Suivre l'entreprise » décoché.")
 
@@ -369,8 +406,11 @@ class EasyApply:
                 self._uncheck_follow(dialog)
                 review = (self.driver.execute_script(_JS_TEXT, dialog) or "").strip()
                 reply = self.hooks.ask(
-                    f"Soumettre la candidature « {job.get('title', '')} » ?", "confirm_submit",
-                    ["Soumettre", "Annuler"], review=review[:3500])
+                    f"Soumettre la candidature « {job.get('title', '')} » ?",
+                    "confirm_submit",
+                    ["Soumettre", "Annuler"],
+                    review=review[:3500],
+                )
                 if reply != "Soumettre":
                     self._close_dialog()
                     return ApplyResult("annulée", "Candidature annulée avant l'envoi.", self.answers)
@@ -385,7 +425,7 @@ class EasyApply:
             self._click(advance[0])
             human_pause(self.caution, 0.15)
 
-            def changed():
+            def changed(before=before):  # lié à l'étape courante (la boucle réaffecte ``before``)
                 current = self._dialog()
                 return current is not None and self.driver.execute_script(_JS_TEXT, current) != before
 
@@ -394,7 +434,8 @@ class EasyApply:
                 if errors and errors == previous_errors:
                     raise ApplyError("Champs invalides : " + " | ".join(errors)[:300])
                 previous_errors = errors
-                # Un champ obligatoire a pu être manqué : on repasse sur l'étape (le remplissage ne touche que les champs vides).
+                # Un champ obligatoire a pu être manqué : on repasse sur l'étape
+                # (le remplissage ne touche que les champs vides).
         raise ApplyError(f"Plus de {MAX_STEPS} étapes : candidature interrompue.")
 
     def _confirm_sent(self) -> ApplyResult:
@@ -403,4 +444,6 @@ class EasyApply:
             self._click(button)
         if sent:
             return ApplyResult("postulée", "Candidature envoyée.", self.answers)
-        return ApplyResult("incertaine", "L'envoi n'a pas pu être confirmé : vérifie sur LinkedIn avant de réessayer.", self.answers)
+        return ApplyResult(
+            "incertaine", "L'envoi n'a pas pu être confirmé : vérifie sur LinkedIn avant de réessayer.", self.answers
+        )

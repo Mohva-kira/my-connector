@@ -56,9 +56,10 @@ export const settingsSchema = z.object({
   keyword: z.string().trim(),
   location: z.string().trim(),
   home_location: z.string().trim()
-    .refine((v) => v.replace(/\s+/g, " ").length <= 80, { error: "home_location ne peut pas dépasser 80 caractères." })
+    .refine((v) => Array.from(v.replace(/\s+/g, " ")).length <= 80, { error: "home_location ne peut pas dépasser 80 caractères." })
+    // Catégories Unicode Cc, Zl (U+2028) et Zp (U+2029), comme le serveur.
     // eslint-disable-next-line no-control-regex
-    .refine((v) => !/[\u0000-\u001f\u007f-\u009f]/.test(v), { error: "home_location ne doit contenir ni saut de ligne ni caractère de contrôle." }),
+    .refine((v) => !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v), { error: "home_location ne doit contenir ni saut de ligne ni caractère de contrôle." }),
   timezone: z.string().trim().refine(isValidTimezone, { error: "timezone doit être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide." }),
   remote_only: z.boolean(),
   caution: cautionSchema,
@@ -110,23 +111,25 @@ export const suppressionSchema = z.object({
 
 // ------------------------------------------------------------------ import manuel Indeed (POST /api/items/import, R-6)
 /** Hôte `indeed.com` ou sous-domaine, en https (backend/01 § 5.8.2) : `evil-indeed.com` et `indeed.com.evil.fr` refusés. */
-export const INDEED_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*indeed\.com(\/|$|\?|#)/i;
+export const INDEED_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*indeed\.com(:\d+)?(\/|$|\?|#)/i;
 export const MANUAL_TEXT_MIN = 200;
 export const MANUAL_TEXT_MAX = 20000;
 
-/** Bornes et messages du serveur ; `trim` avant `min`/`max`. `source_code` est ajouté à l'envoi. */
+/** Longueur en points de code, comme `len()` côté serveur (`String.length` compte les unités UTF-16 : un emoji vaut 2). */
+const codePoints = (value: string) => Array.from(value).length;
+
+/** Bornes et messages du serveur ; `trim` avant les bornes, longueurs en points de code. `source_code` est ajouté à l'envoi. */
 export const manualImportSchema = z.object({
-  url: z.string().trim().max(2000, { error: "colle l'adresse https de l'offre Indeed." })
-    .refine((v) => INDEED_HOST_RE.test(v), { error: "colle l'adresse https de l'offre Indeed." }),
+  url: z.string().trim()
+    .refine((v) => codePoints(v) <= 2000 && INDEED_HOST_RE.test(v), { error: "colle l'adresse https de l'offre Indeed." }),
   title: z.string().trim()
-    .min(1, { error: "renseigne le titre de l'offre (150 caractères maximum)." })
-    .max(150, { error: "renseigne le titre de l'offre (150 caractères maximum)." }),
-  company: z.string().trim().max(80, { error: "entreprise trop longue (80 caractères maximum)." }),
-  location: z.string().trim().max(120, { error: "lieu trop long (120 caractères maximum)." }),
+    .refine((v) => codePoints(v) >= 1 && codePoints(v) <= 150, { error: "renseigne le titre de l'offre (150 caractères maximum)." }),
+  company: z.string().trim().refine((v) => codePoints(v) <= 80, { error: "entreprise trop longue (80 caractères maximum)." }),
+  location: z.string().trim().refine((v) => codePoints(v) <= 120, { error: "lieu trop long (120 caractères maximum)." }),
   text: z.string().trim()
-    .min(MANUAL_TEXT_MIN, { error: "colle le texte complet de l'offre (200 caractères minimum)." })
-    .max(MANUAL_TEXT_MAX, { error: "texte trop long (20 000 caractères maximum)." }),
-  keyword: z.string().trim().max(80, { error: "mot-clé trop long (80 caractères maximum)." }),
+    .refine((v) => codePoints(v) >= MANUAL_TEXT_MIN, { error: "colle le texte complet de l'offre (200 caractères minimum)." })
+    .refine((v) => codePoints(v) <= MANUAL_TEXT_MAX, { error: "texte trop long (20 000 caractères maximum)." }),
+  keyword: z.string().trim().refine((v) => codePoints(v) <= 80, { error: "mot-clé trop long (80 caractères maximum)." }),
 }) satisfies z.ZodType<Omit<ManualItemBody, "source_code" | "keyword"> & { keyword: string }>;
 export type ManualImportForm = z.infer<typeof manualImportSchema>;
 

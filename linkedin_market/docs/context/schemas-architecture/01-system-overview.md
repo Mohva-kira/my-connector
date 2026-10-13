@@ -14,7 +14,7 @@
 | IA | **Claude** via SDK `anthropic` (modèle par défaut `claude-opus-5-5`, surchargeable par `ANTHROPIC_MODEL`), **optionnel** : l'interprète local à base de règles produit toujours une interprétation. | `[ACTUEL]` |
 | Fichiers | `linkedin_market_data/` ne garde que les rapports HTML, les dossiers de candidature et les PDF ; les anciens JSON / JSONL sont importés une fois au démarrage (`db/import_json.py`) puis renommés `*.migrated`. | `[ACTUEL]` (vague 1) |
 | Persistance | **PostgreSQL 18** via **SQLAlchemy 2.x** (ORM, style `Mapped[]`), driver **psycopg 3**, migrations **Alembic** (`upgrade head` au démarrage). Lancé localement (paquet système ou `linkedin_market/compose.yaml`, port publié sur `127.0.0.1` seulement) ; URL dans `LM_DATABASE_URL`. | `[ACTUEL]` (vague 1) |
-| Langage | **Python 3.14** (minimum requis), typage complet, linter **ruff** 0.16 (`linkedin_market/ruff.toml`, `requirements-dev.txt` ; dette initiale de 224 avertissements). | `[ACTUEL]` |
+| Langage | **Python 3.14** (minimum requis), typage complet, linter **ruff** 0.16 (`linkedin_market/ruff.toml`, `requirements-dev.txt` ; dette de 224 avertissements soldée le 2026-10-13 : 0 avertissement, tout code formaté ; exceptions `# noqa` listées dans `CLAUDE.md`). | `[ACTUEL]` |
 
 ### Pourquoi pas de Redis / Celery
 Une instance sert un seul utilisateur et un seul navigateur à la fois : une file distribuée n'apporterait que de la

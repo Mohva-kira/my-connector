@@ -144,15 +144,15 @@ de `/api/monitor` utilisent `public(with_logs=False)` (5 dernières lignes de `l
 | `200 OK` | Lecture, mise à jour synchrone (`PUT /api/settings`, `PATCH /api/applications/{id}`, `PUT /api/jobs/{id}/label`…), action synchrone (`POST /api/block/clear`, `/api/smtp/test`, `/api/tasks/{id}/cancel`, `/api/tasks/{id}/answer`, `/api/profile/skills`). |
 | `201 Created` | `[ACTUEL]` `POST /api/sources/{code}/consent`, `POST /api/suppressions` ; `[ACTUEL]` `POST /api/items/import` (vague 5). |
 | `202 Accepted` | Tâche créée : `POST /api/runs`, `/api/runs/rescore`, `/api/model/train`, `/api/jobs/{id}/prepare`, `/api/profile/import-linkedin`, `/api/applications/{id}/apply`, `/contacts/lookup`, `/messages`. |
-| `204 No Content` | `[CIBLE]` `DELETE /api/sources/{code}/consent`. |
+| `204 No Content` | `[ACTUEL]` `DELETE /api/sources/{code}/consent`. |
 | `400 Bad Request` | Non utilisé (FastAPI renvoie 422 pour un corps invalide). |
 | `401 Unauthorized` | Jeton local manquant ou invalide. |
 | `403 Forbidden` | `Host` non local ou `Origin` étrangère. |
 | `404 Not Found` | Rapport, tâche, offre, candidature, CV introuvable ; toute route `GET /api/…` inconnue (`{"detail": "Introuvable."}`). |
 | `405 Method Not Allowed` | Méthode non `GET` sur une route `/api/…` inexistante (capturée par la route SPA `GET /{path:path}`). |
-| `409 Conflict` | Tâche du même type déjà active ; identifiants LinkedIn absents ; blocage en cours ; aucune analyse disponible ; candidature déjà postulée ; tâche qui n'attend pas de réponse ou déjà terminée. destinataire en liste d'opposition (`409 Ce destinataire a demandé à ne plus être contacté.`, vague 4) ; `[CIBLE]` `risk_version` périmée. |
+| `409 Conflict` | Tâche du même type déjà active ; identifiants LinkedIn absents ; blocage en cours ; aucune analyse disponible ; candidature déjà postulée ; tâche qui n'attend pas de réponse ou déjà terminée. destinataire en liste d'opposition (`409 Ce destinataire a demandé à ne plus être contacté.`, vague 4) ; `risk_version` périmée à `POST /api/sources/{code}/consent` (`409 Le texte des risques a changé : relis la nouvelle version.`) ; source désactivée (`enabled = false`). |
 | `422 Unprocessable Entity` | Corps invalide (Pydantic) **et** règle métier de validation : réglage hors bornes, statut inconnu, `value` d'annotation, confirmation absente, adresse/objet invalides, test SMTP vers un tiers, mot-clé vide. |
-| `428 Precondition Required` | `[CIBLE]` action navigateur sans consentement actif à la version courante des risques de la source (I-16). Corps : `{"detail": "…", "source": "linkedin", "risk_version": "2026-10"}` — le frontend ouvre la popup de cette source ; **aucun rejeu automatique** (décision du 2026-10-09) : après acceptation, un bandeau « Relancer : {action} » attend un clic explicite ; pour un message, la relance rouvre la relecture et n'envoie rien (I-04). |
+| `428 Precondition Required` | `[ACTUEL]` (vague 3) action navigateur sans consentement actif à la version courante des risques de la source (I-16). Corps : `{"detail": "…", "source": "linkedin", "risk_version": "2026-10"}` — le frontend ouvre la popup de cette source ; **aucun rejeu automatique** (décision du 2026-10-09) : après acceptation, un bandeau « Relancer : {action} » attend un clic explicite ; pour un message, la relance rouvre la relecture et n'envoie rien (I-04). |
 | `429 Too Many Requests` | Plafond quotidien atteint (`apply_daily_max`, `message_daily_max`). |
 | `500 Internal Server Error` | Dossier de candidature hors du répertoire de données (`ValueError` de `folder_of`) ; toute exception non rattrapée. |
 | `502 Bad Gateway` | `POST /api/smtp/test` : le serveur SMTP refuse ou échoue (`OutreachError`). |
@@ -189,8 +189,8 @@ Notation : **Corps** = modèle Pydantic ou type ; **Erreurs** = code et `detail`
 }
 ```
 `session.age_hours` vaut `null` sans session enregistrée ; `blocked` vaut `null` hors période de repos. Aucun
-secret n'est exposé (test `test_monitor_and_status_shape`). `[CIBLE]` ajout de
-`"sources": [{"code": "linkedin", "consent_required": true}]`.
+secret n'est exposé (test `test_monitor_and_status_shape`). Pas de champ `sources` dans `/api/status` : les sources, leur
+consentement (`consent_required`) et leur repos se lisent dans `GET /api/sources` (§ 5.8).
 
 `GET /api/monitor` :
 ```json
@@ -275,7 +275,9 @@ caractères ; une compétence normalisée de plus de 60 caractères est ignorée
   "scores_outdated": true
 }
 ```
-Sans profil : `{"available": false, "message": "Aucun profil : dépose profil.md / profil.json / cv.pdf à la racine du projet, …", "overrides": {…}, "skills": [], "base_skills": [], "suggestions": {…}, "scores_outdated": false}`.
+`scores_outdated` (calculé à la lecture, sans drapeau persistant) est vrai s'il existe un rapport et que (a) les compétences du profil effectif diffèrent de celles du rapport, ou (b) le rapport contient `scoring_context` et `home_location` / `timezone` des réglages diffèrent de lui. Un rapport sans `scoring_context` n'est jamais obsolète au titre de (b) ; revenir à l'ancienne valeur remet l'indicateur à faux ; `PUT /api/settings` ne pose rien ; une nouvelle analyse, `POST /api/runs/rescore` et `POST /api/model/train` (qui passe par un recalcul) le remettent à faux ; un changement d'annotations ne le pose pas.
+
+Sans profil : `{"available": false, "message": "Aucun profil : dépose profil.md / profil.json / cv.pdf à la racine du projet, ou importe ton profil LinkedIn (CLI : relance avec --sources linkedin, sans --no-scrape ; interface web : lance l'import du profil LinkedIn depuis la page Profil).", "overrides": {…}, "skills": [], "base_skills": [], "suggestions": {…}, "scores_outdated": false}`.
 
 `POST /api/profile/skills` ajoute `linkedin_sync` (l'ajout local n'est **jamais** annulé) :
 
@@ -295,7 +297,7 @@ Sans profil : `{"available": false, "message": "Aucun profil : dépose profil.md
 | `GET /api/reports/{name}/html` | `200 text/html` sandboxé | `404 Rapport introuvable.` (aussi si le rapport existe en base mais que son fichier HTML manque : E-19 livré en vague 1) |
 
 Clés d'un rapport : `generated_at`, `window_days` (30), `request`, `profile`, `counts`, `top_terms`, `skill_demand`,
-`rising`, `weekly`, `gap`, `top_jobs`, `model`, `min_labels`, `interpretation`, `interpreter`, `interpreter_model` (nom du modèle Claude utilisé, `""` en mode local, absent des anciens rapports ; affiché par `InterpreterBadge`).
+`rising`, `weekly`, `gap`, `top_jobs`, `model`, `min_labels`, `interpretation`, `interpreter`, `interpreter_model` (nom du modèle Claude utilisé, `""` en mode local, absent des anciens rapports ; affiché par `InterpreterBadge`), `scoring_context` (`{"home_location": str, "timezone": str}` : réglages utilisés pour calculer les scores de ce rapport, E-18 ; clé de premier niveau, **absente des rapports antérieurs** qui ne sont jamais réécrits, I-02 ; jamais dans `profile`, donc absente du résumé envoyé à l'interpréteur).
 Depuis la vague 2 (G-4, E-7), `interpreter.interpret()` ne renvoie plus jamais `"none"` : un nouveau rapport porte
 toujours `claude` ou `local`. `interpreter = "none"` ne peut apparaître que sur un rapport **historique**, importé
 avant la vague 2 (`db/import_json.py` convertit déjà `none` → `local` à l'import, mais un rapport immuable créé par
@@ -320,7 +322,7 @@ ne peut pas être annulée (pas de contexte) ⇒ 409.
 
 | Méthode & chemin | Corps / paramètres | Succès | Erreurs |
 | :--- | :--- | :--- | :--- |
-| `POST /api/runs` | `RunBody` | `202` tâche `run` (`browser = scrape`) | `409 Une analyse est déjà en cours.` ; `422 Renseigne le mot-clé du poste visé (Paramètres ou lancement d'analyse).` ; `422` réglage invalide ; si `scrape` : `409` identifiants, `409` blocage ; `[CIBLE]` `428` |
+| `POST /api/runs` | `RunBody` | `202` tâche `run` (`browser = scrape`) | `409 Une analyse est déjà en cours.` ; `422 Renseigne le mot-clé du poste visé (Paramètres ou lancement d'analyse).` ; `422` réglage invalide ; si `scrape` : `428` consentement, `409` identifiants, `409` blocage (§ 5.8.1-5.8.2) |
 | `POST /api/runs/rescore` | — | `202` tâche `rescore` | `409 Un recalcul est déjà en cours.` ; `409 Aucune analyse disponible : lance d'abord une analyse.` |
 | `GET /api/jobs` | `min_score: float = 0`, `label: pertinente\|non_pertinente\|non_annotee`, `status: aucune\|<statut>`, `q: str` (recherche normalisée dans titre, entreprise, lieu) | `200` voir ci-dessous ; sans analyse `{"report": null, "jobs": []}` | — |
 | `GET /api/jobs/{job_id}` | — | `200` ligne d'offre + `text` (8 000 caractères max) + `owned_skills` | `404 Aucune analyse disponible : lance d'abord une analyse.` ; `404 Offre introuvable.` |
@@ -393,8 +395,8 @@ remplie (409).
 | `GET /api/applications/{job_id}` | — | `200` entrée + `cv`, `message`, `advice`, `offer` + `statuses` | `404 Aucune candidature préparée pour cette offre.` ; `500 Dossier de candidature hors du répertoire de données.` |
 | `PATCH /api/applications/{job_id}` | `ApplicationPatch` | `200` comme `GET` | `404` ; `422 Statut inconnu. Valeurs : préparée, contactée, postulée, entretien, refusée, abandonnée, externe, échec.` ; `422` liste (contact invalide) |
 | `GET /api/applications/{job_id}/cv.html` | — | `200 text/html` sandboxé | `404` candidature ; `404 CV introuvable.` |
-| `POST /api/applications/{job_id}/apply` | — | `202` tâche `apply` | `404` ; `409 Une candidature est déjà en cours pour cette offre.` ; `409 Cette candidature est déjà au statut « postulée ».` ; `409` identifiants / blocage ; `429 Plafond quotidien atteint (10 candidatures par jour) : réessaie demain ou relève-le dans les paramètres.` ; `[CIBLE]` `428` |
-| `POST /api/applications/{job_id}/contacts/lookup` | — | `202` tâche `contacts` | `404` ; `409 Une recherche de contacts est déjà en cours pour cette offre.` ; `409` identifiants / blocage ; `[CIBLE]` `428` |
+| `POST /api/applications/{job_id}/apply` | — | `202` tâche `apply` | `404` ; `409 Une candidature est déjà en cours pour cette offre.` ; `409 Cette candidature est déjà au statut « postulée ».` ; `409` identifiants / blocage ; `429 Plafond quotidien atteint (10 candidatures par jour) : réessaie demain ou relève-le dans les paramètres.` ; `428` consentement LinkedIn (§ 5.8.1) |
+| `POST /api/applications/{job_id}/contacts/lookup` | — | `202` tâche `contacts` | `404` ; `409 Une recherche de contacts est déjà en cours pour cette offre.` ; `409` identifiants / blocage ; `428` consentement LinkedIn (§ 5.8.1) |
 | `GET /api/applications/{job_id}/message-draft?to=` | — | `[ACTUEL]` (vague 4) `200 {"subject": "Candidature — <titre ≤ 100>", "body": "<message.txt>\n\n<signature>", "footer", "origin", "opposed"}` (§ 5.7.1) | `404` |
 | `POST /api/applications/{job_id}/messages` | `MessageBody` | `202` tâche `message` (`browser` si canal `linkedin`) | voir ordre ci-dessous |
 | `POST /api/smtp/test` | `TestMail {to: str \| null}` | `200 {"channel": "email", "to": "me@example.com", "subject": "Test my-connector", "attachments": []}` | `503 SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.` ; `503 <SMTP_SECURITY refusé, G-5>` (via `applications._require_smtp()`, partagé avec `/messages`) ; `422 Le test n'est autorisé que vers ton adresse de contact ou l'expéditeur SMTP.` ; `502 <OutreachError>` |
@@ -623,11 +625,42 @@ Pour `POST /api/profile/skills`, l'absence de consentement ne lève pas d'erreur
   `sources : Indeed s'importe à la main, elle ne se collecte pas.` ;
   `sources : la source « Malt » n'est pas encore disponible.` Puis `428` pour la **première** source `navigateur`
   sans consentement à jour (ordre de la liste).
-- **CLI (P-3, décidé le 2026-10-09, option A)** : `python -m linkedin_market` **avec collecte** refuse de démarrer
-  sans consentement à jour (même contrôle `SourceConsentService.require`) et s'arrête avec : « Accepte d'abord les
-  risques liés à LinkedIn (version 2026-10) dans l'interface web : Paramètres → Sources et consentements. » ;
-  `--no-scrape` reste utilisable sans consentement. Le texte des risques n'existe qu'à un seul endroit
-  (`src/content/risks.ts`).
+- **CLI (P-3, décidé le 2026-10-09, option A ; étendu en vague 5)** `[ACTUEL]` : `python -m linkedin_market --sources
+  <codes>` (codes séparés par des virgules, insensibles à la casse, doublons retirés, défaut `linkedin`, sans effet avec
+  `--no-scrape` qui saute aussi tous les contrôles ci-dessous). Avant toute saisie, `pipeline.check_cli_sources` applique
+  les mêmes préconditions que l'API ; un refus quitte avec **le code de sortie 1** et un message sur la sortie d'erreur
+  (aucune collecte, aucun navigateur) :
+  - `--sources` vide ⇒ erreur argparse (code 2) « indique au moins un code de source (ex. linkedin,france_travail). » ;
+  - source inconnue ⇒ « Source inconnue « x » : choisis parmi {codes}. » ;
+  - `indeed` ⇒ « Indeed ne se collecte pas : importe tes offres à la main depuis l'interface web (python -m linkedin_market.web). » ;
+  - source désactivée en base ⇒ « La source « X » n'est pas encore disponible. » ;
+  - consentement manquant (LinkedIn, Malt, WTTJ ; première source concernée dans l'ordre de la liste) ⇒ « Accepte d'abord les
+    risques liés à {label} (version {v}) dans l'interface web : Paramètres → Sources et consentements. » (message propre au CLI,
+    distinct du `detail` 428) ;
+  - `france_travail` sans identifiants ⇒ « Identifiants France Travail absents : renseigne FRANCE_TRAVAIL_CLIENT_ID et
+    FRANCE_TRAVAIL_CLIENT_SECRET dans le fichier .env. » ;
+  - source en repos de 6 h ⇒ message de `pipeline.guard_source_rest` (« {Source} a interrompu la navigation … ») ; pour LinkedIn,
+    celui d'`activity.guard_not_blocked`.
+  Ordre des contrôles : existence / import manuel / activation de chaque source, puis consentements, puis identifiants
+  France Travail, puis repos. `pipeline.collect` revérifie consentement et repos au début de la collecte (révocation entre-temps ⇒
+  même refus, code 1). `--help` décrit ces conditions.
+  **Blocage PENDANT la collecte** (checkpoint, authwall, défi sur une page de Malt / WTTJ / LinkedIn) : ce n'est pas un refus. La
+  source s'arrête net (I-06), l'événement `blocked` (`where="collecte"`, `source`) pose le repos de 6 h, les autres sources
+  continuent, le rapport est établi sur les données déjà collectées et le **code de sortie est 0** (décision de l'orchestrateur,
+  cohérente avec E-4 option A). La journalisation du blocage vient de `pipeline.collect` seul ; le CLI imprime en plus, sur la
+  sortie standard, un récapitulatif par source (`print_collect_summary` : « {Source} : n éléments enregistrés. » /
+  « Collecte interrompue par {Source} : rapport établi sur les données déjà collectées … » / « {Source} ignorée : {detail} »).
+  Une vérification manuelle ou un défi sur **Malt / WTTJ** est traité comme un blocage immédiat, sans attente
+  (`BrowserJobSource` n'utilise pas `on_manual_check`) ; seul LinkedIn attend la vérification manuelle
+  (`MANUAL_CHECK_TIMEOUT` = 180 s à la connexion).
+  **Vérification LinkedIn non terminée à la connexion** (`session.VerificationNotDoneError`, message `VERIFICATION_NOT_DONE`, G-7) :
+  c'est un **refus avant collecte**, pas un blocage en cours de collecte. `__main__._refuse` intercepte l'exception, quitte par
+  `sys.exit(message)` (**code 1**, sans trace) ; le navigateur est déjà fermé, l'événement `blocked` (`where="connexion"`) et le repos
+  de 6 h déjà posés. Multi-sources, LinkedIn en tête : aucune autre source n'est démarrée. LinkedIn pas en tête et une source
+  précédente déjà collectée : ses éléments restent enregistrés, mais **aucun rapport n'est produit** et le code est 1 (décision de
+  l'orchestrateur, 2026-10-13 : échec de connexion ; un rapport partiel changerait `pipeline.collect`, donc aussi la tâche web,
+  hors périmètre). La tâche web reste `échec` avec ce même message.
+  Le texte des risques n'existe qu'à un seul endroit (`src/content/risks.ts`).
 
 #### 5.8.2 Contrat de la vague 5 (brief du 2026-10-13, accepté le 2026-10-13) `[ACTUEL]`
 - **Activation** : révision Alembic `0003_enable_new_sources` : `UPDATE sources SET enabled = true WHERE code IN

@@ -240,10 +240,17 @@ def test_run_analysis_passe_reglages(monkeypatch):
     results = {"counts": {}, "request": {}}
     monkeypatch.setattr(services.interpreter, "interpret", fake_interpret)
     monkeypatch.setattr(services.pipeline, "build_profile", lambda request, text="": PROFILE)
-    monkeypatch.setattr(services.pipeline, "analyse", lambda request, prof: (results, []))
+    analysed: list[tuple[str, str]] = []
+
+    def fake_analyse(request, prof, home_location="", timezone=""):
+        analysed.append((home_location, timezone))  # le matching reçoit les réglages explicitement (E-18)
+        return results, []
+
+    monkeypatch.setattr(services.pipeline, "analyse", fake_analyse)
     monkeypatch.setattr(services.pipeline, "summary_for_interpreter", lambda r: {})
     monkeypatch.setattr(report, "write", lambda r: (None, types.SimpleNamespace(stem="rapport", name="rapport.json")))
     monkeypatch.setattr(services.activity, "record", lambda *a, **k: None)
     request = services.SearchRequest(keyword="python")
     services.run_analysis(Ctx(), request, scrape=False, interpreter_name="local")
     assert seen == {"name": "local", "home_location": "Lyon", "timezone": "Europe/Paris"}
+    assert analysed == [("Lyon", "Europe/Paris")]

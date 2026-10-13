@@ -10,10 +10,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_TRANSLATE = str.maketrans({
-    "‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-", "…": "...",
-    " ": " ", "•": "-", "→": "->", "✓": "v", "✗": "x",
-})
+_TRANSLATE = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "–": "-",
+        "—": "-",
+        "…": "...",
+        " ": " ",
+        "•": "-",
+        "→": "->",
+        "✓": "v",
+        "✗": "x",
+    }
+)
 _INLINE = re.compile(r"(\*\*|__|`|\*(?=\S)|(?<=\S)\*)")
 
 
@@ -37,7 +49,9 @@ def render_pdf(markdown: str, title: str = "CV") -> bytes:
     pdf.add_page()
     width = pdf.w - pdf.l_margin - pdf.r_margin
 
-    def write(text: str, size: float, style: str = "", indent: float = 0, before: float = 0, after: float = 1.5) -> None:
+    def write(
+        text: str, size: float, style: str = "", indent: float = 0, before: float = 0, after: float = 1.5
+    ) -> None:
         pdf.set_font("Helvetica", style, size)
         pdf.ln(before)
         pdf.set_x(pdf.l_margin + indent)
@@ -57,7 +71,13 @@ def render_pdf(markdown: str, title: str = "CV") -> bytes:
             if level == 1:
                 write(heading.group(2), 18, "B", after=2)
             else:
-                write(heading.group(2).upper() if level == 2 else heading.group(2), 11.5 if level == 2 else 10.5, "B", before=3, after=1)
+                write(
+                    heading.group(2).upper() if level == 2 else heading.group(2),
+                    11.5 if level == 2 else 10.5,
+                    "B",
+                    before=3,
+                    after=1,
+                )
                 if level == 2:
                     y = pdf.get_y()
                     pdf.set_draw_color(200, 200, 200)

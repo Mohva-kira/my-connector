@@ -46,6 +46,7 @@ le seul nom autorisé dans le code (classes, colonnes, clés JSON). Ne jamais in
 | **Purge** | `purge` / `RetentionService.purge` | Suppression, par la tâche `purge` (non navigateur, au démarrage puis toutes les 24 h), des données arrivées à échéance : éléments `post`/`person` à 30 jours et offres sans candidature ni annotation à 90 jours (`collected_items.purge_after`, I-10), contacts entreprise 3 ans après le dernier contact (`company_contacts.purge_after`, I-14), sessions de plateforme expirées, événements d'activité et tâches terminées de plus de 12 mois. Ne touche jamais `suppression_list`, `reports`, `applications`. Journalise des compteurs par table, jamais de contenu. `[ACTUEL]` (vague 6). |
 | **Rédaction de tiers** | `nlp.redact_third_parties` | Remplacement par `[personne]` des emails, téléphones, URL `linkedin.com/in/…`, noms de contacts connus et motifs LinkedIn (« X et des millions… », « relations travaillent ici ») dans le texte d'une offre avant son envoi à Claude pour la génération de CV (I-11, E-6). `[ACTUEL]` (vague 6) ; les noms connus sont ceux de tous les contacts de l'utilisateur. |
 | **Lieu de résidence / fuseau** | `home_location`, `timezone` (`user_settings`) | Lieu et fuseau horaire IANA de l'utilisateur (ex. `Africa/Abidjan`), vides par défaut ; injectés dans les prompts Claude, les libellés de l'interprète local et le CV local à la place de valeurs codées en dur (E-18). `[ACTUEL]` (vague 6) ; à saisir dans Paramètres après la migration `0004`. |
+| **Refus CLI** | `pipeline.SourceRefused` / `check_cli_sources` | Refus, avant toute collecte lancée par le CLI (`--sources`), d'une source inconnue, d'Indeed (`import_manuel`), désactivée ou sans identifiants (France Travail) ; avec le consentement manquant (I-16) et le repos de 6 h (I-06), il fait quitter le CLI avec le **code 1** et un message actionnable. Un blocage survenu *pendant* la collecte n'est pas un refus : rapport partiel, code 0. `[ACTUEL]` (vague 5). |
 | **Blocage** | `activity_events(kind="blocked")` | Checkpoint, authwall, CAPTCHA ou perte de session détecté. Ouvre une **période de repos** de 6 h pendant laquelle aucune action navigateur n'est permise. |
 | **Plafond quotidien** | `apply_daily_max`, `message_daily_max` | Nombre maximal de candidatures (10 par défaut) et de messages (15 par défaut) par jour. |
 
@@ -74,10 +75,10 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 
 ## 3. Matrice Actions Métier → Impact Système
 
-| Action Métier | Entrée Frontend | Services Backend Impactés | Tables Modifiées `[CIBLE]` | Tâche / Événement |
+| Action Métier | Entrée Frontend | Services Backend Impactés | Tables Modifiées | Tâche / Événement |
 | :--- | :--- | :--- | :--- | :--- |
-| `AccepterRisquesSource` | Popup « Risques LinkedIn » → « J'accepte » | `SourceConsentService` | `source_consents` | — |
-| `LancerAnalyse` | Dashboard → « Lancer » (`POST /api/runs`) | `pipeline.scrape`, `nlp`, `trends`, `matching`, `interpreter`, `report` | `collected_items`, `reports`, `tasks`, `activity_events` | `Task(kind="run", browser=scrape)` |
+| `AccepterRisquesSource` | Popup « Risques LinkedIn » → « J'accepte » | `consent` (`consent.py`) | `source_consents` | — |
+| `LancerAnalyse` | Dashboard → « Lancer » (`POST /api/runs`) | `pipeline.collect`, `nlp`, `trends`, `matching`, `interpreter`, `report` | `collected_items`, `reports`, `tasks`, `activity_events` | `Task(kind="run", browser=scrape)` |
 | `ReanalyserHistorique` | Dashboard → « Analyser sans collecte » | `pipeline.analyse`, `interpreter` | `reports`, `tasks` | `Task(kind="run", browser=False)` |
 | `RecalculerScores` | Offres → « Recalculer » (`POST /api/runs/rescore`) | `matching` | `tasks` | `Task(kind="rescore")` |
 | `AnnoterOffre` | Offres → 👍 / 👎 (`PUT /api/jobs/{id}/label`) | `storage.save_labels` | `labels` | — |
@@ -86,7 +87,7 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 | `PostulerEasyApply` | Candidature → « Postuler » (`POST /api/applications/{id}/apply`) | `apply_bot`, `session`, `guards` | `applications`, `activity_events` (`apply`) | `Task(kind="apply", browser=True)` |
 | `ChercherRecruteurs` | Candidature → « Trouver les recruteurs » | `contacts` | `company_contacts` | `Task(kind="contacts", browser=True)` |
 | `EnvoyerMessage` | Candidature → « Envoyer » après relecture | `outreach` (SMTP ou LinkedIn), contrôle `suppression_list` | `outreach_messages`, `applications` (→ `contactée`), `activity_events` | `Task(kind="message")` |
-| `EnregistrerOpposition` | Candidature → « Ce contact refuse d'être recontacté » | `SuppressionService` | `suppression_list`, `company_contacts` | — |
+| `EnregistrerOpposition` | Candidature → « Ce contact refuse d'être recontacté » | `application.record_opposition` | `suppression_list`, `company_contacts` | — |
 | `ModifierProfil` | Compétences → ajouter / retirer | `settings`, `profile_sync` (si `linkedin_skill_sync`) | `profile_skill_overrides` | `Task(kind="profile_skill", browser=True)` |
 | `ImporterProfilLinkedIn` | Compétences → « Importer depuis LinkedIn » | `profile`, `session` | `candidate_profiles` | `Task(kind="import_profile", browser=True)` |
 | `LeverBlocage` | Dashboard → « J'ai vérifié mon compte » (`POST /api/block/clear`) | `activity` | `activity_events` (`unblocked`) | — |
@@ -95,7 +96,7 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
 ## 4. Niveaux de Consistance & Traçabilité
 
 - **Consistance forte (transaction ACID PostgreSQL)** — `[ACTUEL]` pour le changement de statut et l'activation
-  d'un modèle, `[ACTUEL]` pour le consentement (vague 3), `[CIBLE]` pour l'envoi de message :
+  d'un modèle, `[ACTUEL]` pour le consentement (vague 3) et pour l'envoi de message (vagues 2 et 4) :
   - changement de statut de candidature + entrée d'historique ;
   - envoi d'un message : contrôle `suppression_list` + contrôle de plafond + insertion `outreach_messages` dans
     la même transaction (verrou `SELECT … FOR UPDATE` sur la ligne `applications`) ;
@@ -105,7 +106,7 @@ Ces règles s'appliquent à **tout** point d'entrée : CLI (`python -m linkedin_
   tableau de bord (`/api/monitor`), purge de rétention (quotidienne).
 - **Sérialisation des actions navigateur** : une seule session Selenium à la fois par instance ; les tâches
   `browser=True` attendent en `en_attente` (verrou du `TaskManager`).
-- **Traçabilité** : chaque tâche a un `id` (UUID v7) repris dans ses logs et, `[CIBLE]`, dans
+- **Traçabilité** : chaque tâche a un `id` (UUID v7) repris dans ses logs et, `[CIBLE]` (non livré), dans
   `activity_events.data.task_id`. Toutes les dates sont stockées en **UTC** (`timestamptz`) et exposées en ISO 8601
   suffixé `Z` `[ACTUEL]` (vague 1).
 

@@ -15,12 +15,26 @@ import logging
 import re
 import sys
 import webbrowser
+from typing import NoReturn
 
-from . import application, config, consent, interpreter, matching, report, retention, settings, storage
+from . import activity, application, config, consent, interpreter, matching, report, retention, settings, storage
 from . import profile as profile_mod
 from .db.bootstrap import prepare_database
 from .models import Profile, SearchRequest
-from .pipeline import ProfileMissingError, analyse, build_profile, scrape, summary_for_interpreter
+from .pipeline import (
+    STATUS_BLOCKED,
+    STATUS_OK,
+    CollectOutcome,
+    ProfileMissingError,
+    SourceRefused,
+    analyse,
+    build_profile,
+    check_cli_sources,
+    collect,
+    summary_for_interpreter,
+)
+from .session import VerificationNotDoneError
+from .sources import label_of
 
 log = logging.getLogger("linkedin_market")
 
@@ -205,6 +219,49 @@ def prepare_applications(
             print("Statut : postulée.")
 
 
+def _source_codes(raw: str) -> list[str]:
+    """« linkedin, Malt » -> ``["linkedin", "malt"]`` (minuscules, sans doublon, ordre conservé)."""
+    codes = list(dict.fromkeys(c.strip().lower() for c in raw.split(",") if c.strip()))
+    if not codes:
+        raise argparse.ArgumentTypeError("indique au moins un code de source (ex. linkedin,france_travail).")
+    return codes
+
+
+def print_collect_summary(outcome: CollectOutcome) -> None:
+    """Récapitulatif par source en sortie standard (``pipeline.collect`` journalise déjà les échecs : pas de doublon).
+
+    Un blocage survenu pendant la collecte n'arrête pas le CLI : le rapport est établi sur les données déjà
+    collectées et le code de sortie reste 0 ; seuls les refus avant collecte sortent en code 1.
+    """
+    print("\nCollecte :")
+    for row in outcome.sources:
+        label = label_of(row.code)
+        if row.status == STATUS_OK:
+            print(f"  - {label} : {row.items} éléments enregistrés.")
+        elif row.status == STATUS_BLOCKED:
+            print(
+                f"  - Collecte interrompue par {label} : rapport établi sur les données déjà collectées "
+                f"({row.items} éléments enregistrés). Actions navigateur suspendues 6 h pour cette source ; "
+                "vérifie ton compte dans un navigateur normal avant de relancer."
+            )
+        else:
+            print(f"  - {label} ignorée : {row.detail}")
+
+
+def _refuse(exc: Exception) -> NoReturn:
+    """Quitte avec un code non nul et un message actionnable (P-3) ; relance ``exc`` si elle n'est pas un refus."""
+    if isinstance(exc, consent.SourceConsentRequired):
+        # P-3 (décidé le 2026-10-09) : message propre au CLI, distinct du détail HTTP 428 (backend/01 § 5.8.1).
+        sys.exit(
+            f"Accepte d'abord les risques liés à {exc.label} (version {exc.risk_version}) dans l'interface "
+            "web : Paramètres → Sources et consentements."
+        )
+    if isinstance(exc, SourceRefused | activity.BlockedByLinkedIn | VerificationNotDoneError):
+        # Vérification non terminée à la connexion : repos de 6 h déjà posé, navigateur fermé, aucune relance (I-06).
+        sys.exit(str(exc))
+    raise exc
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="linkedin_market", description=__doc__.split("\n")[0])
     p.add_argument("--keyword", "-k", help="mot-clé du poste visé")
@@ -220,7 +277,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--years", type=int, help="années d'expérience")
     p.add_argument("--seniority", choices=list(matching.nlp.SENIORITY_LEVELS))
-    p.add_argument("--no-scrape", action="store_true", help="réanalyser l'historique sans aller sur LinkedIn")
+    p.add_argument(
+        "--sources",
+        type=_source_codes,
+        default=["linkedin"],
+        metavar="CODES",
+        help=(
+            "sources à collecter, codes séparés par des virgules : linkedin, france_travail, malt, wttj "
+            "(défaut : linkedin). Malt, WTTJ et LinkedIn exigent d'avoir accepté leurs risques dans l'interface "
+            "web (Paramètres → Sources et consentements) ; France Travail exige FRANCE_TRAVAIL_CLIENT_ID et "
+            "FRANCE_TRAVAIL_CLIENT_SECRET dans .env ; Indeed s'importe à la main depuis l'interface web. "
+            "Une source bloquée est mise au repos 6 h. Sans effet avec --no-scrape."
+        ),
+    )
+    p.add_argument("--no-scrape", action="store_true", help="réanalyser l'historique sans collecter de source")
     p.add_argument("--label", type=int, default=None, help="nombre d'offres à annoter (0 = aucune)")
     p.add_argument("--interpreter", choices=list(config.INTERPRETERS), help="défaut : LINKEDIN_INTERPRETER ou claude")
     p.add_argument("--apply", action="store_true", help="aller directement à la préparation des candidatures")
@@ -249,34 +319,32 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as exc:  # noqa: BLE001 - une purge en échec ne doit pas empêcher l'analyse
         log.warning("Purge de rétention impossible : %s", exc.__class__.__name__)
     prefs = settings.load_settings()
+    if not args.no_scrape:
+        try:
+            check_cli_sources(args.sources)  # avant toute saisie : refus immédiat, code de sortie non nul
+        except (SourceRefused, consent.SourceConsentRequired, activity.BlockedByLinkedIn) as exc:
+            _refuse(exc)
     request = collect_request(args)
 
     linkedin_text = ""
     if not args.no_scrape:
-        want_profile = request.profile_source == "linkedin" or (
-            request.profile_source == "auto" and profile_mod.find_profile_file() is None
+        want_profile = "linkedin" in args.sources and (
+            request.profile_source == "linkedin"
+            or (request.profile_source == "auto" and profile_mod.find_profile_file() is None)
         )
         try:
-            outcome = scrape(request, want_profile)
-        except consent.SourceConsentRequired as exc:
-            # P-3 (décidé le 2026-10-09) : message propre au CLI, distinct du détail HTTP 428 (backend/01 § 5.8.1).
-            sys.exit(
-                f"Accepte d'abord les risques liés à {exc.label} (version {exc.risk_version}) dans l'interface "
-                "web : Paramètres → Sources et consentements."
-            )
+            outcome = collect(request, args.sources, want_profile)
+        except (consent.SourceConsentRequired, activity.BlockedByLinkedIn, VerificationNotDoneError) as exc:
+            _refuse(exc)  # révoqué ou mis au repos entre la vérification et la collecte
         linkedin_text = outcome.profile_text
-        if outcome.blocked:
-            log.warning(
-                "Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées. "
-                "Actions navigateur suspendues 6 h ; vérifie ton compte dans un navigateur normal avant de relancer."
-            )
+        print_collect_summary(outcome)
     try:
         prof = build_profile(request, linkedin_text)
     except ProfileMissingError as exc:
         sys.exit(str(exc))
     log.info("Profil (%s) : %d compétences détectées.", prof.origin, len(prof.skills))
 
-    results, scored = analyse(request, prof)
+    results, scored = analyse(request, prof, prefs["home_location"], prefs["timezone"])
 
     label_count = args.label
     if label_count is None and not args.no_interactive and scored:
@@ -284,7 +352,12 @@ def main(argv: list[str] | None = None) -> None:
     if label_count and scored:
         if label_jobs(scored, label_count):
             model = matching.train_from_labels(
-                prof, request.keyword, storage.load_labels(), storage.load_labeled_items()
+                prof,
+                request.keyword,
+                storage.load_labels(),
+                storage.load_labeled_items(),
+                prefs["home_location"],
+                prefs["timezone"],
             )
             if model:
                 log.info(
@@ -292,7 +365,7 @@ def main(argv: list[str] | None = None) -> None:
                     model.n_labels,
                     (model.train_accuracy or 0) * 100,
                 )
-                results, scored = analyse(request, prof)
+                results, scored = analyse(request, prof, prefs["home_location"], prefs["timezone"])
             else:
                 log.info(
                     "Pas encore assez d'annotations (min. %d, des deux types) pour entraîner.", matching.MIN_LABELS

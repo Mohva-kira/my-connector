@@ -18,15 +18,18 @@ n'importe ni FastAPI ni Selenium ; les routeurs n'importent jamais Selenium (`br
   contrôles d'objet et de destinataire de `send_message`, liste blanche du test SMTP. `[CIBLE]` les déplacer dans
   les services (`JobQueryService.list()`, `OutreachService.check_request()`), le routeur ne gardant que le mapping
   HTTP. Le CLI (`__main__.py`) doit appeler les mêmes services, pas dupliquer les règles.
+- `[ACTUEL]` CLI : `VerificationNotDoneError` (vérification LinkedIn non terminée à la connexion) est traitée comme un refus avant
+  collecte (`__main__._refuse` : `sys.exit(message)`, code 1, sans trace ; aucun rapport) ; la tâche web reste `échec` avec le même
+  message (`01` § 5.8.1, `05` § `session.login`).
 
 ### 1.2 Service / Use-Case Layer — `web/services.py`, `pipeline.py`, `web/guards.py`
 Fonctions de cas d'usage, toutes de signature `(ctx: TaskContext, …) -> dict` quand elles tournent en tâche :
 
 | Fonction | Cas d'usage | Préconditions revérifiées dans la tâche | Écritures |
 | :--- | :--- | :--- | :--- |
-| `run_analysis(ctx, request, scrape, interpreter_name)` | `LancerAnalyse` / `ReanalyserHistorique` | `guard_not_blocked()` (dans `pipeline.scrape`) | `collected_items`, `candidate_profiles.text`, `reports` (+ HTML), `activity run` |
-| `rescore(ctx)` | `RecalculerScores` | analyse existante | nouveau rapport (reprend l'interprétation précédente) |
-| `train_model(ctx)` | `EntrainerModele` | ≥ 6 annotations, deux classes | `matching_models` (version + 1, active), nouveau rapport |
+| `run_analysis(ctx, request, scrape, interpreter_name, sources=None)` | `LancerAnalyse` / `ReanalyserHistorique` | consentement (I-16) et repos de 6 h de chaque source `navigateur` (dans `pipeline.collect`) | `collected_items`, `candidate_profiles.text`, `reports` (+ HTML), `activity run` / `blocked` |
+| `rescore(ctx)` | `RecalculerScores` | analyse existante ; lit `home_location` / `timezone` dans les réglages | nouveau rapport (reprend l'interprétation précédente) |
+| `train_model(ctx)` | `EntrainerModele` | ≥ 6 annotations, deux classes ; lit `home_location` / `timezone` dans les réglages | `matching_models` (version + 1, active), nouveau rapport |
 | `prepare_application(ctx, job_id)` | `PreparerCandidature` | offre dans le dernier rapport **et** dans l'historique | dossier, `applications` |
 | `apply_job(ctx, job_id)` | `PostulerEasyApply` | plafond `apply`, blocage | `cv.pdf`, `applications` + `application_events`, `labels`, `activity apply` |
 | `lookup_contacts(ctx, job_id)` | `ChercherRecruteurs` | blocage | `company_contacts` fusionnés, historique |
@@ -44,10 +47,29 @@ Cible : un module par cas d'usage sous `linkedin_market/services/` (`analysis.py
 
 ### 1.3 Domaine — `nlp.py`, `trends.py`, `matching.py`, `profile.py`, `application.py`, `report.py`, `interpreter.py`, `settings.py`
 Calculs purs (sans réseau) :
-- **Matching** : `build_features()` (8 critères ∈ [0, 1]), `MatchingModel.fit()` (descente de gradient,
+- **Pipeline de collecte** (`pipeline.py`) `[ACTUEL]` : `collect(request, source_codes, want_profile, *, interactive, on_manual_check, should_stop, on_ready) -> CollectOutcome`
+  (une `SourceReport {code, items, status, detail}` par source ; `blocked_sources`, `blocked`) appelle `scrape()` pour LinkedIn
+  (`ScrapeOutcome`), `_collect_france_travail()` et `_collect_browser()` ; elle revérifie consentement et repos de 6 h.
+  `check_cli_sources(source_codes)` (CLI uniquement, avant toute saisie) lève `SourceRefused` (source inconnue, `import_manuel`
+  comme Indeed, source `enabled = false`, identifiants France Travail absents), `consent.SourceConsentRequired` ou
+  `activity.BlockedByLinkedIn` (repos), voir `01` § 5.8.1 (messages et codes de sortie du CLI).
+  `analyse(request, prof, home_location, timezone)` : les deux réglages sont **obligatoires** (le domaine ne lit pas la base) et
+  sont transmis par l'appelant (`web/services.py`, `__main__.py`).
+- **Matching** : `build_features(jobs, profile, keyword, home_location, timezone)` (8 critères ∈ [0, 1] ; `train_from_labels(profile, keyword, labels, labeled_items, home_location, timezone)` idem : les deux réglages sont des paramètres **positionnels obligatoires, sans défaut**, pour qu'aucun appelant ne les oublie ; `matching.location_ok_pattern(home_location="", timezone="")` garde des défauts vides), `MatchingModel.fit()` (descente de gradient,
   `lr=0.3`, `epochs=3000`, `l2=0.05`, classes repondérées, normalisation moyenne/écart-type), `score_jobs()`
   (score = probabilité × 100, arrondi à 0,1), `skill_gap()`. Poids a priori `PRIOR_WEIGHTS =
   [2.5, 2.0, 1.2, 0.6, 0.5, 0.6, 0.8, 0.4]`, biais `-4.3`.
+- **Critère `localisation_compatible`** (E-18 étendu au matching, `[ACTUEL]` ; aucun lieu codé en dur) : 0 si une mention bloquante (« sur site »,
+  « hybride », « us only »…), 1 si une mention neutre (`worldwide`, `anywhere`, `monde`, `international`, `emea`, `remote`) **ou** un
+  terme issu de `home_location` / `timezone` apparaît dans l'offre (`matching.location_ok_pattern` : segments de `home_location`
+  séparés par `, ; / ( )`, ville du fuseau IANA, ≥ 3 lettres, mots entiers), 0,5 sinon. Les anciennes valeurs en dur
+  (Afrique, Abidjan, Côte d'Ivoire) ont disparu ; réglages vides ⇒ aucun lieu n'est privilégié.
+  **Dérive** `[ACTUEL]` : le modèle appris enregistre moyenne et écart-type de chaque critère ; quand `home_location` /
+  `timezone` changent, les valeurs de ce critère changent. Chaque rapport porte `scoring_context` (réglages utilisés) ;
+  `GET /api/profile` renvoie `scores_outdated = true` tant que les réglages diffèrent de ceux du rapport, et l'interface affiche
+  le bandeau « scores obsolètes » (`01` § 5.3). Un recalcul (`POST /api/runs/rescore`), une nouvelle analyse ou un entraînement
+  le remettent à faux. Le modèle déjà entraîné n'est pas invalidé : ré-entraîne-le (`POST /api/model/train`) pour
+  recalibrer ce critère.
 - **Tendances** : fenêtre `TREND_WINDOW_DAYS = 30` appliquée à la lecture (`storage.load_items` filtre
   `posted_at >= aujourd'hui − 30 j`, la dernière version d'un `id` gagne).
 - **Statuts de candidature** : `STATUSES`, `_PROGRESS`, `advance_status()` (I-03).
@@ -142,7 +164,7 @@ Implémentation livrée (`linkedin_market/web/services.py::reserve_message`, cf.
 def reserve_message(job_id: str, *, channel: str, to: str, subject: str, body: str, attach_cv: bool) -> UUID:
     start, end = activity.day_bounds()
     with user_transaction() as (s, uid):
-        found = applications_repo.get(s, uid, job_id, lock=True)          # FOR UPDATE candidature
+        found = applications_repo.get(s, uid, job_id, lock=True)  # FOR UPDATE candidature
         if found is None:
             raise application.ApplicationNotFound(job_id)
         limit = settings_repo.get_settings(s, uid, lock=True)["message_daily_max"]  # FOR UPDATE user_settings
@@ -198,6 +220,4 @@ Résolus et retirés à l'acceptation des vagues 5-6 (2026-10-13) : E-6 (`nlp.re
 (réglages `home_location` / `timezone`, `01` § 5.2).
 Écart « 3 ans » résolu (vague 6) : l'intervalle calendaire SQL `interval '3 years'` fait foi (`03` § 6), pas 1095 jours. Les numéros ne sont pas réattribués.
 
-| # | Écart | Référence | Correction proposée |
-| :--- | :--- | :--- | :--- |
-| E-21 | Lot 1 `02` § 6 : l'événement `blocked` porterait `until` ; le code n'enregistre que `where` (+ `job`) et calcule `until` à la lecture. | lot 1 `02` § 6 | Corriger la table du lot 1 (calcul à la lecture conservé). Toujours ouvert : `until` reste calculé à la lecture (`activity.py`), pas stocké. |
+Aucun écart ouvert au 2026-10-13. E-21 (lot 1 `02` § 6 : `until` de l'événement `blocked`) est fermé : la table du lot 1 précise que `until` est calculé à la lecture (`activity.block_status()`), non stocké.

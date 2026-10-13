@@ -33,7 +33,7 @@ sequenceDiagram
     end
 ```
 
-## 2. Flux Critique 2 : Acceptation des Risques d'une Source `[CIBLE]`
+## 2. Flux Critique 2 : Acceptation des Risques d'une Source `[ACTUEL]` (vague 3)
 
 ```mermaid
 sequenceDiagram
@@ -184,7 +184,7 @@ sequenceDiagram
     API->>TM: submit("message")
     API-->>SPA: 202 tâche
     TM->>OUT: send_email(...)
-    OUT->>SMTP: STARTTLS + AUTH + DATA (Message-ID, en-tête List-Unsubscribe [CIBLE])
+    OUT->>SMTP: STARTTLS + AUTH + DATA (Message-ID, en-tête List-Unsubscribe mailto, vague 4)
     alt Succès
         TM->>DB: status='envoyé', application → contactée (sans régression), activity_events(kind="message_email")
     else OutreachError
@@ -194,7 +194,7 @@ sequenceDiagram
 
 ## 6. Événements du Journal d'Activité
 
-Le journal (`activity.jsonl` aujourd'hui, table `activity_events` demain) sert au monitoring, aux plafonds
+Le journal (table `activity_events` `[ACTUEL]` depuis la vague 1 ; l'ancien `activity.jsonl` est importé une fois puis renommé `*.migrated`) sert au monitoring, aux plafonds
 quotidiens et aux périodes de repos. Un événement = `{at, kind, ...data}`.
 
 | `kind` | Émis par | Données | Consommé par |
@@ -203,8 +203,8 @@ quotidiens et aux périodes de repos. Un événement = `{at, kind, ...data}`.
 | `apply` | `services.apply_job` | `job`, `title` | plafond `apply_daily_max` |
 | `message_email`, `message_linkedin` | `services.send_message` | `job`, `to` | plafond `message_daily_max` |
 | `profile_skill` | `services.add_skill` | `skill`, `linkedin_name` | `/api/monitor` |
-| `blocked` | toute action navigateur | `where`, `job?` (la fin du repos `until` est calculée à la lecture par `block_status()`) | `guard_not_blocked()` (repos 6 h) |
-| `unblocked` | `POST /api/block/clear` | — | lève le repos en cours |
+| `blocked` | toute action navigateur | `where`, `source` (absent ⇒ `linkedin`), `job?` ; **`until` n'est pas stocké** : la fin du repos est calculée à la lecture (`at` + 6 h) par `activity.block_status()` | `guard_not_blocked(source)` (repos 6 h par source) |
+| `unblocked` | `POST /api/block/clear` | `source` | lève le repos en cours |
 | `error` | erreurs non métier | `message` | `/api/monitor` |
 
 ## 7. Résilience & Gestion des Pannes

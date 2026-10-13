@@ -91,9 +91,14 @@ export default function Jobs() {
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState<ManualItemCreated | null>(null);
   const { data: sources } = useSources();
+  // Sources activées seulement (celles « bientôt » n'ont aucune offre). Valeur d'URL inconnue ou désactivée : gardée,
+  // sinon le sélecteur afficherait une valeur qui n'est pas dans sa liste.
   const sourceOptions: { code: string; label: string }[] = sources
-    ? sources.map((s) => ({ code: s.code, label: s.label }))
+    ? sources.filter((s) => s.enabled).map((s) => ({ code: s.code, label: s.label }))
     : (Object.keys(SOURCE_LABEL) as SourceCode[]).map((code) => ({ code, label: SOURCE_LABEL[code] }));
+  if (filters.source && !sourceOptions.some((o) => o.code === filters.source)) {
+    sourceOptions.push({ code: filters.source, label: sourceLabel(filters.source) });
+  }
   const label = useLabelJob();
   const train = useAction(() => api<Task>("/model/train", { method: "POST" }), [["tasks"]]);
   const rescore = useAction(() => api<Task>("/runs/rescore", { method: "POST" }), [["tasks"]]);
