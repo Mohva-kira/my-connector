@@ -176,7 +176,8 @@ linkedin_market/migrations/
     ├── 0001_initial.py        # schéma complet + données de référence sources + trigger d'immuabilité
     ├── 0002_contact_opposed_at.py  # [ACTUEL] vague 4 : company_contacts.opposed_at timestamptz NULL (I-13)
     ├── 0003_enable_new_sources.py  # [ACTUEL] vague 5 : sources.enabled = true (france_travail, malt, wttj, indeed)
-    └── 0004_<objet>.py        # évolutions de schéma suivantes
+    ├── 0004_retention_and_settings.py  # [ACTUEL] vague 6 : user_settings.home_location / timezone (TEXT NOT NULL DEFAULT ''), ck_tasks_kind accepte 'purge'
+    └── 0005_<objet>.py        # évolutions de schéma suivantes
 linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_market_data/ (pas une révision Alembic)
 ```
 - Identifiants de révision **séquentiels sur 4 chiffres** (`alembic revision --rev-id 0002 -m "…"`,
@@ -232,14 +233,14 @@ CREATE TRIGGER trg_reports_immutable BEFORE UPDATE ON reports
 ```
 
 ### 3.3 bis Précisions de schéma validées (vague 1, 2026-10-08)
-- `CHECK` sur **tous** les champs énumérés, y compris `tasks.kind` : un nouveau type de tâche (ex. `purge`, vague 6)
-  exige une révision `0003_…` (ou suivante) **et** l'entrée au glossaire avant le code.
+- `CHECK` sur **tous** les champs énumérés, y compris `tasks.kind` : un nouveau type de tâche (ex. `purge`, livré par
+  `0004`) exige une révision Alembic **et** l'entrée au glossaire avant le code.
 - `CHECK` « chemin relatif » sur `reports.html_path` et `applications.folder_path` (ni `/` initial, ni `..`).
 - Textes `NOT NULL DEFAULT ''` sauf `collected_items.text`, `company_contacts.email`, `outreach_messages.error`,
   `outreach_messages.smtp_message_id`, `tasks.error` (NULL = absent). `tasks.params` / `tasks.meta` `NOT NULL
   DEFAULT '{}'` ; `tasks.id DEFAULT uuidv7()` en secours (Python fournit `uuid.uuid7()`).
 - `company_contacts.purge_after NOT NULL DEFAULT now() + interval '3 years'` (recalculé à chaque contact ; la doc
-  parle parfois de 1095 jours : écart d'au plus 1 jour, point mineur à aligner en vague 6).
+  intervalle calendaire, pas 1095 jours : écart résolu en vague 6, le SQL fait foi).
 - `company_contacts.opposed_at timestamptz NULL` `[ACTUEL]` (révision `0002`, vague 4) : renseigné par
   `POST /api/suppressions` ; `email` est alors `NULL` et `profile_url` `''` (minimisation), la ligne et sa
   `purge_after` restent ; jamais remis à `NULL`.
@@ -392,8 +393,11 @@ Niveau d'isolation : `READ COMMITTED` (défaut) ; les verrous explicites ci-dess
 
 ## 6. Purge de Rétention (I-10, I-14)
 
-`RetentionService.purge()` s'exécute au démarrage puis toutes les 24 h (minuterie du `TaskManager`, tâche
-`kind="purge"` non navigateur `[CIBLE]`, à ajouter au glossaire). `purge_after` est calculé à l'insertion :
+`[ACTUEL]` (vague 6) : `RetentionService.purge(user_id)` (`retention.py`, SQL dans `db/repositories/retention.py`) s'exécute
+dans **une** transaction par utilisateur, via la tâche `kind="purge"` (non navigateur, un seul exemplaire actif à la
+fois) soumise par `PurgeScheduler` au démarrage de `python -m linkedin_market.web` puis toutes les 24 h (thread
+daemon, jamais lancé par `create_app()`), et en synchrone au démarrage du CLI (échec journalisé, non bloquant).
+`purge_after` est calculé à l'insertion :
 
 | Table | `purge_after` | Remise à `NULL` |
 | :--- | :--- | :--- |
@@ -414,7 +418,10 @@ DELETE FROM tasks WHERE user_id = :uid AND created_at < now() - interval '12 mon
 COMMIT;
 ```
 `labels` suit `collected_items` (`ON DELETE CASCADE`). `suppression_list` n'est jamais purgée (empreinte seule).
-Le nombre de lignes supprimées par table est journalisé (sans contenu).
+Le nombre de lignes supprimées par table est journalisé (sans contenu, I-15) et renvoyé dans `result` de la tâche
+(`{"deleted": {"collected_items": n, "company_contacts": n, "platform_sessions": n, "activity_events": n, "tasks": n}}`).
+`applications` et `reports` ne sont jamais purgés (I-02) ; une offre référencée par une candidature est conservée
+(FK `RESTRICT` + `NOT EXISTS`) ; une tâche non finale (dont la purge en cours) n'est jamais supprimée.
 
 ## 7. Sauvegarde & Restauration
 

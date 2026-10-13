@@ -52,7 +52,7 @@ flowchart LR
     run -.->|"UI vague 3"| risk["RiskConsentDialog"]
     tabs -.->|"UI vague 3"| risk
     tabs -.->|"UI vague 4"| opposition["OppositionDialog"]
-    jobs -.->|"CIBLE"| importmodal["ManualImportModal Indeed"]
+    jobs -.->|"UI vague 5"| importmodal["ManualImportModal Indeed"]
     settings -.->|"UI vague 3"| sources["Carte Sources et consentements"]
 ```
 
@@ -69,8 +69,11 @@ flowchart LR
 > - Bandeaux de blocage par source (`BlockBanners`, d'après `GET /api/sources`, repli sur `/api/status.blocked` si
 >   `/sources` échoue : V4-5) ; bouton « Lever le blocage » par source.
 > - Bandeau « Relancer : {action} » après acceptation des risques sur un 428 (`ConsentGate`).
-> Restent `[CIBLE]` : Offres (« Importer une offre » Indeed, badge Source, libellé « Ouvrir l'offre »), Marché
-> (`InterpreterBadge`, filtre par source).
+> `[ACTUEL]` depuis les vagues 5 et 6 : « Importer une offre » (Indeed, `ManualImportModal`, ouvert depuis le
+> `SourcePicker` du lancement d'analyse), badge **Source** et filtre par source, libellé « Ouvrir l'offre »,
+> `InterpreterBadge` dans l'en-tête de Marché et la section « Analyse », bandeau de blocage nommant les sources ;
+> Paramètres : champs « Ton lieu de résidence » et « Ton fuseau horaire », avertissement Claude mis à jour
+> (`[personne]`, I-11) ; tableau de bord : libellé « Purge de rétention » pour les tâches `purge`.
 
 
 Aucune nouvelle route n'est nécessaire ; les nouveautés s'intègrent aux pages existantes :

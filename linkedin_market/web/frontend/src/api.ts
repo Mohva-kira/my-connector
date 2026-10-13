@@ -170,6 +170,10 @@ export interface StatusInfo {
 export interface Settings {
   keyword: string;
   location: string;
+  /** Vague 6 : lieu de résidence (≤ 80 caractères), vide = non mentionné. */
+  home_location: string;
+  /** Vague 6 : nom IANA ou vide. */
+  timezone: string;
   remote_only: boolean;
   caution: "prudent" | "normal" | "agressif";
   max_items: number | null;
@@ -352,6 +356,7 @@ export interface Report {
   gap: { coverage: number; missing: { skill: string; weight: number }[]; skills: { skill: string; weight: number; owned: boolean }[] };
   interpretation: string;
   interpreter: string;
+  interpreter_model?: string;
   model: ModelInfo;
   /** Offres classées, avec annotation et statut de candidature. */
   top_jobs: Job[];

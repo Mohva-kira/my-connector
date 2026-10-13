@@ -40,10 +40,26 @@ const entier = (field: string, min: number, max: number) =>
     .min(min, { error: `${field} doit être compris entre ${min} et ${max}.` })
     .max(max, { error: `${field} doit être compris entre ${min} et ${max}.` });
 
+/** Vide accepté ; sinon le nom doit être connu d'Intl (confort : le serveur reste juge). */
+function isValidTimezone(v: string): boolean {
+  if (v === "") return true;
+  try {
+    new Intl.DateTimeFormat("fr-FR", { timeZone: v });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ------------------------------------------------------------------ réglages (PUT /api/settings)
 export const settingsSchema = z.object({
   keyword: z.string().trim(),
   location: z.string().trim(),
+  home_location: z.string().trim()
+    .refine((v) => v.replace(/\s+/g, " ").length <= 80, { error: "home_location ne peut pas dépasser 80 caractères." })
+    // eslint-disable-next-line no-control-regex
+    .refine((v) => !/[\u0000-\u001f\u007f-\u009f]/.test(v), { error: "home_location ne doit contenir ni saut de ligne ni caractère de contrôle." }),
+  timezone: z.string().trim().refine(isValidTimezone, { error: "timezone doit être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide." }),
   remote_only: z.boolean(),
   caution: cautionSchema,
   max_items: maxItemsSchema,

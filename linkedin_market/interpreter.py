@@ -19,19 +19,41 @@ from . import config
 
 log = logging.getLogger(__name__)
 
-FEATURE_LABELS = {
+_FEATURE_LABELS = {
     "couverture_competences": "la couverture des compétences demandées",
     "similarite_texte": "la proximité entre ton profil et le texte de l'offre",
     "similarite_titre": "la proximité du titre de poste",
     "seniorite": "l'adéquation du niveau de séniorité",
     "experience": "les années d'expérience exigées",
     "teletravail": "le télétravail explicite",
-    "localisation_compatible": "la compatibilité géographique (depuis Abidjan)",
+    "localisation_compatible": "la compatibilité géographique",
     "freelance": "le format freelance / mission",
 }
 
-SYSTEM_PROMPT = """Tu es un conseiller en positionnement freelance tech. L'utilisateur est \
-un freelance basé à Abidjan qui cherche des missions en full remote. On te donne un \
+# Délai maximal d'un appel Claude (secondes) ; le streaming est conservé et ``max_retries`` reste celui du SDK.
+CLAUDE_TIMEOUT_SECONDS = 120.0
+
+
+def clean_setting(value: str | None) -> str:
+    """Réglage de lieu ou de fuseau nettoyé ; vide si absent (jamais de valeur de repli, E-18)."""
+    return " ".join((value or "").split())
+
+
+def feature_labels(home_location: str = "") -> dict[str, str]:
+    """Libellés des critères du matching ; le lieu de l'utilisateur n'apparaît que s'il est renseigné (E-18)."""
+    labels = dict(_FEATURE_LABELS)
+    if place := clean_setting(home_location):
+        labels["localisation_compatible"] += f" (depuis {place})"
+    return labels
+
+
+def system_prompt(home_location: str = "", timezone: str = "") -> str:
+    """Consigne système de l'interprétation ; « basé à X » et « fuseau Y » seulement si renseignés (E-18)."""
+    place, zone = clean_setting(home_location), clean_setting(timezone)
+    profile = "un freelance" + (f" basé à {place}" if place else "")
+    wish = "des missions en full remote" + (f" (fuseau {zone})" if zone else "")
+    return f"""Tu es un conseiller en positionnement freelance tech. L'utilisateur est \
+{profile} qui cherche {wish}. On te donne un \
 résumé chiffré, calculé localement, du marché LinkedIn pour un mot-clé de poste : \
 termes fréquents, termes et compétences en hausse sur 30 jours, écart de compétences \
 entre son profil et les offres, meilleures offres avec leur score, et poids appris par \
@@ -51,7 +73,7 @@ N'invente aucun chiffre absent du résumé. Si l'échantillon est trop petit pou
 class Interpreter(Protocol):
     name: str
 
-    def interpret(self, summary: dict) -> str: ...
+    def interpret(self, summary: dict, home_location: str = "", timezone: str = "") -> str: ...
 
 
 class ClaudeInterpreter:
@@ -61,12 +83,12 @@ class ClaudeInterpreter:
         import anthropic  # import local : dépendance optionnelle en mode « local »
 
         self._anthropic = anthropic
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(timeout=CLAUDE_TIMEOUT_SECONDS)
         self.model = config.anthropic_model()
 
-    def interpret(self, summary: dict) -> str:
+    def interpret(self, summary: dict, home_location: str = "", timezone: str = "") -> str:
         payload = json.dumps(summary, ensure_ascii=False, indent=1)
-        return self.complete(SYSTEM_PROMPT, f"<resume_marche>\n{payload}\n</resume_marche>")
+        return self.complete(system_prompt(home_location, timezone), f"<resume_marche>\n{payload}\n</resume_marche>")
 
     def complete(self, system: str, user: str) -> str:
         """Un appel Claude (streaming, réflexion adaptative, repli serveur si refus)."""
@@ -94,7 +116,8 @@ class LocalInterpreter:
 
     name = "local"
 
-    def interpret(self, summary: dict) -> str:
+    def interpret(self, summary: dict, home_location: str = "", timezone: str = "") -> str:
+        labels = feature_labels(home_location)
         lines = ["## Lecture du marché"]
         counts = summary.get("counts", {})
         lines.append(
@@ -131,7 +154,7 @@ class LocalInterpreter:
         lines.append(f"- Poids {source} :")
         for row in model.get("importance", [])[:4]:
             direction = "augmente" if row["weight"] > 0 else "diminue"
-            feature = FEATURE_LABELS.get(row["feature"], row["feature"])
+            feature = labels.get(row["feature"], row["feature"])
             lines.append(f"  - {feature} {direction} le score (poids {row['weight']}).")
 
         top = summary.get("top_jobs", [])[:5]
@@ -154,13 +177,16 @@ def get_interpreter(name: str | None = None) -> Interpreter:
     return LocalInterpreter()
 
 
-def interpret(summary: dict, name: str | None = None) -> tuple[str, str]:
-    """Retourne (texte, nom de l'interprète réellement utilisé : ``claude`` ou ``local``, jamais vide, I-11)."""
+def interpret(summary: dict, name: str | None = None, home_location: str = "", timezone: str = "") -> tuple[str, str]:
+    """Retourne (texte, nom de l'interprète réellement utilisé : ``claude`` ou ``local``, jamais vide, I-11).
+
+    ``home_location`` et ``timezone`` viennent des réglages (le domaine ne lit pas la base, E-18).
+    """
     interpreter = get_interpreter(name)
     try:
-        return interpreter.interpret(summary), interpreter.name
+        return interpreter.interpret(summary, home_location, timezone), interpreter.name
     except Exception as exc:
         if interpreter.name == "local":
             raise
         log.warning("Échec de l'interprétation par Claude (%s) : interprète local utilisé.", exc)
-        return LocalInterpreter().interpret(summary), "local"
+        return LocalInterpreter().interpret(summary, home_location, timezone), "local"

@@ -11,6 +11,7 @@ import uvicorn
 
 from .. import config
 from ..db.bootstrap import prepare_database
+from ..retention import PurgeScheduler
 from .app import create_app
 
 PORT = 8765
@@ -34,6 +35,7 @@ def main() -> None:
     print(f"\nInterface : {url}\nAPI uniquement sur 127.0.0.1. Ctrl+C pour arrêter.\n")
     if not args.no_open and not args.dev:
         webbrowser.open(url)
+    PurgeScheduler(app.state.tasks).start()  # purge de rétention au démarrage puis toutes les 24 h (I-10, I-14)
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 

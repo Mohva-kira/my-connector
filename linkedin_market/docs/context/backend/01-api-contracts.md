@@ -237,7 +237,11 @@ Réglages et règles de `settings.validate_settings()` :
 | `contact_email` | `""` | chaîne, `strip()` ; vide admis, sinon `logmask.EMAIL_ADDRESS` (G-12) | `422 contact_email doit être une adresse email valide.` |
 | `contact_phone`, `signature` | `""` | chaîne, `strip()` | — |
 | `linkedin_skill_sync` | `true` | `bool(value)` | — |
+| `home_location` `[ACTUEL]` vague 6 | `""` | chaîne, `strip()`, espaces internes réduits, sans retour à la ligne ni caractère de contrôle, ≤ 80 caractères ; vide admis | `home_location ne peut pas dépasser 80 caractères.` ; `home_location ne doit contenir ni saut de ligne ni caractère de contrôle.` |
+| `timezone` `[ACTUEL]` vague 6 | `""` | vide admis, sinon nom de fuseau IANA connu de `zoneinfo.ZoneInfo` (ex. `Africa/Abidjan`, `Europe/Paris`, `UTC`) | `timezone doit être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide.` |
 | `answers` | `{}` | objet ; clé = `nlp.normalize(question)[:200]`, valeur `str[:500]` | `answers doit être un objet question -> réponse.` |
+
+`[ACTUEL]` vague 6 : `home_location` et `timezone` sont de nouvelles colonnes de `user_settings` (`TEXT NOT NULL DEFAULT ''`, migration `0004`), présentes dans `GET`/`PUT /api/settings`, mais pas dans `RunBody` (toujours lus en base). Elles alimentent les prompts Claude, les libellés du mode local et le CV local (E-18) ; vides, aucune mention de lieu ni de fuseau n'est produite (pas de repli). **Après la migration, l'utilisateur doit saisir son lieu et son fuseau dans Paramètres** : les anciennes valeurs en dur (« Abidjan », « GMT ») ont disparu. Aucune nouvelle route : la tâche `purge` (`backend/05` § 1.3) n'est déclenchée ni par l'API ni par l'interface, mais par `PurgeScheduler` (démarrage de `python -m linkedin_market.web` puis toutes les 24 h ; jamais dans `create_app()`) et, de façon synchrone, au démarrage du CLI (un échec y est journalisé sans bloquer l'analyse).
 
 Attention : `PUT` avec `answers` **remplace** l'objet entier (fusion au niveau des clés de premier niveau).
 
@@ -291,7 +295,7 @@ Sans profil : `{"available": false, "message": "Aucun profil : dépose profil.md
 | `GET /api/reports/{name}/html` | `200 text/html` sandboxé | `404 Rapport introuvable.` (aussi si le rapport existe en base mais que son fichier HTML manque : E-19 livré en vague 1) |
 
 Clés d'un rapport : `generated_at`, `window_days` (30), `request`, `profile`, `counts`, `top_terms`, `skill_demand`,
-`rising`, `weekly`, `gap`, `top_jobs`, `model`, `min_labels`, `interpretation`, `interpreter`, `interpreter_model`.
+`rising`, `weekly`, `gap`, `top_jobs`, `model`, `min_labels`, `interpretation`, `interpreter`, `interpreter_model` (nom du modèle Claude utilisé, `""` en mode local, absent des anciens rapports ; affiché par `InterpreterBadge`).
 Depuis la vague 2 (G-4, E-7), `interpreter.interpret()` ne renvoie plus jamais `"none"` : un nouveau rapport porte
 toujours `claude` ou `local`. `interpreter = "none"` ne peut apparaître que sur un rapport **historique**, importé
 avant la vague 2 (`db/import_json.py` convertit déjà `none` → `local` à l'import, mais un rapport immuable créé par

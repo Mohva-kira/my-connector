@@ -184,8 +184,8 @@ est pas encore.
   rétention (I-14). L'événement d'activité `message_*` (`activity_events`, lu par `/api/monitor`) porte lui aussi
   le champ `to` **masqué** (`services.send_message` passe `logmask.mask_recipient(to)` à `activity.record()`,
   qui n'applique aucun masquage lui-même) ; seul l'historique de candidature garde l'adresse complète.
-- **Rétention des logs** : table `tasks` `[ACTUEL]` ; purge à 12 mois (lot 1 ERD § 3) `[CIBLE]` (tâche `purge`,
-  vague 6).
+- **Rétention des logs** : table `tasks` `[ACTUEL]` ; purge des tâches finales à 12 mois par la tâche `purge` `[ACTUEL]`
+  (vague 6, `03` § 6).
 
 ## 4. Écarts Code ↔ Documentation (constatés le 2026-10-08)
 
@@ -194,11 +194,10 @@ Résolus et retirés à l'acceptation de la vague 1 (2026-10-09) : E-1, E-2 (slu
 (`person` sans texte, `CHECK`), E-19 (404 sur HTML absent). Résolus et retirés à l'acceptation de la vague 2
 (2026-10-09) : E-3, E-4, E-5, E-7, E-10, E-11, E-12, E-20, E-22 (détail de chaque correction dans `01` § 1.2,
 G-1 à G-12, et `05` §§ 1, 2). Résolu et retiré à l'acceptation de la vague 4 (2026-10-12) : E-17 (`01` § 5.7.1, `05` § 2.4).
-Point mineur ouvert : `purge_after` vaut `now() + interval '3 years'` (défaut SQL, `03` § 3.3 bis) alors que la doc parle de
-1095 jours ; écart d'au plus 1 jour (année bissextile), sans conséquence de conformité, à aligner lors de la vague 6 (purge). Les numéros ne sont pas réattribués.
+Résolus et retirés à l'acceptation des vagues 5-6 (2026-10-13) : E-6 (`nlp.redact_third_parties`, `05` § 2.3) et E-18
+(réglages `home_location` / `timezone`, `01` § 5.2).
+Écart « 3 ans » résolu (vague 6) : l'intervalle calendaire SQL `interval '3 years'` fait foi (`03` § 6), pas 1095 jours. Les numéros ne sont pas réattribués.
 
 | # | Écart | Référence | Correction proposée |
 | :--- | :--- | :--- | :--- |
-| E-6 | La génération de CV par Claude envoie le **profil source complet** et le **texte intégral de l'offre** (`application._generate_with_claude`), qui peut contenir des noms de personnes. | I-11 | **Tranchée le 2026-10-09 (option A)** : I-11 = « jamais de donnée de tiers identifiable » ; profil de l'utilisateur admis ; texte de l'offre passé par `nlp.redact_third_parties(text, known_names)` avant envoi (emails, téléphones, URL `linkedin.com/in/…`, noms des contacts de la candidature, motifs LinkedIn « X et des millions… », « relations travaillent ici » ⇒ `[personne]`). Pas de nouvelle version de la popup de risques. À livrer en vague 6. |
-| E-18 | Les prompts (`interpreter.SYSTEM_PROMPT`, `application.CV_SYSTEM_PROMPT`), les libellés (`FEATURE_LABELS`) et le CV local codent en dur « freelance basé à Abidjan », « GMT ». | Outil open source multi-utilisateurs | Réglages `home_location` / `timezone` injectés dans les prompts. |
 | E-21 | Lot 1 `02` § 6 : l'événement `blocked` porterait `until` ; le code n'enregistre que `where` (+ `job`) et calcule `until` à la lecture. | lot 1 `02` § 6 | Corriger la table du lot 1 (calcul à la lecture conservé). Toujours ouvert : `until` reste calculé à la lecture (`activity.py`), pas stocké. |

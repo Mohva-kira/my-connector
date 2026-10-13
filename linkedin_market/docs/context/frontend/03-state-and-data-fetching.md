@@ -98,6 +98,8 @@ affichée (minimisation).
 ### 2.3 Mutations et invalidations `[ACTUEL]`
 
 > Vagues 2-4 `[ACTUEL]` côté UI (backend des vagues 3-4 `[CIBLE]`) — en plus du tableau ci-dessous :
+> - importer une offre Indeed (`useImportItem`, vague 5) `POST /items/import` : `jobs`, `report`, `monitor` ; pas de
+>   `track` (réponse `201` synchrone, aucune tâche) ;
 > - fin de tâche : `invalidateAfterTask(client, task)` selon `task.kind` (table `INVALIDATE_BY_KIND`, type inconnu ⇒
 >   tout le cache), et non plus `invalidateQueries()` sans clé ;
 > - annoter (Offres ou Marché) : `jobs`, `report`, `monitor` ;
@@ -147,7 +149,7 @@ précédente ; à la première transition vers `terminée` / `échec` / `annulé
 une rafale de requêtes à chaque fin de tâche. **Corrigé (vague 7, `[ACTUEL]`)** : invalidation selon `task.kind` : `run` → `reports`,
 `jobs`, `monitor`, `profile`, `status` ; `rescore` / `train` → `jobs`, `report`, `monitor` ; `prepare` /
 `apply` / `contacts` / `message` → `applications`, `application`, `jobs`, `monitor`, `status` ;
-`import_profile` / `profile_skill` → `profile`.
+`import_profile` / `profile_skill` → `profile` ; `purge` (vague 6) → `jobs` (les offres expirées disparaissent).
 
 Écarts relevés :
 - Annoter depuis la page Offres n'invalide pas `["report"]` : Marché peut afficher une annotation périmée

@@ -223,7 +223,10 @@ def run_analysis(
     ctx.log(f"Profil ({prof.origin}) : {len(prof.skills)} compétences.")
     results, scored = pipeline.analyse(request, prof)
     ctx.check()
-    text, used = interpreter.interpret(pipeline.summary_for_interpreter(results), interpreter_name)
+    prefs = settings.load_settings()
+    text, used = interpreter.interpret(
+        pipeline.summary_for_interpreter(results), interpreter_name, prefs["home_location"], prefs["timezone"]
+    )
     results.update(
         interpretation=text, interpreter=used, interpreter_model=config.anthropic_model() if used == "claude" else ""
     )
@@ -280,8 +283,17 @@ def prepare_application(ctx: TaskContext, job_id: str) -> dict:
         raise LookupError("Texte de l'offre introuvable dans l'historique.")
     prof = pipeline.build_profile(SearchRequest(**results["request"]))
     ctx.log(f"Préparation : {job['title']} — {job.get('company', '')}")
-    generator = settings.load_settings()["interpreter"]
-    app = application.generate(prof, item, job, results, generator)
+    prefs = settings.load_settings()
+    app = application.generate(
+        prof,
+        item,
+        job,
+        results,
+        prefs["interpreter"],
+        known_names=application.known_contact_names(),
+        home_location=prefs["home_location"],
+        timezone=prefs["timezone"],
+    )
     folder = application.write(app, item, job)
     return {"job_id": job_id, "folder": str(folder), "generator": app.generator}
 

@@ -20,7 +20,7 @@ Chemins relatifs à `linkedin_market/docs/context/`. Le lot 1 (`schemas-architec
 | :--- | :--- |
 | Toute tâche | `schemas-architecture/00-domain-architecture-context.md` (glossaire, invariants, risques) |
 | Architecture, nouveau module, dépendance | `schemas-architecture/01-system-overview.md` → `02-data-flow-and-events.md` → `04-infrastructure-and-deployment.md` |
-| Backend (routeur, service, tâche) | `backend/00-backend-business-context.md` → `01-api-contracts.md` → `02-business-logic-services.md` (§ 4 : écarts **E-1…E-22**) → `05-queues-and-integrations.md` |
+| Backend (routeur, service, tâche) | `backend/00-backend-business-context.md` → `01-api-contracts.md` → `02-business-logic-services.md` (§ 4 : écarts `E-n` ; seul **E-21** reste ouvert au 2026-10-13) → `05-queues-and-integrations.md` |
 | Sécurité, jeton, plafonds, secrets | `backend/04-auth-and-permissions.md` |
 | Données, PostgreSQL, migrations, rétention | `schemas-architecture/03-database-erd.md` → `backend/03-database-and-migrations.md` |
 | Frontend | `frontend/00-frontend-business-context.md` → `01-ui-design-system.md` → `02-components-catalog.md` → `03-state-and-data-fetching.md` → `04-routing-and-pages.md` → `05-forms-and-validation.md` |
@@ -57,7 +57,7 @@ npx tsc --noEmit       # contrôle de types seul
 docker compose --env-file .env -f linkedin_market/compose.yaml up -d db
 # LM_DATABASE_URL (et non DATABASE_URL, déjà lu par email_analyzer dans le même .env)
 
-# Tests (hors ligne, ~2 min, 348 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
+# Tests (hors ligne, ~2 min, 425 tests). Base jetable dont le nom finit par _test, différente de LM_DATABASE_URL ;
 # sans LM_TEST_DATABASE_URL, les tests marqués db sont ignorés (la porte qualité exige 0 ignoré). Depuis la
 # vague 2, conftest retire du processus LINKEDIN_*/SMTP_*/ANTHROPIC_API_KEY (identifiants réels du .env racine) :
 # aucune tâche lancée par un test ne peut se connecter à un vrai service.
@@ -104,11 +104,13 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
 - **I-09** Minimisation : un profil tiers (`person`) ne garde que titre + compétences ; aucune donnée sensible
   (art. 9 RGPD).
 - **I-10** Purge : `post`/`person` à 30 jours, offres sans candidature à 90 jours (`purge_after` posé à l'ingestion ;
-  tâche `purge` `[CIBLE]`, vague 6).
+  tâche `purge` `[ACTUEL]` depuis la vague 6 : au démarrage de l'interface web puis toutes les 24 h, et au démarrage
+  du CLI ; ne touche jamais `suppression_list`, `reports` ni `applications` ; une offre avec candidature est conservée).
 - **I-11** Claude ne reçoit **jamais de donnée de tiers identifiable** (profils, posts, recruteurs, contacts) ;
   l'interprétation n'envoie que des agrégats ; le mode local produit toujours une interprétation. Génération de CV
   par Claude (E-6, décidé le 2026-10-09) : profil de l'utilisateur + texte de l'offre **après**
-  `nlp.redact_third_parties` (noms, emails, téléphones, URL de profils de personnes remplacés par `[personne]`) `[CIBLE]`.
+  `nlp.redact_third_parties` (noms de tous les contacts de l'utilisateur, emails, téléphones, URL de profils de personnes
+  remplacés par `[personne]`) `[ACTUEL]` depuis la vague 6 ; le profil de l'utilisateur n'est jamais rédigé.
 - **I-12** Prospection B2B (CPCE L.34-5, CNIL) : destinataire joint dans ses fonctions, objet lié à son offre,
   origine de l'adresse et moyen de désinscription simple et gratuit dans chaque message `[ACTUEL]` depuis la
   vague 4 : pied imposé ajouté par le serveur (`outreach.compose_footer`, jamais saisi par l'utilisateur) +
@@ -116,7 +118,7 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
 - **I-13** Base légale `interet_legitime` + source sur chaque contact ; une entrée de `suppression_list` bloque
   tout envoi, définitivement `[ACTUEL]` depuis la vague 4 : 409 décidé dans la transaction de réservation avant le
   429, revérifié au début de la tâche ; `POST /api/suppressions` minimise les contacts (`opposed_at`).
-- **I-14** Contact entreprise supprimé 3 ans après le dernier contact.
+- **I-14** Contact entreprise supprimé 3 ans après le dernier contact (`interval '3 years'`) `[ACTUEL]` depuis la vague 6.
 - **I-15** Identifiants, mots de passe SMTP, clés API, cookies, jeton local : jamais versionnés ni journalisés ;
   cookies valables 72 h.
 - **I-16** Source en mode `navigateur` (LinkedIn, Malt, WTTJ) utilisable seulement après acceptation de la version
@@ -124,7 +126,7 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
   source). Le CLI avec collecte refuse de démarrer sans ce consentement et renvoie vers Paramètres → Sources et consentements (décidé le 2026-10-09).
 
 ### Points en arbitrage
-Aucun au 2026-10-09 (E-4, désinscription, E-6 tranchés). Désinscription : réponse « STOP » + en-tête
+Aucun au 2026-10-13 (E-4, désinscription, E-6 tranchés et livrés). Désinscription : réponse « STOP » + en-tête
 `List-Unsubscribe` mailto, opposition saisie par l'utilisateur (`backend/05` § 2.4). Tout nouveau point qui
 touche un invariant ou un risque se soumet à l'utilisateur avant le code.
 
@@ -179,7 +181,7 @@ touche un invariant ou un risque se soumet à l'utilisateur avant le code.
 - Lancer la suite complète avant de conclure ; `npx tsc --noEmit` (ou `npm run build`) après toute modification du front.
 
 ## Marqueurs `[ACTUEL]` / `[CIBLE]`
-`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (purge, interpréteur…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie
+`[ACTUEL]` = vérifié dans le code ; `[CIBLE]` = décidé, pas encore implémenté (CI/CD, `ConfirmDialog`…). PostgreSQL 18 est `[ACTUEL]` depuis la vague 1. Avant d'implémenter un `[CIBLE]`, vérifie
 l'existant (le code a pu évoluer) ;
 une fois livré, passe la mention en `[ACTUEL]` dans les docs concernées et retire l'écart `E-n` correspondant.
 

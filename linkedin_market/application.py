@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import textwrap
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -256,7 +257,13 @@ def set_status(job_id: str, status: str) -> None:
 
 # -------------------------------------------------------------- génération
 
-CV_SYSTEM_PROMPT = """Tu adaptes le CV d'un freelance tech (full remote depuis Abidjan) \
+
+def cv_system_prompt(home_location: str = "", timezone: str = "") -> str:
+    """Consigne système du CV ; « depuis X » et « fuseau Y » seulement si renseignés, jamais de repli (E-18)."""
+    place, zone = interpreter.clean_setting(home_location), interpreter.clean_setting(timezone)
+    remote = "full remote" + (f" depuis {place}" if place else "")
+    availability = "freelance, full remote" + (f", fuseau {zone}" if zone else "")
+    return f"""Tu adaptes le CV d'un freelance tech ({remote}) \
 à une offre précise, pour maximiser ses chances auprès du recruteur et des ATS.
 
 Règles impératives :
@@ -269,10 +276,10 @@ celles du profil qui sont en hausse sur le marché (fournies dans <marche>).
 - Les compétences demandées absentes du profil ne vont PAS dans le CV : traite-les \
 dans les conseils.
 - Rédige dans la langue de l'offre.
+- Dans l'offre, `[personne]` remplace une donnée de tiers retirée : ne la reconstitue pas.
 - CV d'une à deux pages : titre aligné sur le poste, accroche de 3 lignes, \
 compétences clés, expériences en puces orientées résultats (les plus pertinentes \
-d'abord, les autres résumées), formation, langues, disponibilité (freelance, full \
-remote, fuseau GMT).
+d'abord, les autres résumées), formation, langues, disponibilité ({availability}).
 
 Format de sortie exact, sans autre texte :
 === CV ===
@@ -311,7 +318,19 @@ def _split_sections(text: str) -> tuple[str, str, str]:
     return found.get("CV", ""), found.get("MESSAGE", ""), found.get("CONSEILS", "")
 
 
-def _generate_with_claude(profile: Profile, item: Item, job: dict, market: dict) -> Application:
+def _generate_with_claude(
+    profile: Profile,
+    item: Item,
+    job: dict,
+    market: dict,
+    known_names: Iterable[str] = (),
+    home_location: str = "",
+    timezone: str = "",
+) -> Application:
+    """CV par Claude : profil de l'utilisateur + offre **après** rédaction des tiers (E-6, I-11).
+
+    ``profile.text`` est le texte de l'utilisateur : il n'est jamais rédigé. Seul le texte de l'offre l'est.
+    """
     claude = interpreter.ClaudeInterpreter()
     offer = {
         k: job.get(k)
@@ -333,13 +352,14 @@ def _generate_with_claude(profile: Profile, item: Item, job: dict, market: dict)
         "annees_experience": profile.years_experience,
         "seniorite": profile.seniority,
     }
+    offer_text = nlp.redact_third_parties(item.text, known_names)
     user = (
         f"<profil_source>\n{profile.text}\n</profil_source>\n\n"
         f"<profil_resume>\n{json.dumps(summary, ensure_ascii=False)}\n</profil_resume>\n\n"
-        f"<offre>\n{json.dumps(offer, ensure_ascii=False)}\n\nDescription :\n{item.text}\n</offre>\n\n"
+        f"<offre>\n{json.dumps(offer, ensure_ascii=False)}\n\nDescription :\n{offer_text}\n</offre>\n\n"
         f"<marche>\n{json.dumps(market, ensure_ascii=False)}\n</marche>"
     )
-    cv, message, advice = _split_sections(claude.complete(CV_SYSTEM_PROMPT, user))
+    cv, message, advice = _split_sections(claude.complete(cv_system_prompt(home_location, timezone), user))
     return Application(cv, message, advice, "claude")
 
 
@@ -372,7 +392,16 @@ def _pretty(skill: str) -> str:
     return skill.upper() if len(skill) <= 3 or skill in ("ui/ux", "ci/cd") else skill[0].upper() + skill[1:]
 
 
-def _generate_locally(profile: Profile, item: Item, job: dict, market: dict) -> Application:
+def _remote_phrase(home_location: str, timezone: str, *, with_zone: bool) -> str:
+    """« full remote depuis X (fuseau Y) » sans repli : les fragments vides sont omis (E-18)."""
+    place, zone = interpreter.clean_setting(home_location), interpreter.clean_setting(timezone)
+    phrase = "full remote" + (f" depuis {place}" if place else "")
+    return phrase + (f" (fuseau {zone})" if zone and with_zone else "")
+
+
+def _generate_locally(
+    profile: Profile, item: Item, job: dict, market: dict, home_location: str = "", timezone: str = ""
+) -> Application:
     """Assemblage sans reformulation : atouts ciblés en tête, profil source ensuite."""
     trending = set(market["competences_en_hausse_que_tu_as"])
     matched = job.get("matched_skills", [])
@@ -389,7 +418,7 @@ def _generate_locally(profile: Profile, item: Item, job: dict, market: dict) -> 
         "## Accroche",
         "",
         f"{years}{level}. Expertise directement mobilisable sur ce poste : {top}. "
-        "Freelance en full remote depuis Abidjan (GMT), disponible pour des équipes "
+        f"Freelance en {_remote_phrase(home_location, timezone, with_zone=True)}, disponible pour des équipes "
         "internationales.",
         "",
         "## Atouts pour cette offre",
@@ -405,9 +434,10 @@ def _generate_locally(profile: Profile, item: Item, job: dict, market: dict) -> 
     cv += ["", "## Parcours", "", "  \n".join(profile.text.strip().splitlines())]
 
     company = job.get("company") or "votre équipe"
+    remote = _remote_phrase(home_location, timezone, with_zone=False)
     message = (
         f"Bonjour,\n\nVotre offre « {job['title']} » a retenu mon attention. {years}{level}, "
-        f"je maîtrise {top}, au cœur du poste. Freelance en full remote depuis Abidjan, je peux "
+        f"je maîtrise {top}, au cœur du poste. Freelance en {remote}, je peux "
         f"rejoindre {company} rapidement. Je serais ravi d'échanger sur vos besoins.\n\nCordialement,"
     )
     missing = job.get("missing_skills", [])
@@ -422,17 +452,37 @@ def _generate_locally(profile: Profile, item: Item, job: dict, market: dict) -> 
     return Application("\n".join(cv), message, advice, "local")
 
 
-def generate(profile: Profile, item: Item, job: dict, results: dict, generator: str | None = None) -> Application:
+def known_contact_names() -> list[str]:
+    """Noms complets des contacts de l'utilisateur (``company_contacts``), à retirer du texte envoyé à Claude (E-6)."""
+    with user_transaction() as (s, uid):
+        return sorted({c.full_name for c in applications_repo.all_contacts(s, uid) if c.full_name})
+
+
+def generate(
+    profile: Profile,
+    item: Item,
+    job: dict,
+    results: dict,
+    generator: str | None = None,
+    *,
+    known_names: Iterable[str] = (),
+    home_location: str = "",
+    timezone: str = "",
+) -> Application:
+    """Dossier de candidature par Claude, ou assemblé localement si Claude est indisponible.
+
+    ``known_names``, ``home_location`` et ``timezone`` sont fournis par l'appelant (le domaine ne lit pas la base).
+    """
     market = _market_context(results, profile)
     if (generator or config.interpreter_name()) == "claude":
         try:
-            app = _generate_with_claude(profile, item, job, market)
+            app = _generate_with_claude(profile, item, job, market, known_names, home_location, timezone)
             if app.cv:
                 return app
             log.warning("Réponse de Claude vide : CV assemblé localement.")
         except Exception as exc:
             log.warning("CV par Claude impossible (%s) : CV assemblé localement.", exc)
-    return _generate_locally(profile, item, job, market)
+    return _generate_locally(profile, item, job, market, home_location, timezone)
 
 
 # ---------------------------------------------------------------- fichiers

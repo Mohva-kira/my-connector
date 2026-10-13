@@ -32,7 +32,7 @@
   lecture ; la base garde tous les mots-clés de collecte dans `keywords` (cf. ERD).
 - **Statuts** : aucun ; un élément est **inséré ou mis à jour** (`ON CONFLICT (user_id, source_code, kind,
   external_id) DO UPDATE`, mots-clés fusionnés) puis **purgé** (`purge_after` posé à l'ingestion `[ACTUEL]`, tâche
-  `purge` `[CIBLE]` vague 6, I-10).
+  tâche `purge` `[ACTUEL]` vague 6, I-10).
 - **Règles** `[ACTUEL]` : un profil tiers (`person`) ne conserve que son titre et ses compétences (I-09) : le dépôt
   met `text` à `NULL` à l'ingestion et la base l'impose (`CHECK`).
 
@@ -91,7 +91,7 @@ un rang égal) ; un message envoyé sur une candidature `postulée` la laisse `p
   `profile_url`, `email`, `headline`, `source` (`linkedin_equipe_recrutement` ou `manuel`), `legal_basis`.
 - **Règles** : email conservé seulement s'il est **affiché** par LinkedIn (`contacts.extract_email`) ou saisi par
   l'utilisateur ; un email saisi à la main n'est jamais écrasé (`merge_contacts`). Base légale `interet_legitime`
-  et `purge_after` (collecte + 3 ans) posés en base `[ACTUEL]` ; mise à jour au dernier contact et purge `[CIBLE]`
+  et `purge_after` (collecte + 3 ans) posés en base `[ACTUEL]` ; mise à jour au dernier contact `[ACTUEL]` ; purge `[ACTUEL]` vague 6
   (I-13, I-14).
 - **Nommage** `[ACTUEL]` (E-15 résolu) : `full_name` et `source="linkedin_equipe_recrutement"` partout ; l'import JSON
   (`db/import_json.py`) convertit les anciens `name` / `source="linkedin"`.
@@ -143,11 +143,11 @@ Les invariants sont ceux du lot 1. Ce tableau indique leur **point d'application
 | I-07 | `activity.check_quota()` (API **et** début de tâche) ; volumes de collecte = `Caution.max_items`. | `[ACTUEL]` partiel — en base `CHECK max_items ≤ plafond de la prudence` et défaut `prudent` (vague 1) ; contrôle 422 à l'API et `min()` dans `pipeline` restent à livrer (E-3, vague 2) |
 | I-08 | Un seul couple `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` lu dans `.env` (`config.linkedin_credentials`). | `[ACTUEL]` |
 | I-09 | Filtre à l'ingestion de `person` (texte mis à `NULL`, compétences seules) + `CHECK (kind <> 'person' OR text IS NULL)`. | `[ACTUEL]` (vague 1, E-16) |
-| I-10 | `RetentionService` quotidien (cf. `03-database-and-migrations.md` § 6). | `[ACTUEL]` partiel — `purge_after` posé à l'ingestion (`NULL` pour une offre annotée ou candidatée) ; la tâche `purge` est `[CIBLE]` (vague 6) |
-| I-11 | `interpreter.interpret()` bascule sur `LocalInterpreter` si Claude est absent ou échoue ; `pipeline.summary_for_interpreter()` n'envoie que des agrégats. | `[ACTUEL]` partiel — `interpreter="none"` produit encore un rapport sans interprétation ; la génération de CV envoie le texte de l'offre à Claude ; E-6 tranchée (option A) : retrait des tiers par `nlp.redact_third_parties` avant envoi `[CIBLE]` vague 6 |
+| I-10 | `RetentionService` (`retention.py`) : tâche `purge` au démarrage puis toutes les 24 h (cf. `03-database-and-migrations.md` § 6). | `[ACTUEL]` (vague 6) — `purge_after` posé à l'ingestion (`NULL` pour une offre annotée ou candidatée) ; une offre avec candidature est conservée ; `suppression_list`, `reports` et `applications` ne sont jamais purgés |
+| I-11 | `interpreter.interpret()` bascule sur `LocalInterpreter` si Claude est absent ou échoue ; `pipeline.summary_for_interpreter()` n'envoie que des agrégats ; `nlp.redact_third_parties` appliqué au texte de l'offre avant la génération de CV. | `[ACTUEL]` (vague 6, E-6) — profil de l'utilisateur envoyé intact, aucune donnée `person` ni contact ; `interpreter = "none"` n'existe plus que sur d'anciens rapports |
 | I-12 | Gabarit imposé : mention d'origine de l'adresse + désinscription ajoutées par le backend et vérifiées avant envoi. | `[CIBLE]` |
 | I-13 | Contrôle `suppression_list` dans la transaction d'envoi ⇒ 409. | `[CIBLE]` |
-| I-14 | `company_contacts.purge_after = last_contacted_at + 3 ans`. | `[CIBLE]` |
+| I-14 | `company_contacts.purge_after = last_contacted_at + 3 ans`, supprimé par la tâche `purge`. | `[ACTUEL]` (vague 6) |
 | I-15 | `.env` hors Git ; cookies chiffrés Fernet (`LM_SECRET_KEY`, générée dans le `.env` en `0o600` si absente) dans `platform_sessions` ; mot de passe de la base masqué dans les messages. TTL 72 h (`SESSION_TTL_HOURS`). | `[ACTUEL]` (vague 1) |
 | I-16 | `SourceConsentService.require(source_code)` avant toute tâche `browser=True` sur une source `navigateur` ⇒ 428. | `[CIBLE]` |
 

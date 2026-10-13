@@ -115,6 +115,7 @@ const INVALIDATE_BY_KIND: Record<string, string[][]> = {
   message: [["applications"], ["application"], ["jobs"], ["monitor"], ["status"]],
   import_profile: [["profile"]],
   profile_skill: [["profile"]],
+  purge: [["jobs"]],
 };
 
 /** Invalide le cache après la fin d'une tâche ; type inconnu ⇒ tout le cache (sûr par défaut). */

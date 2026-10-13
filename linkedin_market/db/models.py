@@ -48,7 +48,18 @@ INTERPRETERS = ("claude", "local")
 SENIORITIES = ("junior", "confirme", "senior", "lead", "")
 SKILL_ACTIONS = ("ajoutée", "retirée")
 ACCESS_MODES = ("api_officielle", "navigateur", "import_manuel")
-TASK_KINDS = ("run", "rescore", "train", "prepare", "apply", "contacts", "message", "import_profile", "profile_skill")
+TASK_KINDS = (
+    "run",
+    "rescore",
+    "train",
+    "prepare",
+    "apply",
+    "contacts",
+    "message",
+    "import_profile",
+    "profile_skill",
+    "purge",
+)
 TASK_STATUSES = (
     "en_attente",
     "en_cours",
@@ -177,6 +188,8 @@ class UserSettings(Base):
     contact_email: Mapped[str] = empty_text()
     contact_phone: Mapped[str] = empty_text()
     signature: Mapped[str] = empty_text()
+    home_location: Mapped[str] = empty_text()  # lieu de l'utilisateur pour les prompts Claude (E-18) ; vide = aucun
+    timezone: Mapped[str] = empty_text()  # fuseau IANA ; vide = aucun
     linkedin_skill_sync: Mapped[bool] = mapped_column(server_default=text("true"))
     updated_at: Mapped[datetime] = updated()
 

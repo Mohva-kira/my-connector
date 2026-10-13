@@ -53,6 +53,8 @@ page). Succès : Notice « Paramètres enregistrés. » ; erreur : `ErrorBox` (e
 | :--- | :--- | :--- | :--- | :--- |
 | Mot-clé du poste | `keyword` | texte | chaîne, `strip()` ; vide admis ici, mais requis au lancement (`build_request`) | « Renseigne le mot-clé du poste visé (Paramètres ou lancement d'analyse). » (au lancement) |
 | Localisation (« Vide = monde entier ») | `location` | texte | chaîne, `strip()` | — |
+| Ton lieu de résidence (« Utilisé dans les analyses et les CV ; vide = non mentionné ») `[ACTUEL]` vague 6 | `home_location` | texte | `strip()`, espaces réduits, ≤ 80, ni saut de ligne ni caractère de contrôle | « home_location ne peut pas dépasser 80 caractères. » / « home_location ne doit contenir ni saut de ligne ni caractère de contrôle. » |
+| Ton fuseau horaire (« Ex. Africa/Abidjan, Europe/Paris ; vide = non mentionné ») `[ACTUEL]` vague 6 | `timezone` | texte | vide ou fuseau IANA connu de `zoneinfo` | « timezone doit être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide. » |
 | Full remote uniquement | `remote_only` | case | `bool()` | — |
 | Prudence | `caution` | `select` prudent / normal / agressif | ∈ `CAUTION_LEVELS` | « caution doit être l'un de : prudent, normal, agressif. » |
 | Éléments par source (« Vide = selon la prudence ») | `max_items` | `number min=1 max=200`, vide → `null` | `null` ou entier **1–200** | « max_items doit être un entier. » / « … compris entre 1 et 200. » |
@@ -183,17 +185,29 @@ Reste `[CIBLE]` : validation de l'URL LinkedIn côté client avant la relecture.
   confirmation (changement libre autorisé par I-03). `[CIBLE]` confirmation si le statut **régresse**
   (ex. `postulée` → `préparée`).
 
-### 3.7 Import manuel d'une offre Indeed `[CIBLE]` (R-6)
+### 3.7 Import manuel d'une offre Indeed `[ACTUEL]` (R-6, vague 5)
+`ManualImportModal` ; schéma `manualImportSchema` (`src/schemas.ts`, § 4) ; les messages reprennent ceux du serveur
+(`champ : message`, `backend/01` § 5.8.2). Le champ `keyword` (≤ 80, facultatif) est omis du corps s'il est vide.
 
 | Champ | Règle |
 | :--- | :--- |
 | URL de l'offre | requise, `https://`, hôte `indeed.com` ou sous-domaine national (`fr.indeed.com`…) |
 | Texte de l'offre (collé) | requis, 200 à 20 000 caractères |
 | Titre | requis, ≤ 150 caractères (`ManualItem.title`) |
-| Entreprise, localisation | facultatifs (≤ 80 / 120 caractères) |
+| Entreprise, localisation, mot-clé | facultatifs (≤ 80 / 120 / 80 caractères) |
 | Envoi | `POST /api/items/import` (cf. `backend/01-api-contracts.md`) `{ source_code: "indeed", url, text, title, company?, location? }` → `201`, `409` si déjà dans l'historique |
 
-## 4. Schémas Zod `[ACTUEL]` (vagues 2 à 4)
+## 4. Schémas Zod `[ACTUEL]` (vagues 2 à 6)
+> Vague 5 `[ACTUEL]` : `manualImportSchema` (champs `url`, `title`, `company`, `location`, `text`, `keyword` ; `url` :
+> `INDEED_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*indeed\.com(\/|$|\?|#)/i`, ≤ 2 000 ; `text` : `MANUAL_TEXT_MIN` 200 à
+> `MANUAL_TEXT_MAX` 20 000 ; messages en minuscule initiale, comme le `detail` serveur : `url : colle l'adresse https
+> de l'offre Indeed.`…). La forme Zod 4 ci-dessous est indicative ; le fichier fait foi.
+> Vague 6 `[ACTUEL]` : `settingsSchema` gagne `home_location` (espaces internes réduits puis ≤ 80 ; sans caractère de
+> contrôle ; messages `home_location ne peut pas dépasser 80 caractères.` et `home_location ne doit contenir ni saut de
+> ligne ni caractère de contrôle.`) et `timezone` (vide ou nom connu d'`Intl.DateTimeFormat` ; message `timezone doit
+> être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide.`), identiques mot pour mot aux 422 de
+> `settings.validate_settings` (`backend/01` § 5.2). Seul écart de confort : le client ne détecte pas les séparateurs
+> de ligne/paragraphe Unicode (U+2028/2029), que le serveur refuse ; le serveur reste juge.
 > Vague 4 `[ACTUEL]` : `suppressionSchema` (`recipient` après `trim` = `EMAIL_RE` ou `LINKEDIN_PROFILE_RE`, message
 > `recipient : adresse email ou URL de profil LinkedIn attendue.` — avec point final, comme le message du
 > validateur serveur repris tel quel par G-1 `value_error` ; `reason` ∈ `désinscription`, `refus_oral`, `plainte`,
@@ -227,6 +241,8 @@ export const LINKEDIN_PROFILE_RE = /^https:\/\/([a-z]{2,3}\.)?linkedin\.com\/in\
 export const settingsSchema = z.object({
   keyword: z.string().trim(),
   location: z.string().trim(),
+  home_location: z.string().trim(),   // vague 6 : ≤ 80, sans caractère de contrôle (cf. note ci-dessus)
+  timezone: z.string().trim(),        // vague 6 : vide ou fuseau IANA
   remote_only: z.boolean(),
   caution: z.enum(["prudent", "normal", "agressif"]),
   max_items: entier("Éléments par source", 1, 200).nullable(),

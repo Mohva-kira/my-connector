@@ -276,7 +276,7 @@ erDiagram
 | :--- | :--- | :--- |
 | `collected_items` | `UNIQUE (user_id, source_code, kind, external_id)` | Dédoublonnage de l'historique entre exécutions. |
 | `collected_items` | `INDEX GIN (keywords)` + `INDEX (user_id, collected_at DESC)` | Fenêtre de 30 jours des tendances : `keywords @> ARRAY[lower(trim(:kw))]`. GIN sans `user_id` en tête (instance mono-utilisateur, pas d'extension `btree_gin`) ; le filtre `user_id` reste dans chaque requête (I-01). |
-| `collected_items` | `INDEX (purge_after) WHERE purge_after IS NOT NULL` | Purge quotidienne (I-10) : colonne et index `[ACTUEL]`, tâche `purge` `[CIBLE]` (vague 6). |
+| `collected_items` | `INDEX (purge_after) WHERE purge_after IS NOT NULL` | Purge quotidienne (I-10) : colonne, index et tâche `purge` `[ACTUEL]` (vague 6). |
 | `collected_items` | `CHECK (kind <> 'person' OR text IS NULL)` | Minimisation des profils tiers (I-09). |
 | `labels` | `CHECK (value IN (0, 1))` | Annotation binaire. |
 | `matching_models` | `UNIQUE (user_id) WHERE is_active` (index partiel) | Un seul modèle actif. |

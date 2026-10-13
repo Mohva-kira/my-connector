@@ -85,7 +85,7 @@ Règles d'implémentation (`TaskManager._run`) :
 | `message` | si `linkedin` | `job_id` | `send_message` | `Envoyer un email` / `Envoyer un message LinkedIn` | `{"channel", "to", …}` |
 | `import_profile` | oui | — | `import_linkedin_profile` | `Importer le profil LinkedIn` | `{"skills"}` |
 | `profile_skill` | oui | compétence normalisée | `sync_skill_to_linkedin` | `Ajouter « <compétence> » au profil LinkedIn` | `{"skill", "linkedin_name", "state"}` |
-| `purge` `[CIBLE]` | non | — | `RetentionService.purge` | `Purge de rétention` | `{"deleted": {"collected_items": 12, …}}` |
+| `purge` `[ACTUEL]` (vague 6) | non | — | `retention.purge_current_user` (`RetentionService.purge`) | `Purge de rétention` | `{"deleted": {"collected_items": 12, …}}` |
 
 ### 1.4 Saisie utilisateur et vérification manuelle
 
@@ -134,7 +134,7 @@ sequenceDiagram
   message, ajout de compétence) ou sont limitées par la prudence ; relancer automatiquement augmenterait le risque
   de blocage (R-1). L'utilisateur relance depuis l'interface.
 - Pas de *dead-letter queue* : une tâche en `échec` conserve `error` et ses logs ; `/api/monitor` liste les 5
-  dernières erreurs. Table `tasks` `[ACTUEL]` ; conservation 12 mois par la tâche `purge` `[CIBLE]` (vague 6).
+  dernières erreurs. Table `tasks` `[ACTUEL]` ; conservation 12 mois par la tâche `purge` `[ACTUEL]` (vague 6).
 - Relances **internes** limitées aux appels idempotents en lecture : API France Travail (§ 2.5), SDK Anthropic
   (relances du SDK).
 
@@ -205,11 +205,17 @@ Usages et données transmises :
 | Usage | Données envoyées | Repli |
 | :--- | :--- | :--- |
 | Interprétation du rapport (`interpret`) | `summary_for_interpreter()` : mot-clé, profil résumé, compteurs, 25 termes, 25 compétences, tendances, écart, 10 meilleures offres (titre, entreprise, lieu, score, compétences manquantes, critères), poids du modèle — **agrégats uniquement** | Claude non instanciable (clé ou SDK absent) ou en erreur ⇒ `LocalInterpreter`, `interpreter="local"` dans le rapport (I-11) |
-| Rédaction du CV, du message et des conseils (`_generate_with_claude`) | texte complet du profil de l'utilisateur, profil résumé, offre (champs scorés + texte intégral **après `nlp.redact_third_parties`** `[CIBLE]` vague 6), contexte marché | erreur ou CV vide ⇒ `_generate_locally` (assemblage sans reformulation), `generator="local"` |
+| Rédaction du CV, du message et des conseils (`_generate_with_claude`) | texte complet du profil de l'utilisateur, profil résumé, offre (champs scorés + texte intégral **après `nlp.redact_third_parties`** `[ACTUEL]` vague 6), contexte marché | erreur ou CV vide ⇒ `_generate_locally` (assemblage sans reformulation), `generator="local"` |
 
-E-6 tranchée (2026-10-09, option A) : le texte de l'offre sort de la machine pour la rédaction du CV **seulement après** retrait des noms, emails, téléphones et URL de profils de personnes (`nlp.redact_third_parties`, `[CIBLE]` vague 6, cf. `02` § 4).
-`[CIBLE]` : `timeout=120` s explicite sur le client ; aucune donnée `person` ni contact n'est jamais transmise ;
-mention dans la popup Claude/Réglages de ce qui est envoyé.
+E-6 livrée (vague 6, option A du 2026-10-09) : le texte de l'offre sort de la machine pour la rédaction du CV **seulement
+après** `nlp.redact_third_parties(texte, known_names)` : emails, téléphones, URL `linkedin.com/in/…`, motifs de preuve
+sociale et noms des contacts de l'utilisateur (`application.known_contact_names()` : **tous** les `company_contacts`
+de l'utilisateur, non ceux de la seule candidature, par prudence) remplacés par `[personne]` ; le profil de
+l'utilisateur n'est jamais rédigé ; la consigne système précise de ne pas reconstituer `[personne]`. En cas d'erreur
+inattendue, le texte est renvoyé entièrement masqué. `ClaudeInterpreter` a `timeout=120` s (`CLAUDE_TIMEOUT_SECONDS`) ;
+aucune donnée `person` ni contact n'est jamais transmise ; l'avertissement de Paramètres décrit ce qui est envoyé.
+E-18 livrée : `home_location` et `timezone` (réglages) sont injectés dans les prompts, les libellés locaux et le CV
+local seulement s'ils sont renseignés (`interpreter.clean_setting`, jamais de repli).
 
 ### 2.4 SMTP (serveur de l'utilisateur) — `outreach.py`
 | Paramètre | Valeur |

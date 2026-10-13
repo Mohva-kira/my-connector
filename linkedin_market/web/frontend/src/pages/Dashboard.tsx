@@ -14,7 +14,7 @@ const KIND_COLORS: Record<string, string> = {
 };
 const KIND_LABELS: Record<string, string> = {
   apply: "Candidatures", message_email: "Emails", message_linkedin: "Messages LinkedIn", run: "Analyses",
-  profile_skill: "Compétence ajoutée sur LinkedIn",
+  profile_skill: "Compétence ajoutée sur LinkedIn", purge: "Purge de rétention",
 };
 
 function QuotaBar({ label, used, limit }: { label: string; used: number; limit: number }) {

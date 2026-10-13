@@ -8,6 +8,9 @@ construction du profil (``profile.finalize``). Façade de persistance (D-1) : ta
 
 from __future__ import annotations
 
+import unicodedata
+from zoneinfo import ZoneInfo
+
 from . import config, logmask, nlp
 from .db.repositories import profile as profile_repo
 from .db.repositories import settings as settings_repo
@@ -27,6 +30,8 @@ DEFAULT_SETTINGS: dict = {
     "contact_email": "",  # email/téléphone saisis dans « Candidature simplifiée »
     "contact_phone": "",
     "signature": "",
+    "home_location": "",  # lieu de l'utilisateur (prompts Claude, E-18) ; vide = non communiqué
+    "timezone": "",  # fuseau IANA (ex. Europe/Paris) ; vide = non communiqué
     "linkedin_skill_sync": True,  # compétence ajoutée dans l'interface -> ajoutée au profil LinkedIn
     "answers": {},  # question normalisée -> réponse mémorisée
 }
@@ -39,6 +44,7 @@ DEFAULT_PROFILE_SETTINGS: dict = {
     "removed_skills": [],
 }
 
+HOME_LOCATION_MAX = 80
 _PROFILE_SOURCES = ("auto", "file", "linkedin")
 _INTERPRETERS = ("claude", "local")  # « none » refusé à l'écriture (E-7, I-11)
 
@@ -99,6 +105,29 @@ def _check_max_items(max_items: int | None, caution: str) -> None:
         raise SettingsError(f"max_items ne peut pas dépasser {cap} en prudence « {caution} ».")
 
 
+def _home_location(value) -> str:
+    """Lieu : espaces de bord retirés, espaces internes réduits, ≤ 80, sans saut de ligne ni caractère de contrôle."""
+    text = str(value or "")
+    if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in text):
+        raise SettingsError("home_location ne doit contenir ni saut de ligne ni caractère de contrôle.")
+    text = " ".join(text.split())
+    if len(text) > HOME_LOCATION_MAX:
+        raise SettingsError(f"home_location ne peut pas dépasser {HOME_LOCATION_MAX} caractères.")
+    return text
+
+
+def _timezone(value) -> str:
+    """Vide ou nom de fuseau IANA connu de ``zoneinfo``."""
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    try:
+        ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - ZoneInfoNotFoundError, ValueError (nom invalide), OSError (fichier)
+        raise SettingsError("timezone doit être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide.") from None
+    return name
+
+
 def validate_settings(update: dict, current: dict | None = None) -> dict:
     """Valide un sous-ensemble de réglages ; retourne uniquement les clés connues, normalisées.
 
@@ -133,6 +162,10 @@ def validate_settings(update: dict, current: dict | None = None) -> dict:
             value = str(value or "").strip()
             if value and not logmask.EMAIL_ADDRESS.match(value):
                 raise SettingsError("contact_email doit être une adresse email valide.")
+        elif key == "home_location":
+            value = _home_location(value)
+        elif key == "timezone":
+            value = _timezone(value)
         elif key == "answers":
             if not isinstance(value, dict):
                 raise SettingsError("answers doit être un objet question -> réponse.")

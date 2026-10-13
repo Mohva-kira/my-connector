@@ -23,6 +23,8 @@ COLUMNS = (
     "contact_email",
     "contact_phone",
     "signature",
+    "home_location",
+    "timezone",
     "linkedin_skill_sync",
 )
 

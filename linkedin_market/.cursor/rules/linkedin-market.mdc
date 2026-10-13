@@ -19,7 +19,7 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
 3. Backend :
    - invariants et cas d'usage : `docs/context/backend/00-backend-business-context.md` ;
    - contrats d'API (codes, `detail` exacts) : `docs/context/backend/01-api-contracts.md` ;
-   - services, transactions, écarts E-1…E-22 : `docs/context/backend/02-business-logic-services.md` § 4 ;
+   - services, transactions, écarts `E-n` (seul E-21 ouvert au 2026-10-13) : `docs/context/backend/02-business-logic-services.md` § 4 ;
    - sécurité et plafonds : `04` ; tâches et intégrations : `05`.
 4. Architecture et données : consulte `docs/context/schemas-architecture/01` à `04` et
    `docs/context/backend/03-database-and-migrations.md` avant toute modification de structure, d'entité, de
@@ -39,11 +39,13 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
   de messages réservé en base avant l'envoi (transaction unique, place rendue sur échec ou annulation avant
   démarrage, jamais sur un envoi « à vérifier »).
 - I-08 : uniquement le compte personnel de l'utilisateur.
-- I-09, I-10 : pour un profil tiers, garder titre + compétences seulement ; purge 30 j (posts/profils), 90 j (offres).
+- I-09, I-10 : pour un profil tiers, garder titre + compétences seulement ; purge 30 j (posts/profils), 90 j (offres sans candidature) ;
+  tâche `purge` `[ACTUEL]` (vague 6) : jamais `suppression_list`, `reports` ni `applications`.
 - I-11 : aucune donnée de tiers identifiable envoyée à Claude ; l'interprète local produit toujours un texte ;
-  CV par Claude : profil de l'utilisateur + offre après `nlp.redact_third_parties` (E-6).
+  CV par Claude : profil de l'utilisateur + offre après `nlp.redact_third_parties` (E-6, `[ACTUEL]` vague 6, noms de tous les contacts) ;
+  lieu et fuseau issus des réglages `home_location` / `timezone`, jamais codés en dur (E-18).
 - I-12, I-13, I-14 : prospection B2B conforme CPCE L.34-5 / CNIL (objet lié à l'offre, origine de l'adresse,
-  désinscription) ; `suppression_list` bloque tout envoi ; contacts purgés à 3 ans (purge `[CIBLE]`).
+  désinscription) ; `suppression_list` bloque tout envoi ; contacts purgés à 3 ans (purge `[ACTUEL]`).
   `[ACTUEL]` (vague 4) : pied imposé serveur (`outreach.compose_footer`), `List-Unsubscribe` mailto, 409 « opposé »
   dans la transaction de réservation avant le 429 et au début de la tâche, `POST /api/suppressions`, `opposed_at`.
 - I-15 : aucun secret, cookie ou jeton versionné ou journalisé.
@@ -53,7 +55,7 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
 
 E-4 tranché (option A) : `run` bloqué ⇒ `terminée`, rapport partiel, `result.blocked = true` (`[ACTUEL]`).
 Vague 2 (2026-10-09) : E-3, E-4, E-5, E-7, E-10, E-11, E-12, E-20, E-22 résolus et retirés (`backend/01` § 1.2,
-`backend/02` § 4, `backend/05`).
+`backend/02` § 4, `backend/05`). Vagues 5-6 (2026-10-13) : E-6 et E-18 résolus et retirés.
 
 ## Ne pas trancher seul
 Aucun point en arbitrage au 2026-10-09. Tout nouveau point touchant un invariant ou un risque : demande la décision.
@@ -81,7 +83,7 @@ Aucun point en arbitrage au 2026-10-09. Tout nouveau point touchant un invariant
 ## Tests et vérifications (depuis la racine du dépôt)
 - Tout changement de comportement : test pytest, hors ligne (fixtures HTML, aucun appel réel à LinkedIn,
   France Travail, Claude ou SMTP). `LM_TEST_DATABASE_URL=<base _test> .venv/bin/python -m pytest linkedin_market/tests`
-  (0 test ignoré exigé, ~2 min, 348 tests). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`,
+  (0 test ignoré exigé, ~2 min, 425 tests). Base de l'application : `LM_DATABASE_URL` (jamais `DATABASE_URL`,
   réservé à email_analyzer). Depuis la vague 2, `conftest.py` retire aussi `LINKEDIN_*`/`SMTP_*`/`ANTHROPIC_API_KEY`
   de l'environnement du processus de test : aucune tâche lancée par un test ne peut atteindre un vrai service.
 - Front : `npx tsc --noEmit` ou `npm run build` dans `linkedin_market/web/frontend`. `npm run lint` (ESLint 9, 0 erreur et 0 avertissement exigés).

@@ -8,47 +8,108 @@ import math
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Iterable
 
 import numpy as np
 
-STOPWORDS = set("""
+from . import logmask
+
+STOPWORDS = set(
+    """
 a à au aux avec ce ces cet cette dans de des du elle en et être eux il ils je la le les leur lui ma mais me même mes moi mon ne nos notre nous on ou où par pas pour qu que qui sa se ses son sur ta te tes toi ton tu un une vos votre vous c d j l m n s t y été étée étés est sont était sera ont avoir fait faire plus moins très tout tous toute toutes comme si aussi bien sans sous entre chez vers dont alors ainsi donc car afin cela ça ceci celui celle ceux leurs nos chaque autre autres peut peuvent doit doivent nous vous ici là déjà encore jour jours an ans année années mois semaine semaines h min
 the of and to in for on with at by from as is are was were be been being an or not this that these those it its we our you your they their he she his her them us will would can could should may might must shall do does did have has had having but if then than so such into about over under more most other some any each all both no nor only own same too very just also via per etc
 linkedin voir afficher postuler candidature candidater offre offres emploi job jobs poste postes entreprise company recrutement recruteur abonnés abonné followers suivre connexion relations message messages page pages profil profile commentaire commentaires like likes réagir partager share repost republié édité modifié publié promoted sponsorisé republication premium afficher plus see more show less moins apply applicants candidats candidat il y ago new nouveau nouvelle hashtag
-""".split())
+""".split()  # noqa: E501 - liste de mots
+)
 
 # Compétences canoniques -> motifs (regex) qui les détectent dans un texte normalisé.
 SKILLS: dict[str, str] = {
-    "python": r"python", "javascript": r"javascript|\bjs\b", "typescript": r"typescript",
-    "java": r"\bjava\b(?!script)", "c#": r"c#|\.net|dotnet", "php": r"\bphp\b", "go": r"\bgolang\b|\bgo\b(?= lang| developer)",
-    "rust": r"\brust\b", "kotlin": r"kotlin", "swift": r"\bswift\b", "sql": r"\bsql\b",
-    "react": r"\breact(?:\.?js)?\b(?! native)", "react native": r"react native", "angular": r"angular",
-    "vue": r"\bvue(?:\.?js)?\b", "next.js": r"next\.?js", "node.js": r"node\.?js|\bnode\b",
-    "django": r"django", "fastapi": r"fastapi", "flask": r"\bflask\b", "laravel": r"laravel",
-    "spring": r"spring ?boot|\bspring\b", "symfony": r"symfony", "flutter": r"flutter",
-    "postgresql": r"postgres(?:ql)?", "mysql": r"mysql", "mongodb": r"mongo(?:db)?", "redis": r"\bredis\b",
-    "elasticsearch": r"elastic ?search", "graphql": r"graphql", "rest api": r"\brest(?:ful)?\b|\bapi\b|\bapis\b",
-    "microservices": r"micro-?services?", "aws": r"\baws\b|amazon web services", "azure": r"\bazure\b",
-    "gcp": r"\bgcp\b|google cloud", "docker": r"docker", "kubernetes": r"kubernetes|\bk8s\b",
-    "terraform": r"terraform", "ci/cd": r"ci ?/ ?cd|continuous (?:integration|delivery)|github actions|gitlab ci|jenkins",
-    "devops": r"devops", "linux": r"\blinux\b", "git": r"\bgit\b", "cloud": r"\bcloud\b",
-    "machine learning": r"machine learning|apprentissage automatique|\bml\b", "deep learning": r"deep learning",
+    "python": r"python",
+    "javascript": r"javascript|\bjs\b",
+    "typescript": r"typescript",
+    "java": r"\bjava\b(?!script)",
+    "c#": r"c#|\.net|dotnet",
+    "php": r"\bphp\b",
+    "go": r"\bgolang\b|\bgo\b(?= lang| developer)",
+    "rust": r"\brust\b",
+    "kotlin": r"kotlin",
+    "swift": r"\bswift\b",
+    "sql": r"\bsql\b",
+    "react": r"\breact(?:\.?js)?\b(?! native)",
+    "react native": r"react native",
+    "angular": r"angular",
+    "vue": r"\bvue(?:\.?js)?\b",
+    "next.js": r"next\.?js",
+    "node.js": r"node\.?js|\bnode\b",
+    "django": r"django",
+    "fastapi": r"fastapi",
+    "flask": r"\bflask\b",
+    "laravel": r"laravel",
+    "spring": r"spring ?boot|\bspring\b",
+    "symfony": r"symfony",
+    "flutter": r"flutter",
+    "postgresql": r"postgres(?:ql)?",
+    "mysql": r"mysql",
+    "mongodb": r"mongo(?:db)?",
+    "redis": r"\bredis\b",
+    "elasticsearch": r"elastic ?search",
+    "graphql": r"graphql",
+    "rest api": r"\brest(?:ful)?\b|\bapi\b|\bapis\b",
+    "microservices": r"micro-?services?",
+    "aws": r"\baws\b|amazon web services",
+    "azure": r"\bazure\b",
+    "gcp": r"\bgcp\b|google cloud",
+    "docker": r"docker",
+    "kubernetes": r"kubernetes|\bk8s\b",
+    "terraform": r"terraform",
+    "ci/cd": r"ci ?/ ?cd|continuous (?:integration|delivery)|github actions|gitlab ci|jenkins",
+    "devops": r"devops",
+    "linux": r"\blinux\b",
+    "git": r"\bgit\b",
+    "cloud": r"\bcloud\b",
+    "machine learning": r"machine learning|apprentissage automatique|\bml\b",
+    "deep learning": r"deep learning",
     "ia générative": r"genai|gen ai|generative ai|ia generative|\bllms?\b|chatgpt|openai|claude|gpt",
-    "nlp": r"\bnlp\b|traitement du langage", "data science": r"data scien", "data engineering": r"data engineer|etl|elt|pipeline de donnees|data pipeline",
-    "power bi": r"power ?bi", "tableau": r"\btableau\b(?! de)", "excel": r"\bexcel\b", "pandas": r"pandas",
-    "spark": r"\bspark\b|pyspark", "airflow": r"airflow", "dbt": r"\bdbt\b", "snowflake": r"snowflake",
-    "rag": r"\brag\b|retrieval augmented", "langchain": r"langchain", "mlops": r"mlops",
-    "cybersécurité": r"cyber ?securit|securite informatique|security", "sap": r"\bsap\b", "salesforce": r"salesforce",
-    "odoo": r"\bodoo\b", "erp": r"\berp\b", "crm": r"\bcrm\b", "sirh": r"\bsirh\b|\bhris\b|\bats\b",
-    "wordpress": r"wordpress", "shopify": r"shopify", "seo": r"\bseo\b", "ui/ux": r"\bui\b|\bux\b|figma|user experience",
-    "mobile": r"\bmobile\b|android|\bios\b", "fintech": r"fintech|mobile money|paiement|payment",
-    "blockchain": r"blockchain|web3|crypto", "agile": r"agile|agilite", "scrum": r"scrum",
-    "gestion de projet": r"gestion de projets?|project manag|chef de projet|\bpmo\b", "product management": r"product (?:manag|owner)|\bpo\b",
+    "nlp": r"\bnlp\b|traitement du langage",
+    "data science": r"data scien",
+    "data engineering": r"data engineer|etl|elt|pipeline de donnees|data pipeline",
+    "power bi": r"power ?bi",
+    "tableau": r"\btableau\b(?! de)",
+    "excel": r"\bexcel\b",
+    "pandas": r"pandas",
+    "spark": r"\bspark\b|pyspark",
+    "airflow": r"airflow",
+    "dbt": r"\bdbt\b",
+    "snowflake": r"snowflake",
+    "rag": r"\brag\b|retrieval augmented",
+    "langchain": r"langchain",
+    "mlops": r"mlops",
+    "cybersécurité": r"cyber ?securit|securite informatique|security",
+    "sap": r"\bsap\b",
+    "salesforce": r"salesforce",
+    "odoo": r"\bodoo\b",
+    "erp": r"\berp\b",
+    "crm": r"\bcrm\b",
+    "sirh": r"\bsirh\b|\bhris\b|\bats\b",
+    "wordpress": r"wordpress",
+    "shopify": r"shopify",
+    "seo": r"\bseo\b",
+    "ui/ux": r"\bui\b|\bux\b|figma|user experience",
+    "mobile": r"\bmobile\b|android|\bios\b",
+    "fintech": r"fintech|mobile money|paiement|payment",
+    "blockchain": r"blockchain|web3|crypto",
+    "agile": r"agile|agilite",
+    "scrum": r"scrum",
+    "gestion de projet": r"gestion de projets?|project manag|chef de projet|\bpmo\b",
+    "product management": r"product (?:manag|owner)|\bpo\b",
     "transformation digitale": r"transformation (?:digitale|numerique)|digital transformation|digitalisation",
-    "architecture logicielle": r"architect(?:ure|e) (?:logiciel|software|solution|technique)|solution architect|software architect",
+    "architecture logicielle": r"architect(?:ure|e) (?:logiciel|software|solution|technique)|solution architect"
+    r"|software architect",
     "tests automatisés": r"tests? (?:unitaires|automatis)|unit test|\btdd\b|pytest|jest|cypress|selenium",
-    "anglais": r"\banglais\b|\benglish\b|bilingue|bilingual", "français": r"\bfrancais\b|\bfrench\b|francophone",
-    "communication": r"communication", "leadership": r"leadership|management d.equipe|team lead",
+    "anglais": r"\banglais\b|\benglish\b|bilingue|bilingual",
+    "français": r"\bfrancais\b|\bfrench\b|francophone",
+    "communication": r"communication",
+    "leadership": r"leadership|management d.equipe|team lead",
     "consulting": r"consult(?:ing|ant)|conseil",
 }
 _SKILL_PATTERNS = {name: re.compile(p) for name, p in SKILLS.items()}
@@ -82,7 +143,9 @@ def _ui(*phrases: str) -> re.Pattern:
 # Habillage de l'interface LinkedIn capturé avec la page d'une offre : encarts Premium,
 # statut de candidature, encart recruteur.
 _LINKEDIN_CHROME = _ui(
-    r"Évaluation des candidatures en cours", r"Candidature simplifiée", r"\bEnregistrer\b",
+    r"Évaluation des candidatures en cours",
+    r"Candidature simplifiée",
+    r"\bEnregistrer\b",
     r"Utilisez l’IA pour évaluer si votre profil correspond",
     r"Obtenez des conseils générés par l’IA.{0,120}?avec Premium\.?",
     r"Afficher les détails de correspondance de votre profil",
@@ -90,20 +153,27 @@ _LINKEDIN_CHROME = _ui(
     r"Accédez à des informations exclusives sur les candidats.{0,200}?et plus encore\.?",
     r"Des recherches d’emploi plus rapides avec Premium.{0,600}?quel que soit le motif\.?",
     r"Activer une alerte emploi pour des postes similaires.{0,150}?(?:Désactivé|Activé)",
-    r"Réactiver Premium", r"Promue par un recruteur", r"Réponses gérées en dehors de LinkedIn",
+    r"Réactiver Premium",
+    r"Promue par un recruteur",
+    r"Réponses gérées en dehors de LinkedIn",
     r"Aucune info disponible pour le moment sur les réponses",
     r"Plus de \d+ (?:candidatures|personnes ont cliqué sur Postuler)",
     r"(?:…\s*plus\s+)?Voir plus\s*$",
     r"Personnes que vous pouvez contacter.{0,500}?Envoyer un message",
-    r"Personnes que vous pouvez contacter", r"Rencontrez l’équipe de recrutement[^•]{0,80}•?",
+    r"Personnes que vous pouvez contacter",
+    r"Rencontrez l’équipe de recrutement[^•]{0,80}•?",
     r"À propos de l’offre d’emploi",
 )
 # Début du bas de page (offres similaires, publicité Premium, pied de page, choix de langue) :
 # tout ce qui suit est coupé.
 _LINKEDIN_TAIL = _ui(
-    r"(?:…\s*plus\s+)?Aimeriez-vous travailler avec nous", r"Plus d’offres d’emploi",
-    r"Voir plus d’offres d’emploi similaires", r"Des recherches d’emploi plus intelligentes",
-    r"Vous recherchez des talents \?", r"LinkedIn Corporation ©", r"Choisir une langue",
+    r"(?:…\s*plus\s+)?Aimeriez-vous travailler avec nous",
+    r"Plus d’offres d’emploi",
+    r"Voir plus d’offres d’emploi similaires",
+    r"Des recherches d’emploi plus intelligentes",
+    r"Vous recherchez des talents \?",
+    r"LinkedIn Corporation ©",
+    r"Choisir une langue",
 )
 
 
@@ -115,14 +185,13 @@ def strip_linkedin_chrome(text: str) -> str:
 
 
 def tokens(text: str) -> list[str]:
-    return [t for t in _TOKEN.findall(normalize(text))
-            if t not in _STOP_NORMALIZED and len(t) > 1 and not t.isdigit()]
+    return [t for t in _TOKEN.findall(normalize(text)) if t not in _STOP_NORMALIZED and len(t) > 1 and not t.isdigit()]
 
 
 def ngrams(toks: list[str], n_max: int = 3) -> list[str]:
     out = list(toks)
     for n in range(2, n_max + 1):
-        out += [" ".join(toks[i:i + n]) for i in range(len(toks) - n + 1)]
+        out += [" ".join(toks[i : i + n]) for i in range(len(toks) - n + 1)]
     return out
 
 
@@ -201,3 +270,113 @@ class TfIdf:
         matrix *= self.idf
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         return matrix / np.where(norms == 0, 1, norms)
+
+
+# ------------------------------------------------- rédaction de tiers (E-6, I-11)
+PERSON_PLACEHOLDER = "[personne]"
+_EDGE_PUNCTUATION = "()[]{}<>.,;:!?\"'«»"
+_LINKEDIN_PROFILE = re.compile(
+    r"(?<![\w.@-])(?:https?://)?(?:[a-z0-9-]+\.)*linkedin\.com/in/[\w%.\-]*\w(?:/[\w%.\-]*\w)*/?(?:[?#][^\s\"'<>)\]]*[\w/=])?",
+    re.IGNORECASE,
+)
+_INTERNATIONAL_PHONE = re.compile(r"(?<![\w+])(?:\+|00)\d[\d\s.()\-]{6,}\d")
+_FRENCH_PHONE = re.compile(r"(?<![\w.+\-])0[1-9](?:[\s.\-]?\d{2}){4}(?!\w)")
+_NAME = r"(?:\[personne\]|[A-ZÀ-ÖØ-Ý][\w'’.\-]*(?:\s+[A-ZÀ-ÖØ-Ý][\w'’.\-]*){0,3})"
+_SOCIAL_PROOF = re.compile(
+    "|".join(
+        (
+            # « Jane Doe et des millions d'autres membres utilisent LinkedIn… » / « X and millions of others… »
+            rf"{_NAME}(?i:\s+(?:et|and)\s+(?:des\s+|plus\s+de\s+)?(?:millions?|milliers|\d[\d\s.,]*)\s+"
+            r"(?:(?:d['’]\s?|de\s+|of\s+)?(?:autres?|others?)|(?:other|autres)\s+members?)[^\n.]*)",
+            # « 12 relations travaillent ici » / « 3 connections work here »
+            r"(?i:\d[\d\s.,]*\s+(?:relations?|connexions?|contacts?|connections?)\s+"
+            r"(?:(?:travaill\w+|work\w*)\s+(?:ici|here|chez\s+[^\n.]+|at\s+[^\n.]+|dans\s+cette\s+entreprise)"
+            r"|en\s+commun))",
+            r"(?i:\d[\d\s.,]*\s+mutual\s+connections?)",
+        )
+    )
+)
+
+
+def _redact_emails(text: str) -> str:
+    """Remplace chaque mot qui est une adresse selon ``logmask.EMAIL_ADDRESS`` (source unique)."""
+
+    def swap(match: re.Match[str]) -> str:
+        word = match.group(0)
+        if "@" not in word:
+            return word
+        core = word.strip(_EDGE_PUNCTUATION)
+        if not core or not logmask.EMAIL_ADDRESS.match(core):
+            return word
+        start = word.index(core)
+        return word[:start] + PERSON_PLACEHOLDER + word[start + len(core) :]
+
+    return re.sub(r"\S+", swap, text)
+
+
+def _redact_phones(text: str) -> str:
+    def international(match: re.Match[str]) -> str:
+        digits = sum(c.isdigit() for c in match.group(0))
+        return PERSON_PLACEHOLDER if 8 <= digits <= 15 else match.group(0)
+
+    return _FRENCH_PHONE.sub(PERSON_PLACEHOLDER, _INTERNATIONAL_PHONE.sub(international, text))
+
+
+def _fold(text: str) -> tuple[str, list[int]]:
+    """Texte sans accents ni casse, un caractère par caractère d'origine non combinant, + position d'origine."""
+    chars: list[str] = []
+    origin: list[int] = []
+    for index, char in enumerate(text):
+        decomposed = unicodedata.normalize("NFD", char)
+        base = "".join(c for c in decomposed if not unicodedata.combining(c))
+        if not base:  # accent isolé (texte décomposé) : rattaché à la lettre précédente
+            continue
+        lowered = base.lower()
+        chars.append(lowered if len(lowered) == 1 else base[0])
+        origin.append(index)
+    return "".join(chars), origin
+
+
+def _redact_names(text: str, known_names: Iterable[str]) -> str:
+    names = {" ".join(_fold(str(n))[0].split()) for n in known_names if n}
+    names = sorted((n for n in names if len(n) >= 3), key=len, reverse=True)
+    if not names:
+        return text
+    pattern = re.compile(
+        r"(?<!\w)(?:" + "|".join(r"\s+".join(re.escape(w) for w in n.split()) for n in names) + r")(?!\w)"
+    )
+    folded, origin = _fold(text)
+    out: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(folded):
+        start, end = origin[match.start()], origin[match.end() - 1] + 1
+        while end < len(text) and unicodedata.combining(text[end]):  # accents décomposés de la dernière lettre
+            end += 1
+        if start < cursor:
+            continue
+        out += [text[cursor:start], PERSON_PLACEHOLDER]
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out)
+
+
+def redact_third_parties(text: str | None, known_names: Iterable[str] = ()) -> str:
+    """Remplace par ``[personne]`` les données de tiers d'un texte avant envoi à Claude (E-6, I-11).
+
+    Couvre : adresses email, téléphones (FR et internationaux), URL de profils ``linkedin.com/in/…``, motifs de
+    preuve sociale (« X et des millions d'autres… », « N relations travaillent ici ») et chaque nom de
+    ``known_names`` (mot entier, sans casse ni accents, noms de moins de 3 caractères ignorés). Idempotente ;
+    tolère ``None`` et ``""`` ; ne lève jamais (en cas d'erreur inattendue, le texte est renvoyé masqué en
+    entier, jamais en clair).
+    """
+    if not text:
+        return ""
+    try:
+        text = str(text)
+        text = _LINKEDIN_PROFILE.sub(PERSON_PLACEHOLDER, text)
+        text = _redact_emails(text)
+        text = _redact_phones(text)
+        text = _SOCIAL_PROOF.sub(PERSON_PLACEHOLDER, text)
+        return _redact_names(text, known_names or ())
+    except Exception:  # noqa: BLE001 - la rédaction ne doit jamais faire échouer la génération
+        return PERSON_PLACEHOLDER

@@ -41,9 +41,10 @@ src/
 
 ### 1.2 Organisation cible `[CIBLE]`
 > `[ACTUEL]` : `components/ErrorBoundary.tsx`, `src/schemas.ts` (vague 2), `components/RiskConsentDialog.tsx`,
-> `components/SourcePicker.tsx`, `src/content/risks.ts` (vague 3), `components/OppositionDialog.tsx` (vague 4).
-> Restent `[CIBLE]` : `ManualImportModal` (vague 5), `InterpreterBadge` (vague 6), `ConfirmDialog` (la révocation
-> d'un consentement utilise aujourd'hui une `Modal` locale à Paramètres).
+> `components/SourcePicker.tsx`, `src/content/risks.ts` (vague 3), `components/OppositionDialog.tsx` (vague 4),
+> `components/ManualImportModal.tsx` (vague 5), `components/InterpreterBadge.tsx` (vague 6).
+> Reste `[CIBLE]` : `ConfirmDialog` (la révocation d'un consentement utilise aujourd'hui une `Modal` locale à
+> Paramètres).
 
 
 La structure plate reste adaptée à la taille du projet (≈ 2 000 lignes). Règles d'évolution :
@@ -431,7 +432,8 @@ Props `{ onClose: () => void }`. Lit `useSettings()` (rend `null` tant qu'ils ne
 > Props `{ sources; value: SourceCode[]; onChange; onReadRisks(source); error? }`. Sources de `GET /api/sources`
 > hors `import_manuel` (Indeed jamais proposée, R-6) ; `enabled = false` affichée « bientôt » et non cochable ;
 > France Travail non cochable si `configured = false` ; défaut `linkedin` ; bouton « Lire et accepter les risques »
-> (aucune requête mutative). Le lien « Importer une offre » reste `[CIBLE]` (vague 5).
+> (aucune requête mutative). Vague 5 `[ACTUEL]` : prop optionnelle `onImport?: () => void` ; si elle est fournie, le
+> bouton « Importer une offre » (variante `ghost`, `small`) ouvre `ManualImportModal` (`RunModal` la fournit).
 
 Liste de cases à cocher issue de `GET /api/sources` (`enabled = true`) : libellé, badge de mode
 (`api_officielle` → `success` « API officielle », `navigateur` → `warning` « Navigateur — risques acceptés le
@@ -439,12 +441,13 @@ Liste de cases à cocher issue de `GET /api/sources` (`enabled = true`) : libell
 Travail désactivée avec explication si `FRANCE_TRAVAIL_CLIENT_ID` / `SECRET` absents. Au moins une source
 cochée si `scrape = true`.
 
-### 4.6 `InterpreterBadge` `[CIBLE]` (I-11)
-`{ interpreter: "claude" | "local"; model?: string }` — badge `accent` « Interprétation : Claude ({model}) » ou
-`neutral` « Interprétation : locale (règles) ». Affiché dans l'en-tête de Marché et la section « Analyse ».
-Aujourd'hui Marché affiche le texte brut `interprétation {report.interpreter}` et « Lecture rédigée par
-l'interprète {interpreter} » `[ACTUEL]` — la valeur `none` produit un rapport sans interprétation, que l'UI
-affiche « Pas d'interprétation pour ce rapport. » ; ce cas disparaît avec la dépréciation de `none`.
+### 4.6 `InterpreterBadge` `[ACTUEL]` (I-11, vague 6)
+`components/InterpreterBadge.tsx`, props `{ interpreter: string; model?: string }` — badge `accent` « Interprétation :
+Claude ({model}) » (modèle omis s'il est vide) ou `neutral` « Interprétation : locale (règles) » pour `local`, `none`
+(ancien rapport) ou toute valeur inconnue. Affiché dans l'en-tête de Marché (`Report.interpreter_model?`, absent des
+anciens rapports) et en indice de la section « Analyse ». `SectionHeading.hint` accepte désormais un `ReactNode`
+(et non plus seulement une chaîne) pour recevoir ce badge. Un rapport sans interprétation affiche toujours
+« Pas d'interprétation pour ce rapport. ».
 
 ### 4.7 `OppositionDialog` `[ACTUEL]` côté UI, backend `[CIBLE]` (I-13, vague 4)
 > Props `{ contact: Contact; applicationId: string; onClose }` ; `Modal` `dismissible = false`, focus initial sur le
@@ -459,9 +462,23 @@ envoyé à cette adresse ni à ce profil », bouton `danger` « Enregistrer l'op
 `POST /api/suppressions` `{ recipient, reason }`. Le contact affiche ensuite un badge `danger` « Opposé » et ses
 boutons « Écrire » sont désactivés.
 
-### 4.8 `ManualImportModal` (Indeed) `[CIBLE]` (R-6)
-Formulaire URL + texte collé (cf. `05-forms-and-validation.md` § 3.7) ; notice « Indeed n'autorise pas la
-collecte automatique : copie toi-même le texte de l'offre ».
+### 4.8 `ManualImportModal` (Indeed) `[ACTUEL]` (R-6, vague 5)
+`components/ManualImportModal.tsx`, props `{ onClose; onImported(item: ManualItemCreated) }` (la modale est fermée par
+le parent après le `201`). Champs : URL, titre, entreprise, lieu, mot-clé, texte collé (compteur de caractères,
+200 à 20 000). Validation `manualImportSchema` (`05` § 3.7), puis `useImportItem` (`POST /api/items/import`,
+`03` § 2.3). Les `422` du serveur (`champ : message`, séparés par ` ; `) sont rattachés à leur champ et retirés dès
+que le champ change ; le `409` « Cette offre est déjà dans l'historique. » s'affiche en tête. Aucun appel vers
+Indeed, aucune prévisualisation de l'adresse, aucun pré-remplissage ni lecture du presse-papiers. Notice : « Indeed
+n'autorise pas la collecte automatique : copie toi-même le texte de l'offre ».
+
+### 4.8 bis Aides de source et de blocage `[ACTUEL]` (vague 5)
+- `sourceLabel(code)` (`api.ts`) : libellé affichable d'une source (`SOURCE_LABEL`, repli sur le code) ; utilisé par
+  le badge **Source** des offres (`Jobs.tsx`), `RunModal` et `TaskDrawer`.
+- `blockedSourcesOf(task)` (`api.ts`) : sources nommées par `result.blocked_sources`, `["linkedin"]` à défaut
+  (tâche antérieure à la vague 5) ; `isBlockedRun(task)` reste vrai pour un `run` `terminée` avec `blocked = true`.
+- `blockedRunNotice(task)` (`TaskDrawer.tsx`) : « Collecte interrompue par {sources} : rapport établi sur les données
+  déjà collectées. » (E-4, G-10) ; `RunSources` affiche le résultat par source (`ok`, `bloquée`, `indisponible`,
+  `annulée`) d'après `result.sources`.
 
 ### 4.9 Composants de pages `[ACTUEL]`
 | Composant | Fichier | Props principales | Rôle |
@@ -469,7 +486,7 @@ collecte automatique : copie toi-même le texte de l'offre ».
 | `JobDetailModal` | `Jobs.tsx` (exporté) | `{ id: string; onClose }` | Détail d'offre : score, compétences acquises / manquantes, critères du score, texte (≤ 8 000 car.), « Préparer la candidature » ou « Voir la candidature ». |
 | `OfferCard` | `Market.tsx` | `{ job; index; actionable; onOpen }` | Carte d'offre : `ScoreRing`, lieu, date, concurrence (« Plus de … » en `warning`), annotation, Préparer. `actionable = report.is_latest`. |
 | `Kpi` | `Market.tsx` | `{ label; value; suffix?; hint?; delta?; index }` | Indicateur animé (`useCountUp`), écart en points vs rapport précédent du même mot-clé. |
-| `Panel`, `SectionHeading`, `Bars`, `WeeklyChart`, `ScoreRing`, `CopyButton` | `Market.tsx` | — | Présentation du rapport. |
+| `Panel`, `SectionHeading`, `Bars`, `WeeklyChart`, `ScoreRing`, `CopyButton` | `Market.tsx` | `SectionHeading` : `{ id; title; hint?: ReactNode; actions? }` | Présentation du rapport. |
 | `QuotaBar`, `ActivityChart` | `Dashboard.tsx` | `{ label; used; limit }`, `{ data }` | Quotas du jour, activité 14 jours empilée par type. |
 | `Dossier`, `Apply`, `Contacts`, `History`, `Detail` | `Applications.tsx` | `{ app }` / `{ id }` | Onglets de la candidature. |
 

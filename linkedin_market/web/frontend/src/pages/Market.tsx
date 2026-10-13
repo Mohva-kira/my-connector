@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Job, Report, SkillAdded, SourceCode, Task, api, authedUrl, enc, sourceLabel } from "../api";
 import { Icon, IconName } from "../components/icons";
+import { InterpreterBadge } from "../components/InterpreterBadge";
 import { RunModal } from "../components/RunModal";
 import { useTaskUi } from "../components/TaskDrawer";
 import { useAction, useLabelJob, useProfile, useReport, useReports } from "../hooks";
@@ -52,7 +53,7 @@ function Panel({ title, icon, actions, children, className = "", index = 0 }: {
   );
 }
 
-function SectionHeading({ id, title, hint, actions }: { id: string; title: string; hint?: string; actions?: ReactNode }) {
+function SectionHeading({ id, title, hint, actions }: { id: string; title: string; hint?: ReactNode; actions?: ReactNode }) {
   return (
     <div id={id} className="mb-3 mt-10 flex scroll-mt-20 flex-wrap items-end justify-between gap-2 first:mt-0">
       <div>
@@ -322,7 +323,7 @@ export default function Market() {
         <div>
           <h1 tabIndex={-1} className="text-xl font-semibold focus:outline-none">Marché</h1>
           <p className="mt-0.5 text-sm text-text-secondary">
-            {report ? <>« {report.request.keyword} » · {formatDate(report.generated_at)}{report.interpreter && <> · interprétation {report.interpreter}</>}</> : "Tendances, compétences demandées et offres à cibler"}
+            {report ? <>« {report.request.keyword} » · {formatDate(report.generated_at)}{report.interpreter && <> · <InterpreterBadge interpreter={report.interpreter} model={report.interpreter_model} /></>}</> : "Tendances, compétences demandées et offres à cibler"}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -494,7 +495,7 @@ function MarketBody({
       </div>
 
       {/* ---------------------------------------------------------- analyse */}
-      <SectionHeading id="analyse" title="Analyse" hint={report.interpreter ? `Lecture rédigée par l'interprète ${report.interpreter}` : undefined} />
+      <SectionHeading id="analyse" title="Analyse" hint={report.interpreter ? <InterpreterBadge interpreter={report.interpreter} model={report.interpreter_model} /> : undefined} />
       {sections.length === 0 ? <Empty>Pas d'interprétation pour ce rapport.</Empty> : (
         <div className="grid gap-4 lg:grid-cols-2">
           {sections.map((section, i) => isOffersSection(section.title) && allJobs.length > 0 ? (

@@ -16,7 +16,7 @@ import re
 import sys
 import webbrowser
 
-from . import application, config, consent, interpreter, matching, report, storage
+from . import application, config, consent, interpreter, matching, report, retention, settings, storage
 from . import profile as profile_mod
 from .db.bootstrap import prepare_database
 from .models import Profile, SearchRequest
@@ -169,6 +169,8 @@ def prepare_applications(
         _ask("Préparer une candidature pour quelles offres ? (ex. 1,3 · tous · Entrée = aucune)"), len(candidates)
     )
     items = {i.id: i for i in storage.load_items(request.keyword, window_days=3650)}
+    prefs = settings.load_settings()
+    names = application.known_contact_names()
     for idx in chosen:
         job = candidates[idx]
         item = items.get(job["id"])
@@ -176,7 +178,16 @@ def prepare_applications(
             log.warning("Texte de l'offre introuvable dans l'historique : %s", job["title"])
             continue
         print(f"\nPréparation : {job['title']} — {job['company']}...")
-        app = application.generate(prof, item, job, results, args.interpreter)
+        app = application.generate(
+            prof,
+            item,
+            job,
+            results,
+            args.interpreter,
+            known_names=names,
+            home_location=prefs["home_location"],
+            timezone=prefs["timezone"],
+        )
         folder = application.write(app, item, job)
         print(
             f"CV ({'rédigé par Claude' if app.generator == 'claude' else 'assemblé localement'}) : {folder / 'cv.html'}"
@@ -233,6 +244,11 @@ def main(argv: list[str] | None = None) -> None:
     config.ensure_data_dirs()
 
     prepare_database()  # schéma, utilisateur, import des fichiers historiques ; base injoignable => arrêt
+    try:
+        retention.purge_current_user()  # purge de rétention (I-10, I-14), synchrone, une fois au démarrage
+    except Exception as exc:  # noqa: BLE001 - une purge en échec ne doit pas empêcher l'analyse
+        log.warning("Purge de rétention impossible : %s", exc.__class__.__name__)
+    prefs = settings.load_settings()
     request = collect_request(args)
 
     linkedin_text = ""
@@ -282,7 +298,9 @@ def main(argv: list[str] | None = None) -> None:
                     "Pas encore assez d'annotations (min. %d, des deux types) pour entraîner.", matching.MIN_LABELS
                 )
 
-    text, used = interpreter.interpret(summary_for_interpreter(results), args.interpreter)
+    text, used = interpreter.interpret(
+        summary_for_interpreter(results), args.interpreter, prefs["home_location"], prefs["timezone"]
+    )
     results["interpretation"] = text
     results["interpreter"] = used
     results["interpreter_model"] = config.anthropic_model() if used == "claude" else ""

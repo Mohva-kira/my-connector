@@ -124,6 +124,8 @@ export default function SettingsPage() {
           <div className="space-y-3">
             <Field label="Mot-clé du poste"><input className={inputClass} value={form.keyword} onChange={(e) => set("keyword", e.target.value)} /></Field>
             <Field label="Localisation" hint="Vide = monde entier"><input className={inputClass} value={form.location} onChange={(e) => set("location", e.target.value)} /></Field>
+            <Field label="Ton lieu de résidence" hint="Utilisé dans les analyses et les CV ; vide = non mentionné" error={errors.home_location}><input className={inputClass} value={form.home_location} onChange={(e) => set("home_location", e.target.value)} /></Field>
+            <Field label="Ton fuseau horaire" hint="Ex. Africa/Abidjan, Europe/Paris ; vide = non mentionné" error={errors.timezone}><input className={inputClass} value={form.timezone} onChange={(e) => set("timezone", e.target.value)} /></Field>
             <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.remote_only} onChange={(e) => set("remote_only", e.target.checked)} />Full remote uniquement</label>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Prudence">
@@ -146,7 +148,7 @@ export default function SettingsPage() {
               </Field>
             </div>
             {form.interpreter === "claude" && (
-              <Notice tone="warning">Avec Claude, ton profil complet et le texte des offres sont envoyés à l'API Anthropic pour rédiger les CV.</Notice>
+              <Notice tone="warning">Avec Claude, ton profil et le texte de l'offre sont envoyés à l'API Anthropic, sans noms, emails, téléphones ni liens de profils de personnes (remplacés par [personne]).</Notice>
             )}
           </div>
         </Card>
