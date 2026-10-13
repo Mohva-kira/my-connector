@@ -2,7 +2,7 @@
 // qu'un confort : le serveur reste seul garant.
 import { z } from "zod";
 import { SUPPRESSION_REASONS } from "./api";
-import type { Job, ModelInfo, Report, Settings, SuppressionBody } from "./api";
+import type { Job, ManualItemBody, ModelInfo, Report, Settings, SuppressionBody } from "./api";
 
 // ------------------------------------------------------------------ prudence (I-07, E-3 / G-3)
 export const CAUTIONS = ["prudent", "normal", "agressif"] as const;
@@ -92,6 +92,28 @@ export const suppressionSchema = z.object({
   reason: z.enum(SUPPRESSION_REASONS, { error: "reason : doit être l'un de : désinscription, refus_oral, plainte" }),
 }) satisfies z.ZodType<SuppressionBody>;
 
+// ------------------------------------------------------------------ import manuel Indeed (POST /api/items/import, R-6)
+/** Hôte `indeed.com` ou sous-domaine, en https (backend/01 § 5.8.2) : `evil-indeed.com` et `indeed.com.evil.fr` refusés. */
+export const INDEED_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*indeed\.com(\/|$|\?|#)/i;
+export const MANUAL_TEXT_MIN = 200;
+export const MANUAL_TEXT_MAX = 20000;
+
+/** Bornes et messages du serveur ; `trim` avant `min`/`max`. `source_code` est ajouté à l'envoi. */
+export const manualImportSchema = z.object({
+  url: z.string().trim().max(2000, { error: "colle l'adresse https de l'offre Indeed." })
+    .refine((v) => INDEED_HOST_RE.test(v), { error: "colle l'adresse https de l'offre Indeed." }),
+  title: z.string().trim()
+    .min(1, { error: "renseigne le titre de l'offre (150 caractères maximum)." })
+    .max(150, { error: "renseigne le titre de l'offre (150 caractères maximum)." }),
+  company: z.string().trim().max(80, { error: "entreprise trop longue (80 caractères maximum)." }),
+  location: z.string().trim().max(120, { error: "lieu trop long (120 caractères maximum)." }),
+  text: z.string().trim()
+    .min(MANUAL_TEXT_MIN, { error: "colle le texte complet de l'offre (200 caractères minimum)." })
+    .max(MANUAL_TEXT_MAX, { error: "texte trop long (20 000 caractères maximum)." }),
+  keyword: z.string().trim().max(80, { error: "mot-clé trop long (80 caractères maximum)." }),
+}) satisfies z.ZodType<Omit<ManualItemBody, "source_code" | "keyword"> & { keyword: string }>;
+export type ManualImportForm = z.infer<typeof manualImportSchema>;
+
 /** Premier message d'erreur par champ (clé = premier élément du chemin, `""` pour l'objet). */
 export function fieldErrors(error: z.ZodError): Record<string, string> {
   const out: Record<string, string> = {};
@@ -123,6 +145,8 @@ const EMPTY_MODEL: ModelInfo = { trained: false, n_labels: 0, train_accuracy: nu
 
 const jobSchema = z.looseObject({
   id: z.string(),
+  // Rapport antérieur à la vague 5 (ou valeur inconnue) : lu comme LinkedIn, rien n'est réécrit (I-02).
+  source_code: z.enum(["linkedin", "france_travail", "malt", "wttj", "indeed"]).catch("linkedin"),
   title: str,
   company: str,
   url: str,

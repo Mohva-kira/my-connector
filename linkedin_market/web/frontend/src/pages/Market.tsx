@@ -2,7 +2,7 @@ import { CSSProperties, ReactNode, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Job, Report, SkillAdded, Task, api, authedUrl, enc } from "../api";
+import { Job, Report, SkillAdded, SourceCode, Task, api, authedUrl, enc, sourceLabel } from "../api";
 import { Icon, IconName } from "../components/icons";
 import { RunModal } from "../components/RunModal";
 import { useTaskUi } from "../components/TaskDrawer";
@@ -211,6 +211,7 @@ function OfferCard({ job, index, actionable, onOpen }: { job: Job; index: number
       </div>
 
       <div className="mt-3 flex flex-wrap gap-1.5">
+        <Badge>{sourceLabel(job.source_code)}</Badge>
         {job.remote && <Badge tone="info">Remote</Badge>}
         {job.freelance && <Badge tone="info">Freelance</Badge>}
         {job.matched_skills.slice(0, 4).map((s) => <Badge key={s} tone="success">✓ {s}</Badge>)}
@@ -232,7 +233,9 @@ function OfferCard({ job, index, actionable, onOpen }: { job: Job; index: number
             className={`rounded-md p-1.5 transition ${job.label === 0 ? "bg-warning/15 text-warning" : "text-text-muted hover:bg-bg-secondary hover:text-text-primary"}`}
           ><Icon name="thumbDown" /></button>
         </div>
-        <a href={job.url} target="_blank" rel="noopener noreferrer" title="Ouvrir sur LinkedIn" aria-label={job.title ? `Ouvrir l'offre « ${job.title} » sur LinkedIn (nouvel onglet)` : "Ouvrir l'offre sur LinkedIn (nouvel onglet)"} className="rounded-md p-1.5 text-text-muted transition hover:bg-bg-secondary hover:text-text-primary">
+        <a href={job.url} target="_blank" rel="noopener noreferrer" title="Ouvrir l'offre"
+          aria-label={job.title ? `Ouvrir l'offre « ${job.title} » sur ${sourceLabel(job.source_code)} (nouvel onglet)` : `Ouvrir l'offre sur ${sourceLabel(job.source_code)} (nouvel onglet)`}
+          className="rounded-md p-1.5 text-text-muted transition hover:bg-bg-secondary hover:text-text-primary">
           <Icon name="external" />
         </a>
         <div className="ml-auto flex gap-1.5">
@@ -283,8 +286,11 @@ export default function Market() {
   const [openJob, setOpenJob] = useState<string | null>(null);
   // « Voir toutes les offres » vaut pour un rapport donné : changer de rapport (y compris par Retour) replie la liste.
   const [showAllFor, setShowAllFor] = useState<string | null>(null);
+  // Filtre de source de la liste d'offres, propre à un rapport : changer de rapport le réinitialise.
+  const [sourceFilter, setSourceFilter] = useState<{ report: string | null; value: SourceCode | "" }>({ report: null, value: "" });
   const name = chosen || reports?.[0]?.name;
   const showAllJobs = !!name && showAllFor === name;
+  const sourceValue = sourceFilter.report === (name ?? null) ? sourceFilter.value : "";
   const row = reports?.find((r) => r.name === name);
   const { data: report, error } = useReport(name);
   // Rapport précédent du même mot-clé, pour l'évolution de la couverture.
@@ -352,6 +358,8 @@ export default function Market() {
           owned={owned}
           added={added}
           showAllJobs={showAllJobs}
+          sourceFilter={sourceValue}
+          onSourceFilter={(value) => setSourceFilter({ report: name ?? null, value })}
           onShowAllJobs={() => setShowAllFor(name ?? null)}
           onOpenJob={setOpenJob}
           onAddSkill={(skill) => addSkill.mutate(skill, { onSuccess: (res) => onSkillAdded(skill, res) })}
@@ -368,16 +376,20 @@ export default function Market() {
 }
 
 function MarketBody({
-  report, previous, owned, added, showAllJobs, onShowAllJobs, onOpenJob, onAddSkill, addingSkill, onRescore, rescoring, onTrain, training,
+  report, previous, owned, added, showAllJobs, sourceFilter, onSourceFilter, onShowAllJobs, onOpenJob, onAddSkill, addingSkill, onRescore, rescoring, onTrain, training,
 }: {
-  report: Report; previous?: Report; owned: Set<string>; added: string[]; showAllJobs: boolean; onShowAllJobs: () => void;
+  report: Report; previous?: Report; owned: Set<string>; added: string[]; showAllJobs: boolean;
+  sourceFilter: SourceCode | ""; onSourceFilter: (value: SourceCode | "") => void; onShowAllJobs: () => void;
   onOpenJob: (id: string) => void; onAddSkill: (skill: string) => void; addingSkill?: string; onRescore: () => void; rescoring: boolean;
   onTrain: () => void; training: boolean;
 }) {
   const sections = useMemo(() => splitSections(report.interpretation || ""), [report.interpretation]);
-  const jobs = report.top_jobs ?? [];
+  const allJobs = report.top_jobs;
+  // Filtre côté client sur la liste seulement : KPI, compteurs et analyses restent ceux du rapport entier.
+  const reportSources = useMemo(() => [...new Set(allJobs.map((j) => j.source_code))], [allJobs]);
+  const jobs = sourceFilter ? allJobs.filter((j) => j.source_code === sourceFilter) : allJobs;
   const visibleJobs = showAllJobs ? jobs : jobs.slice(0, 6);
-  const strong = jobs.filter((j) => j.score >= 75).length;
+  const strong = allJobs.filter((j) => j.score >= 75).length;
   const missingTop = report.gap.skills.filter((s) => !s.owned && !owned.has(s.skill.toLowerCase())).slice(0, 5);
   const coverageDelta = previous ? report.gap.coverage - previous.gap.coverage : null;
   const scrollTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -414,12 +426,23 @@ function MarketBody({
         id="offres"
         title="Offres à cibler"
         hint={`${jobs.length} offres classées par score de correspondance`}
-        actions={<Link to="/offres" className="flex items-center gap-1 text-sm text-accent-primary hover:underline">Toutes les offres <Icon name="arrowRight" className="h-3.5 w-3.5" /></Link>}
+        actions={<div className="flex flex-wrap items-center gap-3">
+          {reportSources.length >= 2 && (
+            <label className="flex items-center gap-2 text-sm text-text-secondary">
+              Source (filtre la liste, pas les indicateurs)
+              <select className={`${inputClass} !w-auto`} value={sourceFilter} onChange={(e) => onSourceFilter(e.target.value as SourceCode | "")}>
+                <option value="">Toutes les sources</option>
+                {reportSources.map((code) => <option key={code} value={code}>{sourceLabel(code)}</option>)}
+              </select>
+            </label>
+          )}
+          <Link to="/offres" className="flex items-center gap-1 text-sm text-accent-primary hover:underline">Toutes les offres <Icon name="arrowRight" className="h-3.5 w-3.5" /></Link>
+        </div>}
       />
       {!report.is_latest && (
         <div className="mb-3"><Notice tone="info">Rapport antérieur : la préparation et le détail des offres sont disponibles depuis le dernier rapport.</Notice></div>
       )}
-      {jobs.length === 0 ? <Empty>Aucune offre dans ce rapport.</Empty> : (
+      {allJobs.length === 0 ? <Empty>Aucune offre dans ce rapport.</Empty> : jobs.length === 0 ? <Empty>Aucune offre de cette source dans ce rapport.</Empty> : (
         <>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {visibleJobs.map((job, i) => (
@@ -474,7 +497,7 @@ function MarketBody({
       <SectionHeading id="analyse" title="Analyse" hint={report.interpreter ? `Lecture rédigée par l'interprète ${report.interpreter}` : undefined} />
       {sections.length === 0 ? <Empty>Pas d'interprétation pour ce rapport.</Empty> : (
         <div className="grid gap-4 lg:grid-cols-2">
-          {sections.map((section, i) => isOffersSection(section.title) && jobs.length > 0 ? (
+          {sections.map((section, i) => isOffersSection(section.title) && allJobs.length > 0 ? (
             <Panel key={section.title} title={section.title} icon="target" index={i}>
               <p className="text-sm text-text-secondary">Les offres de cette section sont présentées, nettoyées et actionnables, plus haut.</p>
               <button onClick={() => scrollTo("offres")} className="mt-2 flex items-center gap-1 text-sm text-accent-primary hover:underline">Voir les offres à cibler <Icon name="arrowRight" className="h-3.5 w-3.5" /></button>

@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { ApiError, ApiRequest, SourceCode, SourceInfo, Task, api, onConsentRequired } from "./api";
+import { ApiError, ApiRequest, SOURCE_LABEL, SourceCode, SourceInfo, Task, api, onConsentRequired } from "./api";
 import { ComposeInitial, ComposeModal } from "./components/ComposeModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { CAUTION_MAX } from "./schemas";
@@ -84,10 +84,6 @@ function useWatchUnauthorized() {
 }
 
 // ------------------------------------------------------------------ 428 : popup de risques puis relance explicite
-const SOURCE_LABELS: Record<SourceCode, string> = {
-  linkedin: "LinkedIn", france_travail: "France Travail", malt: "Malt", wttj: "Welcome to the Jungle", indeed: "Indeed",
-};
-
 /** Libellé de l'action interrompue, déduit de la requête d'origine. */
 const ACTION_LABELS: [RegExp, string][] = [
   [/^\/runs$/, "Lancer l'analyse"],
@@ -157,7 +153,7 @@ function ConsentGate() {
   const source: SourceInfo | null = !pending || !code ? null : known && known.risk_version === (pending.riskVersion ?? known.risk_version)
     ? known
     : {
-      code, label: known?.label ?? SOURCE_LABELS[code] ?? code, access_mode: "navigateur", enabled: true,
+      code, label: known?.label ?? SOURCE_LABEL[code] ?? code, access_mode: "navigateur", enabled: true,
       risk_version: pending.riskVersion, consent: known?.consent ?? null, consent_required: true, blocked: null,
     };
 

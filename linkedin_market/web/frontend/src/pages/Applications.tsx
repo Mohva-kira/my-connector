@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
-import { ApplicationDetail, Contact, FINAL_STATUSES, Task, api, authedUrl, enc } from "../api";
+import { ApplicationDetail, Contact, FINAL_STATUSES, SOURCE_LABEL, Task, api, authedUrl, enc, sourceOfRef } from "../api";
 import { ComposeModal } from "../components/ComposeModal";
 import { OppositionDialog } from "../components/OppositionDialog";
 import { useConsentGuard } from "../components/RiskConsentDialog";
@@ -27,6 +27,7 @@ function Dossier({ app }: { app: ApplicationDetail }) {
   const save = useAction(
     (body: { message?: string; cv?: string }) => api<ApplicationDetail>(`/applications/${enc(app.id)}`, { method: "PATCH", body }),
     [["application", app.id], ["applications"]]);
+  const linkedin = sourceOfRef(app.id) === "linkedin";
   const dirtyMessage = message !== app.message;
   const dirtyCv = cv !== app.cv;
 
@@ -34,7 +35,7 @@ function Dossier({ app }: { app: ApplicationDetail }) {
     <div className="space-y-4">
       <ErrorBox error={save.error} />
       <Card title="Message de candidature" actions={<Button small variant="primary" disabled={!dirtyMessage} loading={save.isPending} onClick={() => save.mutate({ message })}>Enregistrer</Button>}>
-        {message.length > 1500 && <div className="mb-2"><Notice tone="warning">Ce message est très long : il contient sans doute du texte brut de la page LinkedIn. Relis-le et raccourcis-le avant de l'envoyer.</Notice></div>}
+        {linkedin && message.length > 1500 && <div className="mb-2"><Notice tone="warning">Ce message est très long : il contient sans doute du texte brut de la page LinkedIn. Relis-le et raccourcis-le avant de l'envoyer.</Notice></div>}
         <textarea className={`${inputClass} font-sans`} rows={7} value={message} onChange={(e) => setMessage(e.target.value)} aria-label="Message de candidature" />
         <div className="mt-2 flex items-center gap-2 text-xs text-text-muted">
           <span>{message.length} caractères</span>
@@ -79,6 +80,21 @@ function Apply({ app }: { app: ApplicationDetail }) {
   const consent = useConsentGuard();
   const quota = status?.quotas.apply;
   const done = app.status === "postulée" || app.status === "entretien";
+  const origin = sourceOfRef(app.id);
+
+  // Candidature simplifiée : LinkedIn uniquement (le serveur répond 422 sinon). Aucun bouton « Lancer », aucune popup de risques.
+  if (origin !== "linkedin") {
+    return (
+      <Card title="Postuler">
+        <Notice>
+          La candidature simplifiée n'existe que pour LinkedIn : ouvre l'offre sur {SOURCE_LABEL[origin]} et postule toi-même.
+        </Notice>
+        <div className="mt-3">
+          <a className="inline-block rounded-md border border-border-default px-3.5 py-2 text-sm hover:bg-bg-secondary" target="_blank" rel="noopener noreferrer" href={app.url}>Ouvrir l'offre</a>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -131,10 +147,12 @@ function Contacts({ app }: { app: ApplicationDetail }) {
   const [opposing, setOpposing] = useState<Contact | null>(null);
   const consent = useConsentGuard();
   const dirty = JSON.stringify(rows) !== JSON.stringify(app.contacts);
+  const linkedin = sourceOfRef(app.id) === "linkedin";
 
   return (
     <Card title="Contacts de l'entreprise" actions={<div className="flex flex-wrap gap-2">
-      <Button small onClick={() => consent.guard("linkedin", () => lookup.mutate(undefined, { onSuccess: track }))} loading={lookup.isPending} disabled={!status?.credentials_configured || !!status?.blocked}>Chercher les recruteurs de l'offre</Button>
+      <Button small onClick={() => consent.guard("linkedin", () => lookup.mutate(undefined, { onSuccess: track }))} loading={lookup.isPending} disabled={!linkedin || !status?.credentials_configured || !!status?.blocked}
+        title={linkedin ? undefined : "La recherche de recruteurs n'existe que pour les offres LinkedIn."}>Chercher les recruteurs de l'offre</Button>
       <Button small onClick={() => setRows([...rows, { full_name: "", profile_url: "", email: null, source: "manuel" }])}>Ajouter un contact</Button>
       <Button small variant="primary" onClick={() => setComposing({})}>Écrire à l'entreprise</Button>
     </div>}>
@@ -142,7 +160,7 @@ function Contacts({ app }: { app: ApplicationDetail }) {
       {composing && <ComposeModal app={app} contact={composing.contact} onClose={() => setComposing(null)} />}
       {opposing && <OppositionDialog contact={opposing} applicationId={app.id} onClose={() => setOpposing(null)} />}
       {consent.dialog}
-      <p className="mb-3 text-xs text-text-muted">La recherche lit le bloc « équipe de recrutement » de l'offre et les coordonnées que LinkedIn t'affiche : l'email n'apparaît que s'il est visible pour toi.</p>
+      {linkedin && <p className="mb-3 text-xs text-text-muted">La recherche lit le bloc « équipe de recrutement » de l'offre et les coordonnées que LinkedIn t'affiche : l'email n'apparaît que s'il est visible pour toi.</p>}
       {rows.length === 0 ? <Empty>Aucun contact. Ajoute le recruteur à la main (nom, profil LinkedIn, email).</Empty> : (
         <ul className="space-y-3">
           {rows.map((c, i) => (
@@ -215,7 +233,7 @@ function Detail({ id }: { id: string }) {
         <div className="min-w-0">
           <h2 className="truncate text-lg font-semibold">{app.title || "Sans titre"}</h2>
           <p className="text-sm text-text-secondary">{app.company || "Entreprise inconnue"} · <Badge tone={scoreTone(app.score)}>{app.score} %</Badge> · préparée le {formatDate(app.prepared_at)}</p>
-          {(app.title.length > 140 || app.company.length > 100) && <div className="mt-2"><Notice tone="warning">Le titre ou l'entreprise semblent mal extraits de la page LinkedIn (texte trop long). Vérifie le dossier avant d'envoyer quoi que ce soit.</Notice></div>}
+          {sourceOfRef(app.id) === "linkedin" && (app.title.length > 140 || app.company.length > 100) && <div className="mt-2"><Notice tone="warning">Le titre ou l'entreprise semblent mal extraits de la page LinkedIn (texte trop long). Vérifie le dossier avant d'envoyer quoi que ce soit.</Notice></div>}
         </div>
         <div className="flex items-center gap-2">
           <select className={inputClass} value={app.status} onChange={(e) => setStatus.mutate(e.target.value)} aria-label="Statut">

@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
-import { Settings, SourceCode, SourceInfo, Task, api } from "../api";
+import { ManualItemCreated, Settings, SourceCode, SourceInfo, Task, api, sourceLabel } from "../api";
 import { CAUTION_MAX, fieldErrors, runBodySchema } from "../schemas";
 import { useSettings, useSources } from "../hooks";
+import { ManualImportModal } from "./ManualImportModal";
 import { RiskConsentDialog } from "./RiskConsentDialog";
 import { SourcePicker, collectableSources, unavailableReason } from "./SourcePicker";
 import { Button, ErrorBox, Field, Modal, Notice, inputClass } from "../ui";
@@ -18,6 +19,9 @@ export function RunModal({ onClose }: { onClose: () => void }) {
   const { data: sources } = useSources();
   const [picked, setPicked] = useState<SourceCode[] | null>(null);
   const [consentFor, setConsentFor] = useState<SourceInfo | null>(null);
+  // Import manuel Indeed ouvert par-dessus cette modale (même empilement que la popup de risques).
+  const [importing, setImporting] = useState(false);
+  const [imported, setImported] = useState<ManualItemCreated | null>(null);
 
   if (!settings) return null;
   const available = collectableSources(sources ?? []).filter((s) => !unavailableReason(s));
@@ -39,6 +43,15 @@ export function RunModal({ onClose }: { onClose: () => void }) {
   });
   const errors = checked.success ? {} : fieldErrors(checked.error);
   const cap = CAUTION_MAX[value("caution")];
+  // Avertissement « navigateur » seulement pour les sources cochées en mode navigateur ; sources pas encore chargées :
+  // le serveur prend ["linkedin"] par défaut.
+  const browserLabels = !sources
+    ? [sourceLabel("linkedin")]
+    : selected.flatMap((code) => {
+      const source = sources.find((s) => s.code === code);
+      return source?.access_mode === "navigateur" ? [source.label] : [];
+    });
+  const apiOnly = !!sources && selected.length > 0 && browserLabels.length === 0;
 
   const start = async () => {
     if (!checked.success) return;
@@ -100,16 +113,23 @@ export function RunModal({ onClose }: { onClose: () => void }) {
         </div>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={form.scrape} onChange={(e) => setForm((f) => ({ ...f, scrape: e.target.checked }))} />
-          Collecter de nouvelles données sur LinkedIn (sinon : réanalyser l'historique)
+          Collecter de nouvelles données (sinon : réanalyser l'historique)
         </label>
-        {form.scrape && (
+        {form.scrape && browserLabels.length > 0 && (
           <Notice tone="warning">
-            Un navigateur va s'ouvrir et parcourir LinkedIn avec ton compte. Garde des volumes faibles : le scraping automatisé est
-            contraire aux conditions d'utilisation de LinkedIn.
+            Un navigateur va s'ouvrir et parcourir {browserLabels.join(", ")} avec ton compte. Garde des volumes faibles : le
+            scraping automatisé est contraire aux conditions d'utilisation de {browserLabels.length > 1 ? "ces plateformes" : "cette plateforme"}.
           </Notice>
         )}
+        {form.scrape && apiOnly && <Notice>API officielle : aucun navigateur ne s'ouvre.</Notice>}
         {form.scrape && sources && (
-          <SourcePicker sources={sources} value={selected} onChange={setPicked} onReadRisks={setConsentFor} error={errors.sources} />
+          <SourcePicker sources={sources} value={selected} onChange={setPicked} onReadRisks={setConsentFor} error={errors.sources}
+            onImport={() => setImporting(true)} />
+        )}
+        {imported && (
+          <Notice tone="success">
+            Offre « {imported.title} » importée. Elle sera scorée au prochain « Recalculer les scores ».
+          </Notice>
         )}
         <ErrorBox error={error} />
         <div className="flex justify-end gap-2">
@@ -117,6 +137,9 @@ export function RunModal({ onClose }: { onClose: () => void }) {
           <Button variant="primary" onClick={start} loading={busy} disabled={!checked.success}>Lancer</Button>
         </div>
       </div>
+      {importing && (
+        <ManualImportModal onClose={() => setImporting(false)} onImported={(item) => { setImporting(false); setImported(item); }} />
+      )}
       {consentFor && (
         <RiskConsentDialog source={consentFor} onAccepted={onConsentAccepted} onRefused={() => setConsentFor(null)} />
       )}

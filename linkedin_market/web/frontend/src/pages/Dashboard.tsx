@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { RunModal } from "../components/RunModal";
 import { RunResult, isBlockedRun } from "../api";
-import { BLOCKED_RUN_NOTICE, TASK_STATUS_LABEL, useTaskUi } from "../components/TaskDrawer";
+import { TASK_STATUS_LABEL, blockedRunNotice, useTaskUi } from "../components/TaskDrawer";
 import { useMonitor, useStatus } from "../hooks";
 import { Badge, Button, Card, Empty, ErrorBox, Notice, PageHeader, formatDate, statusTone } from "../ui";
 
@@ -69,8 +69,9 @@ export default function Dashboard() {
   const funnelMax = Math.max(1, ...(monitor?.funnel.map((f) => f.count) ?? [1]));
   // La dernière analyse vient-elle d'une collecte interrompue (E-4 option A) ?
   const lastReport = monitor?.last_analysis?.report;
-  const lastBlocked = !!lastReport && !!monitor?.recent_tasks.some(
-    (t) => isBlockedRun(t) && (t.result as RunResult | null)?.report === lastReport);
+  const lastBlocked = lastReport
+    ? monitor?.recent_tasks.find((t) => isBlockedRun(t) && (t.result as RunResult | null)?.report === lastReport)
+    : undefined;
 
   return (
     <>
@@ -110,7 +111,7 @@ export default function Dashboard() {
           <Card title="Dernière analyse" actions={<Link className="text-xs text-accent-primary" to="/marche">Voir le marché</Link>}>
             {monitor.last_analysis ? (
               <div className="space-y-1 text-sm">
-                {lastBlocked && <div className="mb-2"><Notice tone="warning">{BLOCKED_RUN_NOTICE}</Notice></div>}
+                {lastBlocked && <div className="mb-2"><Notice tone="warning">{blockedRunNotice(lastBlocked)}</Notice></div>}
                 <p className="font-medium">{monitor.last_analysis.keyword}</p>
                 <p className="text-text-secondary">{formatDate(monitor.last_analysis.generated_at)}</p>
                 <p className="text-text-secondary">{monitor.last_analysis.counts.job} offres · {monitor.last_analysis.counts.post} posts · {monitor.last_analysis.counts.person} profils</p>

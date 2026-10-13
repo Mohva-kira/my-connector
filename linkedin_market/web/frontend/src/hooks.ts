@@ -3,7 +3,7 @@ import {
 } from "@tanstack/react-query";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import {
-  ApplicationDetail, ApplicationRow, FINAL_STATUSES, JobDetail, JobsResponse, Monitor, Profile, Report, ReportRow, Settings,
+  ApplicationDetail, ApplicationRow, FINAL_STATUSES, JobDetail, JobsResponse, ManualItemBody, ManualItemCreated, Monitor, Profile, Report, ReportRow, Settings,
   SourceCode, SourceInfo, StatusInfo, Task, api, enc,
 } from "./api";
 import { reportSchema } from "./schemas";
@@ -161,3 +161,10 @@ export const useRevokeConsent = () =>
 /** Levée du repos d'une source (`POST /api/block/clear {source}`). */
 export const useClearBlock = () =>
   useAction((source: SourceCode) => api<{ ok: boolean }>("/block/clear", { method: "POST", body: { source } }), SOURCE_KEYS);
+
+/**
+ * Import manuel d'une offre Indeed (`POST /api/items/import`, 201). Invalide les offres, le rapport et le suivi ; pas
+ * `["tasks"]` : aucune tâche n'est créée (l'offre est scorée au prochain « Recalculer les scores »).
+ */
+export const useImportItem = () =>
+  useAction((body: ManualItemBody) => api<ManualItemCreated>("/items/import", { method: "POST", body }), [["jobs"], ["report"], ["monitor"]]);

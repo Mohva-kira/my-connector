@@ -125,11 +125,29 @@ export interface RunResult {
   blocked: boolean;
   /** Présent seulement si `blocked`. */
   blocked_where?: "collecte";
+  /** Vague 5 (backend/01 § 5.8.2) : sources bloquées ; optionnel (tâches antérieures à la vague 5). */
+  blocked_sources?: SourceCode[];
+  /** Vague 5 : résultat par source, dans l'ordre de la collecte ; optionnel (tâches antérieures à la vague 5). */
+  sources?: RunSourceResult[];
+}
+
+/** Résultat d'une source dans `RunResult.sources` (`detail` vide si `ok`). */
+export interface RunSourceResult {
+  code: SourceCode;
+  items: number;
+  status: "ok" | "bloquée" | "indisponible" | "annulée";
+  detail: string;
 }
 
 /** Vrai pour une analyse terminée dont la collecte a été interrompue par LinkedIn (rapport partiel). */
 export function isBlockedRun(task: Task): boolean {
   return task.kind === "run" && task.status === "terminée" && (task.result as RunResult | null)?.blocked === true;
+}
+
+/** Sources nommées par une analyse interrompue (repli « linkedin » : tâches antérieures à la vague 5). */
+export function blockedSourcesOf(task: Task): SourceCode[] {
+  const list = (task.result as RunResult | null)?.blocked_sources;
+  return list && list.length > 0 ? list : ["linkedin"];
 }
 
 export interface Quota { used: number; limit: number }
@@ -170,6 +188,8 @@ export interface Settings {
 
 export interface Job {
   id: string;
+  /** Vague 5 : source de l'offre (un ancien rapport sans ce champ est lu comme `linkedin`, I-02). */
+  source_code: SourceCode;
   title: string;
   company: string;
   url: string;
@@ -343,6 +363,29 @@ export interface ReportRow { name: string; keyword: string; generated_at: string
 
 // ------------------------------------------------------------------ sources et consentements (I-16, vague 3)
 export type SourceCode = "linkedin" | "france_travail" | "malt" | "wttj" | "indeed";
+
+/** Libellés des sources (même texte que `GET /api/sources`), pour les badges et les replis avant chargement. */
+export const SOURCE_LABEL: Record<SourceCode, string> = {
+  linkedin: "LinkedIn", france_travail: "France Travail", malt: "Malt", wttj: "Welcome to the Jungle", indeed: "Indeed",
+};
+
+/**
+ * Source d'une offre d'après son `ref` (`job:<external_id>`) : miroir de `sources/base.py::source_of_ref`. Après
+ * « job: », `ft-` → france_travail, `malt-` → malt, `wttj-` → wttj, `indeed-` → indeed ; sinon (identifiant LinkedIn
+ * numérique) → linkedin. Sert aux candidatures, dont les lignes n'ont pas de `source_code`.
+ */
+export function sourceOfRef(ref: string): SourceCode {
+  const id = ref.startsWith("job:") ? ref.slice(4) : ref;
+  if (id.startsWith("ft-")) return "france_travail";
+  if (id.startsWith("malt-")) return "malt";
+  if (id.startsWith("wttj-")) return "wttj";
+  if (id.startsWith("indeed-")) return "indeed";
+  return "linkedin";
+}
+
+/** Libellé d'une source, avec repli sur le code pour une valeur inattendue. */
+export const sourceLabel = (code: string): string => (SOURCE_LABEL as Record<string, string | undefined>)[code] ?? code;
+
 export type AccessMode = "navigateur" | "api_officielle" | "import_manuel";
 
 /** Élément de `GET /api/sources` (backend/01 § 5.8 et § 5.8.1). */
@@ -360,6 +403,28 @@ export interface SourceInfo {
   configured?: boolean;
   /** Repos de 6 h propre à la source. */
   blocked: { at: string; where: string; until: string } | null;
+}
+
+/** Corps de `POST /api/items/import` (vague 5, backend/01 § 5.8.2) ; `keyword` absent s'il est vide. */
+export interface ManualItemBody {
+  source_code: "indeed";
+  url: string;
+  title: string;
+  company: string;
+  location: string;
+  text: string;
+  keyword?: string;
+}
+
+/** Réponse `201` de `POST /api/items/import` (`url` normalisée par le serveur). */
+export interface ManualItemCreated {
+  id: string;
+  source_code: "indeed";
+  title: string;
+  company: string;
+  location: string;
+  url: string;
+  keyword: string;
 }
 
 /** Corps de `POST /api/sources/{code}/consent`. */

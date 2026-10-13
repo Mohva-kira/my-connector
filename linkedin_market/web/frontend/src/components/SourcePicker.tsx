@@ -8,6 +8,8 @@ interface SourcePickerProps {
   /** Ouvre la popup de risques de la source (aucune requête mutative). */
   onReadRisks: (source: SourceInfo) => void;
   error?: string;
+  /** Ouvre l'import manuel Indeed (R-6) ; la ligne « Indeed s'importe à la main » n'est affichée que si elle est fournie. */
+  onImport?: () => void;
 }
 
 /** Sources sélectionnables pour une collecte : l'import manuel (Indeed) n'est jamais proposé (R-6). */
@@ -23,7 +25,7 @@ export function unavailableReason(source: SourceInfo): string | null {
 }
 
 /** Choix des sources d'une collecte (frontend/02 § 4.5). */
-export function SourcePicker({ sources, value, onChange, onReadRisks, error }: SourcePickerProps) {
+export function SourcePicker({ sources, value, onChange, onReadRisks, error, onImport }: SourcePickerProps) {
   const toggle = (code: SourceCode, checked: boolean) =>
     onChange(checked ? [...value.filter((c) => c !== code), code] : value.filter((c) => c !== code));
   return (
@@ -49,6 +51,12 @@ export function SourcePicker({ sources, value, onChange, onReadRisks, error }: S
           </div>
         );
       })}
+      {onImport && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-text-secondary">Indeed s'importe à la main.</span>
+          <Button small variant="ghost" onClick={onImport}>Importer une offre</Button>
+        </div>
+      )}
       {error && <p id="source-picker-error" className="text-xs text-danger-strong">{error}</p>}
     </fieldset>
   );

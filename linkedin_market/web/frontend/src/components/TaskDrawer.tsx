@@ -1,6 +1,6 @@
 import { createContext, ReactNode, useContext, useEffect, useId, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { FINAL_STATUSES, Task, TaskStatus, api, isBlockedRun } from "../api";
+import { FINAL_STATUSES, RunResult, RunSourceResult, SOURCE_LABEL, SourceCode, Task, TaskStatus, api, blockedSourcesOf, isBlockedRun, sourceLabel } from "../api";
 import { invalidateAfterTask, useTask, useTasks } from "../hooks";
 import { Badge, Button, ErrorBox, Modal, Notice, formatDate, inputClass } from "../ui";
 
@@ -27,8 +27,42 @@ export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   annulée: "Annulée",
 };
 
-/** E-4 option A (G-10) : analyse terminée sur un rapport partiel, la collecte ayant été interrompue par LinkedIn. */
-export const BLOCKED_RUN_NOTICE = "Collecte interrompue par LinkedIn : rapport établi sur les données déjà collectées.";
+/**
+ * E-4 option A (G-10) : analyse terminée sur un rapport partiel, la collecte ayant été interrompue. Nomme les sources
+ * bloquées (`result.blocked_sources`), « LinkedIn » à défaut (tâche antérieure à la vague 5).
+ */
+export const blockedRunNotice = (task: Task) =>
+  `Collecte interrompue par ${blockedSourcesOf(task).map(sourceLabel).join(", ")} : rapport établi sur les données déjà collectées.`;
+
+const SOURCE_STATUS_TONE: Record<RunSourceResult["status"], "success" | "warning" | "neutral" | "danger"> = {
+  ok: "success", bloquée: "warning", indisponible: "danger", annulée: "neutral",
+};
+
+/** Résultat par source d'une collecte (vague 5) ; rien si la tâche n'en porte pas (tâche antérieure ou sans collecte). */
+function RunSources({ task }: { task: Task }) {
+  if (task.kind !== "run") return null;
+  const sources = (task.result as Partial<RunResult> | null)?.sources;
+  if (!Array.isArray(sources) || sources.length === 0) return null;
+  return (
+    <ul className="space-y-1.5 rounded-md border border-border-default p-2 text-sm" aria-label="Résultat par source">
+      {sources.map((source) => (
+        <li key={source.code}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>{sourceLabel(source.code)} — {source.items} offre{source.items > 1 ? "s" : ""}</span>
+            <Badge tone={SOURCE_STATUS_TONE[source.status] ?? "neutral"}>{source.status}</Badge>
+          </div>
+          {source.detail && <p className="text-xs text-text-secondary">{source.detail}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Source nommée par la tâche en attente de vérification manuelle, si `meta.source` en désigne une connue. */
+function manualCheckSource(task: Task): string | null {
+  const code = task.meta.source;
+  return typeof code === "string" && code in SOURCE_LABEL ? SOURCE_LABEL[code as SourceCode] : null;
+}
 
 /** Statut affiché d'une tâche, avec la mention « collecte interrompue » pour une analyse partielle. */
 function StatusBadges({ task }: { task: Task }) {
@@ -79,10 +113,11 @@ function TaskDetail({ id }: { id: string }) {
         <StatusBadges task={task} />
         {!final && <Button small variant="danger" onClick={cancel}>Annuler</Button>}
       </div>
-      {isBlockedRun(task) && <Notice tone="warning">{BLOCKED_RUN_NOTICE}</Notice>}
+      {isBlockedRun(task) && <Notice tone="warning">{blockedRunNotice(task)}</Notice>}
+      <RunSources task={task} />
       {task.status === "attente_verification_manuelle" && (
         <p className="rounded-md bg-warning/10 p-2 text-sm text-warning-strong">
-          LinkedIn demande une vérification : termine-la dans la fenêtre du navigateur ouverte par l'outil.
+          {manualCheckSource(task) ?? "Le site"} demande une vérification : termine-la dans la fenêtre du navigateur ouverte par l'outil.
         </p>
       )}
       {task.needs_input && (
