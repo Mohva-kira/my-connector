@@ -96,10 +96,12 @@ def test_email_is_sent_logged_and_status_advances(client, monkeypatch, smtp_serv
     use_smtp(monkeypatch, smtp_server)
     draft = client.get("/api/applications/job:1/message-draft").json()
     assert draft["subject"].startswith("Candidature") and "je candidate" in draft["body"]
+    assert client.put("/api/settings", json={"full_name": "Ada Lovelace"}).status_code == 200
     task = client.post("/api/applications/job:1/messages", json={**MAIL, "confirm": True}).json()
     done = wait_done(client, task["id"])
     assert done["status"] == "terminée", done
-    assert 'filename="cv.pdf"' in smtp_server.mails[0] and "Bonjour Jane" in smtp_server.mails[0]
+    # Pièce jointe nommée pour le recruteur (format ATS) : « Prénom-Nom-CV-Titre.pdf ».
+    assert 'filename="Ada-Lovelace-CV-' in smtp_server.mails[0] and "Bonjour Jane" in smtp_server.mails[0]
     entry = application.get_application("job:1")
     assert (
         entry["status"] == "contactée"
@@ -308,3 +310,17 @@ def test_linkedin_pied_ajoute_par_le_serveur(client, monkeypatch, accept_risks):
     )
     assert seen["body"] == "Bonjour Jane"
     assert stored_messages()[0].body == "Bonjour Jane\n\n" + footer
+
+
+def test_cv_exports_and_ats_issues(client):
+    """Téléchargement PDF / Word nommé pour le recruteur ; écarts ATS exposés dans le détail de la candidature."""
+    detail = client.get("/api/applications/job:1").json()
+    assert any("Section manquante" in issue for issue in detail["ats_issues"])
+    assert client.put("/api/settings", json={"full_name": "Ada Lovelace"}).status_code == 200
+    pdf = client.get("/api/applications/job:1/cv.pdf")
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+    assert 'filename="Ada-Lovelace-CV-Senior-Python-Developer.pdf"' in pdf.headers["content-disposition"]
+    docx = client.get("/api/applications/job:1/cv.docx")
+    assert docx.status_code == 200 and docx.content.startswith(b"PK")
+    assert client.get("/api/applications/job:1/cv.odt").status_code == 422
+    assert client.get("/api/applications/inconnue/cv.pdf").status_code == 404

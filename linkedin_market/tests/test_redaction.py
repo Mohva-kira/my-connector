@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from linkedin_market import application, interpreter, nlp
+from linkedin_market import application, cv_format, interpreter, nlp
 from linkedin_market.models import Item, Profile
 
 P = nlp.PERSON_PLACEHOLDER
@@ -164,11 +164,25 @@ def test_generation_envoie_une_offre_redigee_et_garde_le_profil(monkeypatch):
         keyword="python",
     )
     job = {"id": "job:1", "title": "Dev Python", "company": "Acme", "url": item.url, "score": 80}
+    identity = cv_format.Identity(
+        "Ada Lovelace", "ada@example.com", "+33 7 00 00 00 00", "https://www.linkedin.com/in/ada"
+    )
     app = application.generate(
-        profile, item, job, {}, "claude", known_names=["Jane Doe"], home_location="Lyon", timezone="Europe/Paris"
+        profile,
+        item,
+        job,
+        {},
+        "claude",
+        known_names=["Jane Doe"],
+        home_location="Lyon",
+        timezone="Europe/Paris",
+        identity=identity,
     )
     assert app.generator == "claude"
     ((system, user),) = FakeClaude.calls
+    # Coordonnées du CV posées après la génération : jamais envoyées à Claude (I-11).
+    for contact in ("Ada Lovelace", "ada@example.com", "+33 7", "linkedin.com/in/ada"):
+        assert contact not in system + user and contact in app.cv
     offer = user.split("<offre>")[1].split("</offre>")[0]
     for secret in ("jane.doe@acme.com", "Jane Doe", "06 12", "linkedin.com/in", "Marc Petit", "relations"):
         assert secret not in offer

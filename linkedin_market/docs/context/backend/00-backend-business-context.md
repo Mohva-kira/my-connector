@@ -46,7 +46,7 @@
 
 ### Candidature (`applications`) et Dossier de candidature (`Application`)
 - **Définition** : suivi d'une offre pour laquelle un dossier a été préparé (`cv.md`, `cv.html`, `message.txt`,
-  `conseils.md`, `offre.txt`, `cv.pdf` à la demande) dans `linkedin_market_data/applications/<AAAAMMJJ>-<entreprise>-<titre>/`.
+  `conseils.md`, `offre.txt`, exports `<Prénom-Nom>-CV-<Titre>.pdf` / `.docx` à la demande, `cv_export`) dans `linkedin_market_data/applications/<AAAAMMJJ>-<entreprise>-<titre>/`.
 - **Clé** `[ACTUEL]` : `UNIQUE (user_id, item_id)` ; l'API garde l'`id` de l'offre (`job:…`) comme identifiant.
 - **Statuts (`status`)** : `préparée`, `contactée`, `postulée`, `entretien`, `refusée`, `abandonnée`, `externe`,
   `échec` (`application.STATUSES`). Rang de progression (`_PROGRESS`, I-03) : `préparée`/`externe`/`échec` = 0,
@@ -184,7 +184,7 @@ Règles complémentaires vérifiées dans le code `[ACTUEL]` :
   `apply` active pour cette offre (409) ; identifiants (409) ; `count_today("apply") < apply_daily_max` (429) ;
   aucun blocage (409) ; consentement `linkedin` (428, `[ACTUEL]` vague 3).
 - **Exécution** (tâche `apply`, `browser=True`) : nouveau contrôle de plafond et de blocage dans la tâche,
-  génération de `cv.pdf`, `apply_state="en_cours"`, connexion, `EasyApply.run()`, arrêt à l'écran de relecture,
+  génération du CV PDF (`cv_export.ensure`), `apply_state="en_cours"`, connexion, `EasyApply.run()`, arrêt à l'écran de relecture,
   question `confirm_submit`. Résultat appliqué par `_record_apply_result()` :
 
   | `ApplyResult.state` | Statut de candidature | `apply_state` | Autres effets |

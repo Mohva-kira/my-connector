@@ -22,6 +22,8 @@ COLUMNS = (
     "message_daily_max",
     "contact_email",
     "contact_phone",
+    "full_name",
+    "linkedin_url",
     "signature",
     "home_location",
     "timezone",

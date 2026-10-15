@@ -143,7 +143,8 @@ def test_apply_end_to_end_with_user_confirmation(client, monkeypatch, workdir, a
     # la réponse aux questions est mémorisée, la confirmation d'envoi ne l'est pas
     answers = settings.load_settings()["answers"]
     assert any("years of experience" in q for q in answers) and not any("soumettre" in q for q in answers)
-    assert (workdir / "applications" / "20261007-acme-dev" / "cv.pdf").is_file()
+    pdfs = (workdir / "applications" / "20261007-acme-dev").glob("*.pdf")
+    assert [p.name for p in pdfs] == ["CV-Senior-Python-Developer.pdf"]  # nom vu par le recruteur
 
 
 def test_decline_confirmation_keeps_status(client, monkeypatch, workdir, accept_risks):

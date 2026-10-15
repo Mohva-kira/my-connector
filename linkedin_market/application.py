@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import config, interpreter, nlp
+from . import config, cv_export, cv_format, interpreter, nlp
+from .cv_parcours import format_parcours
 from .db import utc_iso, utcnow
 from .db.repositories import applications as applications_repo
 from .db.repositories import suppressions, user_transaction
@@ -263,6 +264,7 @@ def cv_system_prompt(home_location: str = "", timezone: str = "") -> str:
     place, zone = interpreter.clean_setting(home_location), interpreter.clean_setting(timezone)
     remote = "full remote" + (f" depuis {place}" if place else "")
     availability = "freelance, full remote" + (f", fuseau {zone}" if zone else "")
+    fr, en = cv_format.HEADINGS["fr"], cv_format.HEADINGS["en"]
     return f"""Tu adaptes le CV d'un freelance tech ({remote}) \
 à une offre précise, pour maximiser ses chances auprès du recruteur et des ATS.
 
@@ -277,9 +279,26 @@ celles du profil qui sont en hausse sur le marché (fournies dans <marche>).
 dans les conseils.
 - Rédige dans la langue de l'offre.
 - Dans l'offre, `[personne]` remplace une donnée de tiers retirée : ne la reconstitue pas.
-- CV d'une à deux pages : titre aligné sur le poste, accroche de 3 lignes, \
-compétences clés, expériences en puces orientées résultats (les plus pertinentes \
-d'abord, les autres résumées), formation, langues, disponibilité ({availability}).
+- CV d'une à deux pages au format ATS : une seule colonne, ni tableau, ni image, \
+ni émoji, ni icône. Expériences les plus pertinentes d'abord, les autres résumées.
+
+Structure Markdown exacte du CV (titres de section mot pour mot) :
+# <titre aligné sur l'intitulé du poste>
+(n'écris ni nom ni coordonnées : ils sont ajoutés automatiquement)
+## {fr["profile"]}
+(accroche de 3 lignes reprenant les mots-clés de l'offre)
+## {fr["skills"]}
+- <Catégorie> : <compétence>, <compétence>
+## {fr["experience"]}
+### <Poste> — <Entreprise>
+*<Lieu> · MM/AAAA – MM/AAAA* (ou « Présent »)
+- <verbe d'action + résultat ; chiffres uniquement s'ils figurent dans le profil>
+## {fr["education"]}
+## {fr["certifications"]} (seulement si le profil en contient)
+## {fr["languages"]}
+## {fr["availability"]}
+({availability})
+Offre en anglais : titres {", ".join(en[k] for k in en if k not in ("projects", "publications", "volunteering"))}.
 
 Format de sortie exact, sans autre texte :
 === CV ===
@@ -392,51 +411,78 @@ def _pretty(skill: str) -> str:
     return skill.upper() if len(skill) <= 3 or skill in ("ui/ux", "ci/cd") else skill[0].upper() + skill[1:]
 
 
-def _remote_phrase(home_location: str, timezone: str, *, with_zone: bool) -> str:
+_LOCAL_TEXT = {
+    "fr": {
+        "years": "{n} ans d'expérience",
+        "no_years": "Expérience confirmée",
+        "level": ", niveau {level}",
+        "pitch": "{years}{level}. Expertise directement mobilisable sur ce poste : {top}.",
+        "core": "Clés pour ce poste",
+        "more": "Autres compétences",
+        "remote": ("full remote", " depuis {place}", " (fuseau {zone})"),
+        "available": "Freelance en {remote}, disponible pour des équipes internationales.",
+    },
+    "en": {
+        "years": "{n} years of experience",
+        "no_years": "Proven experience",
+        "level": ", {level} level",
+        "pitch": "{years}{level}. Expertise directly applicable to this role: {top}.",
+        "core": "Core for this role",
+        "more": "Additional skills",
+        "remote": ("fully remote", " from {place}", " (time zone {zone})"),
+        "available": "Freelance, {remote}, available for international teams.",
+    },
+}
+_MORE_SKILLS_MAX = 15
+
+
+def _remote_phrase(home_location: str, timezone: str, *, with_zone: bool, lang: str = "fr") -> str:
     """« full remote depuis X (fuseau Y) » sans repli : les fragments vides sont omis (E-18)."""
     place, zone = interpreter.clean_setting(home_location), interpreter.clean_setting(timezone)
-    phrase = "full remote" + (f" depuis {place}" if place else "")
-    return phrase + (f" (fuseau {zone})" if zone and with_zone else "")
+    base, from_place, in_zone = _LOCAL_TEXT[lang]["remote"]
+    phrase = base + (from_place.format(place=place) if place else "")
+    return phrase + (in_zone.format(zone=zone) if zone and with_zone else "")
 
 
 def _generate_locally(
     profile: Profile, item: Item, job: dict, market: dict, home_location: str = "", timezone: str = ""
 ) -> Application:
-    """Assemblage sans reformulation : atouts ciblés en tête, profil source ensuite."""
-    trending = set(market["competences_en_hausse_que_tu_as"])
+    """Assemblage sans reformulation au format ATS (``cv_format``), dans la langue de l'offre."""
+    lang = cv_format.language_of(item.text)
+    text = _LOCAL_TEXT[lang]
     matched = job.get("matched_skills", [])
-    extra_trending = [s for s in market["competences_en_hausse_que_tu_as"] if s not in matched]
-    years = f"{profile.years_experience} ans d'expérience" if profile.years_experience else "Expérience confirmée"
-    level = f", niveau {profile.seniority}" if profile.seniority else ""
+    # Compétences en hausse que l'utilisateur possède d'abord, puis le reste du profil.
+    others = [s for s in market["competences_en_hausse_que_tu_as"] if s not in matched]
+    others += [s for s in profile.skills if s not in matched and s not in others]
+    years = text["years"].format(n=profile.years_experience) if profile.years_experience else text["no_years"]
+    level = text["level"].format(level=profile.seniority) if profile.seniority else ""
     top = ", ".join(map(_pretty, matched[:4] or profile.skills[:4]))
+    parcours = format_parcours(profile.text)
 
+    def section(key: str, *body: str) -> list[str]:
+        return ["", f"## {cv_format.heading(key, lang)}", "", *body]
+
+    skills = [f"- **{text['core']}** : {', '.join(map(_pretty, matched))}"] if matched else []
+    if others:
+        skills.append(f"- **{text['more']}** : {', '.join(map(_pretty, others[:_MORE_SKILLS_MAX]))}")
     cv = [
         f"# {profile.title or job['title']}",
-        "",
-        f"**Candidature : {job['title']}{' — ' + job['company'] if job.get('company') else ''}**",
-        "",
-        "## Accroche",
-        "",
-        f"{years}{level}. Expertise directement mobilisable sur ce poste : {top}. "
-        f"Freelance en {_remote_phrase(home_location, timezone, with_zone=True)}, disponible pour des équipes "
-        "internationales.",
-        "",
-        "## Atouts pour cette offre",
-        "",
+        *section("profile", text["pitch"].format(years=years, level=level, top=top)),
+        *section("skills", *skills),
+        *section("experience", parcours.experience),
     ]
-    cv += [
-        f"- **{_pretty(s)}**" + (" — compétence en forte demande actuellement" if s in trending else "")
-        for s in matched
-    ]
-    if extra_trending:
-        cv += ["", "## Autres compétences recherchées sur le marché", "", ", ".join(map(_pretty, extra_trending))]
-    # Deux espaces en fin de ligne : saut de ligne Markdown, la mise en page du profil est conservée.
-    cv += ["", "## Parcours", "", "  \n".join(profile.text.strip().splitlines())]
+    for key, body in parcours.sections:
+        cv += section(key, body)
+    remote = _remote_phrase(home_location, timezone, with_zone=True, lang=lang)
+    cv += section("availability", text["available"].format(remote=remote))
 
+    fr = _LOCAL_TEXT["fr"]  # le message reste en français
+    msg_years = fr["years"].format(n=profile.years_experience) if profile.years_experience else fr["no_years"]
+    msg_level = fr["level"].format(level=profile.seniority) if profile.seniority else ""
     company = job.get("company") or "votre équipe"
     remote = _remote_phrase(home_location, timezone, with_zone=False)
     message = (
-        f"Bonjour,\n\nVotre offre « {job['title']} » a retenu mon attention. {years}{level}, "
+        f"Bonjour,\n\nVotre offre « {job['title']} » a retenu mon attention. {msg_years}{msg_level}, "
         f"je maîtrise {top}, au cœur du poste. Freelance en {remote}, je peux "
         f"rejoindre {company} rapidement. Je serais ravi d'échanger sur vos besoins.\n\nCordialement,"
     )
@@ -468,21 +514,29 @@ def generate(
     known_names: Iterable[str] = (),
     home_location: str = "",
     timezone: str = "",
+    identity: cv_format.Identity | None = None,
 ) -> Application:
     """Dossier de candidature par Claude, ou assemblé localement si Claude est indisponible.
 
-    ``known_names``, ``home_location`` et ``timezone`` sont fournis par l'appelant (le domaine ne lit pas la base).
+    ``known_names``, ``home_location``, ``timezone`` et ``identity`` sont fournis par l'appelant (le domaine ne lit
+    pas la base). L'en-tête de contact est posé ici, après la génération : Claude ne reçoit aucune coordonnée.
     """
     market = _market_context(results, profile)
+    app = None
     if (generator or config.interpreter_name()) == "claude":
         try:
             app = _generate_with_claude(profile, item, job, market, known_names, home_location, timezone)
-            if app.cv:
-                return app
-            log.warning("Réponse de Claude vide : CV assemblé localement.")
+            if not app.cv:
+                log.warning("Réponse de Claude vide : CV assemblé localement.")
+                app = None
         except Exception as exc:
             log.warning("CV par Claude impossible (%s) : CV assemblé localement.", exc)
-    return _generate_locally(profile, item, job, market, home_location, timezone)
+    app = app or _generate_locally(profile, item, job, market, home_location, timezone)
+    app.cv = cv_format.apply_identity(app.cv, identity or cv_format.Identity())
+    issues = cv_format.validate_cv(app.cv)
+    if issues:
+        app.advice = "\n".join([app.advice, *(f"- Format ATS : {issue}" for issue in issues)]).strip()
+    return app
 
 
 # ---------------------------------------------------------------- fichiers
@@ -669,5 +723,5 @@ def write_files(job_id: str, *, cv: str | None = None, message: str | None = Non
             .replace("__MD__", cv.replace("</", "<\\/")),
             encoding="utf-8",
         )
-        (folder / config.CV_PDF_NAME).unlink(missing_ok=True)  # PDF périmé : régénéré à la demande
+        cv_export.remove(folder)
     update_application(job_id)

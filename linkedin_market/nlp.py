@@ -162,7 +162,18 @@ _LINKEDIN_CHROME = _ui(
     r"Personnes que vous pouvez contacter.{0,500}?Envoyer un message",
     r"Personnes que vous pouvez contacter",
     r"Rencontrez l’équipe de recrutement[^•]{0,80}•?",
-    r"À propos de l’offre d’emploi",
+    r"\bEasy Apply\b",
+    r"\bSave\b(?=\s|$)",
+    r"Show match details",
+    r"Meet the hiring team",
+    r"People you can reach out to",
+    r"Set alert for similar jobs.{0,100}?(?:Off|On)\b",
+    r"Referrals increase your chances.{0,80}?\d+x\.?",
+    r"Over \d+ (?:applicants|people clicked apply)",
+    r"Reactivate Premium",
+    r"Promoted by hirer",
+    r"Responses managed off LinkedIn",
+    r"(?:…\s*more\s+)?(?:See|Show) (?:more|less)\s*$",
 )
 # Début du bas de page (offres similaires, publicité Premium, pied de page, choix de langue) :
 # tout ce qui suit est coupé.
@@ -174,13 +185,26 @@ _LINKEDIN_TAIL = _ui(
     r"Vous recherchez des talents \?",
     r"LinkedIn Corporation ©",
     r"Choisir une langue",
+    r"Would you like to work with us",
+    r"More jobs\b",
+    r"Similar jobs\b",
+    r"Looking for talent\?",
+    r"Select language",
 )
 
 
+# Début du contenu de l'offre : tout ce qui précède (boutons, Premium, statut de candidature) est coupé.
+_LINKEDIN_HEAD = _ui(r"À propos de l’offre d’emploi", r"About the job")
+
+
 def strip_linkedin_chrome(text: str) -> str:
-    """Retire de la page d'une offre l'interface LinkedIn (Premium, recruteurs, pied de page)."""
-    tail = _LINKEDIN_TAIL.search(text or "")
-    text = (text or "")[: tail.start()] if tail else (text or "")
+    """Ne garde de la page d'une offre que le texte de l'offre (sans Premium, recruteurs, pied de page)."""
+    text = text or ""
+    head = _LINKEDIN_HEAD.search(text)
+    if head:
+        text = text[head.end() :]
+    tail = _LINKEDIN_TAIL.search(text)
+    text = text[: tail.start()] if tail else text
     return re.sub(r"\s+", " ", _LINKEDIN_CHROME.sub(" ", text)).strip()
 
 

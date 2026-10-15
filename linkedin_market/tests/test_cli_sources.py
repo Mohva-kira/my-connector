@@ -206,7 +206,7 @@ def test_profil_absent_sans_linkedin_message_actionnable(monkeypatch):
 
 
 def test_plafond_i07_applique_sur_le_chemin_cli_multi_sources(accept_risks, monkeypatch, capsys):
-    """``--max-items`` au-delà de la prudence : chaque source reçoit le plafond (15 en « prudent »)."""
+    """``--max-items`` au-delà de la prudence : chaque source reçoit le plafond (100 en « prudent »)."""
     accept_risks("wttj")
     seen: dict[str, int] = {}
 
@@ -222,7 +222,7 @@ def test_plafond_i07_applique_sur_le_chemin_cli_multi_sources(accept_risks, monk
     monkeypatch.setattr(pipeline, "_collect_browser", fake_browser)
     monkeypatch.setattr(pipeline.config, "france_travail_configured", lambda: True)
     cli.main([*BASE, "--no-open", "--max-items", "500", "--sources", "france_travail,wttj"])
-    assert seen == {"france_travail": 15, "wttj": 15}
+    assert seen == {"france_travail": 100, "wttj": 100}
     assert config.CAUTION_LEVELS["prudent"].max_items == 15
     assert "Rapport :" in capsys.readouterr().out
 

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Shadow DOM Senior Python Developer | Acme | LinkedIn</title>
+<style>#modal{position:fixed;top:40px;left:40px;width:520px;background:#fff;border:1px solid #888;padding:12px;display:none} .artdeco-inline-feedback--error{color:#b00}</style>
+</head><body>
+<main>
+  <h1>Senior Python Developer</h1>
+  <button class="jobs-apply-button" aria-label="Easy Apply to this job" onclick="openModal()">Easy Apply</button>
+  <a href="#similar">Similar job · Candidature simplifiée</a>
+  <div id="sent" style="display:none">Your application was sent</div>
+</main>
+<div id="modal" style="display:none;background:#fff" role="dialog" aria-label="Apply to Acme">
+  <button aria-label="Dismiss" onclick="closeModal()">✕</button>
+  <form id="step1" class="step">
+    <h2>Contact info</h2>
+    <label for="email-sel">Email address</label>
+    <select id="email-sel" required><option>Select an option</option><option>me@example.com</option><option>other@example.com</option></select>
+    <label for="phone">Mobile phone number</label><input id="phone" type="text" required>
+    <label for="resume">Upload resume</label><input id="resume" type="file">
+  </form>
+  <form id="step2" class="step" style="display:none">
+    <h2>Additional questions</h2>
+    <label for="yrs">How many years of experience do you have with Python?</label><input id="yrs" type="number" required>
+    <fieldset><legend>Are you legally authorized to work remotely? *</legend>
+      <input type="radio" id="auth-y" name="auth" value="Yes"><label for="auth-y">Yes</label>
+      <input type="radio" id="auth-n" name="auth" value="No"><label for="auth-n">No</label></fieldset>
+    <label for="notes">Anything else? (optional)</label><textarea id="notes"></textarea>
+    <div id="err" class="artdeco-inline-feedback--error" role="alert"></div>
+  </form>
+  <form id="step3" class="step" style="display:none">
+    <h2>Review your application</h2>
+    <p id="summary"></p>
+    <input type="checkbox" id="follow-company-checkbox" checked><label for="follow-company-checkbox">Follow Acme to stay up to date</label>
+  </form>
+  <footer>
+    <button id="btn-next" aria-label="Continue to next step" onclick="advance()">Next</button>
+    <button id="btn-review" aria-label="Review your application" style="display:none" onclick="advance()">Review</button>
+    <button id="btn-submit" aria-label="Submit application" style="display:none" onclick="submitApp()">Submit application</button>
+  </footer>
+</div>
+<script>
+// Comme LinkedIn : la fenêtre de candidature vit dans un Shadow DOM ouvert (#interop-outlet).
+const host = document.createElement('div'); host.id = 'interop-outlet'; document.body.appendChild(host);
+const sr = host.attachShadow({mode: 'open'}); sr.appendChild(document.getElementById('modal'));
+let step = 1;
+const show = n => { sr.querySelectorAll('.step').forEach((f,i)=>f.style.display = (i+1===n)?'block':'none');
+  sr.getElementById('btn-next').style.display = n===1?'inline-block':'none';
+  sr.getElementById('btn-review').style.display = n===2?'inline-block':'none';
+  sr.getElementById('btn-submit').style.display = n===3?'inline-block':'none'; step = n; };
+function openModal(){ sr.getElementById('modal').style.display='block'; show(1); window.__submitted = false; }
+function closeModal(){ sr.getElementById('modal').style.display='none'; }
+function advance(){
+  if (step===1){ const ok = sr.getElementById('email-sel').selectedIndex>0 && sr.getElementById('phone').value.trim();
+    if(!ok){ return; } show(2); return; }
+  if (step===2){ const yrs = sr.getElementById('yrs').value; const auth = sr.querySelector('input[name=auth]:checked');
+    if(!yrs || !auth){ sr.getElementById('err').textContent='Please enter a valid answer'; return; }
+    sr.getElementById('err').textContent='';
+    sr.getElementById('summary').textContent = 'Email: '+sr.getElementById('email-sel').value+' | Phone: '+sr.getElementById('phone').value+' | Years: '+yrs+' | Authorized: '+auth.value;
+    show(3); }
+}
+function submitApp(){ window.__submitted = true; window.__follow = sr.getElementById('follow-company-checkbox').checked;
+  closeModal(); document.getElementById('sent').style.display='block'; }
+</script></body></html>

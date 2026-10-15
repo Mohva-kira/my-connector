@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from email.utils import parseaddr
 from uuid import UUID
 
@@ -13,7 +14,8 @@ from .. import (
     apply_bot,
     config,
     consent,
-    cv_pdf,
+    cv_export,
+    cv_format,
     interpreter,
     logmask,
     matching,
@@ -158,11 +160,11 @@ def repair_identity(job: dict) -> dict:
     }
 
 
-def jobs_overview(results: dict) -> list[dict]:
+def _overview_rows(jobs: list[dict], *, provisional: bool = False) -> list[dict]:
     labels = storage.load_labels()
     apps = application.load_applications()
     rows = []
-    for job in results.get("top_jobs", []):
+    for job in jobs:
         entry = apps.get(job["id"])
         rows.append(
             {
@@ -171,9 +173,84 @@ def jobs_overview(results: dict) -> list[dict]:
                 "source_code": job.get("source_code") or "linkedin",
                 "label": labels.get(job["id"]),
                 "application_status": entry["status"] if entry else None,
+                **({"provisional": True} if provisional else {}),
             }
         )
     return rows
+
+
+def jobs_overview(results: dict | None, live: dict | None = None) -> list[dict]:
+    """Offres du dernier rapport ; ``live`` (offres déjà scorées par une collecte en cours) s'y ajoute."""
+    rows = _overview_rows(results.get("top_jobs", [])) if results else []
+    if live and live["rows"]:
+        fresh = _overview_rows(list(live["rows"].values()), provisional=True)
+        ids = {r["id"] for r in fresh}
+        rows = sorted([r for r in rows if r["id"] not in ids] + fresh, key=lambda r: r["score"], reverse=True)
+    return rows
+
+
+# ------------------------------------------------- affichage progressif d'une collecte
+_live_lock = threading.Lock()
+_live: dict | None = None
+
+
+def live_start(keyword: str) -> None:
+    global _live
+    with _live_lock:
+        _live = {"keyword": keyword, "rows": {}}
+
+
+def live_add(rows: list[dict]) -> None:
+    """Offres scorées d'un lot, visibles dans ``GET /api/jobs`` avant la fin de l'analyse."""
+    with _live_lock:
+        if _live is not None:
+            _live["rows"].update({row["id"]: row for row in rows})
+
+
+def live_stop() -> None:
+    global _live
+    with _live_lock:
+        _live = None
+
+
+def live_snapshot() -> dict | None:
+    with _live_lock:
+        return {"keyword": _live["keyword"], "rows": dict(_live["rows"])} if _live else None
+
+
+class RunProgress:
+    """Avancement d'une analyse (étapes et lot en cours), publié dans ``meta.progress``."""
+
+    def __init__(self, ctx: TaskContext, scrape: bool):
+        self._ctx = ctx
+        steps = [("collecte", "Collecte par lots")] if scrape else []
+        steps += [("analyse", "Analyse et scoring"), ("interpretation", "Interprétation"), ("rapport", "Rapport")]
+        self.steps = [{"key": k, "label": label, "state": "attente"} for k, label in steps]
+        self.batch: dict | None = None
+        self.scored = 0
+
+    def step(self, key: str) -> None:
+        """``key`` passe en cours ; les étapes qui le précèdent sont terminées."""
+        reached = True
+        for row in self.steps:
+            if row["key"] == key:
+                row["state"], reached = "en cours", False
+            elif reached:
+                row["state"] = "terminée"
+        self.push()
+
+    def finish(self) -> None:
+        for row in self.steps:
+            row["state"] = "terminée"
+        self.batch = None
+        self.push()
+
+    def on_batch(self, state: dict) -> None:
+        self.batch = state
+        self.push()
+
+    def push(self) -> None:
+        self._ctx.set_progress({"steps": self.steps, "batch": self.batch, "scored": self.scored})
 
 
 # ------------------------------------------------------------- exécution
@@ -193,18 +270,45 @@ def run_analysis(
     Travail) est ignorée et journalisée. Le profil LinkedIn n'est lu que si ``linkedin`` fait partie des sources.
     """
     codes = list(sources or ["linkedin"])
+    progress = RunProgress(ctx, scrape)
+    live_start(request.keyword)
+    try:
+        return _run_analysis(ctx, request, progress, scrape, interpreter_name, codes)
+    finally:
+        live_stop()  # le rapport (ou l'échec) prend le relais des offres provisoires
+
+
+def _run_analysis(
+    ctx: TaskContext,
+    request: SearchRequest,
+    progress: RunProgress,
+    scrape: bool,
+    interpreter_name: str,
+    codes: list[str],
+) -> dict:
     linkedin_text = ""
     reports: list[dict] = []
     blocked_sources: list[str] = []
     if scrape:
+        progress.step("collecte")
         want_profile = "linkedin" in codes and (
             request.profile_source == "linkedin"
             or (request.profile_source == "auto" and pipeline.profile_mod.find_profile_file() is None)
         )
+        prefs = settings.load_settings()
+
+        def on_scored(rows: list[dict]) -> None:
+            live_add(rows)
+            progress.scored += len(rows)
+            progress.push()
+
         outcome = pipeline.collect(
             request,
             codes,
             want_profile,
+            score_batch=pipeline.batch_scorer(request, prefs["home_location"], prefs["timezone"], on_scored=on_scored),
+            progress=ctx.log,
+            on_state=progress.on_batch,
             interactive=False,
             on_manual_check=ctx.manual_check,
             should_stop=ctx.should_stop,
@@ -219,18 +323,22 @@ def run_analysis(
             elif row.status != pipeline.STATUS_OK:
                 ctx.log(f"{label} ignorée : {row.detail}")
     ctx.check()
+    progress.step("analyse")
     prof = pipeline.build_profile(request, linkedin_text)
     ctx.log(f"Profil ({prof.origin}) : {len(prof.skills)} compétences.")
     prefs = settings.load_settings()
     results, scored = pipeline.analyse(request, prof, prefs["home_location"], prefs["timezone"])
     ctx.check()
+    progress.step("interpretation")
     text, used = interpreter.interpret(
         pipeline.summary_for_interpreter(results), interpreter_name, prefs["home_location"], prefs["timezone"]
     )
     results.update(
         interpretation=text, interpreter=used, interpreter_model=config.anthropic_model() if used == "claude" else ""
     )
+    progress.step("rapport")
     _, json_path = report.write(results)
+    progress.finish()
     activity.record("run", keyword=request.keyword, scrape=scrape, jobs=len(scored))
     ctx.log(f"Rapport enregistré : {json_path.name}")
     blocked = bool(blocked_sources)
@@ -302,6 +410,7 @@ def prepare_application(ctx: TaskContext, job_id: str) -> dict:
         known_names=application.known_contact_names(),
         home_location=prefs["home_location"],
         timezone=prefs["timezone"],
+        identity=cv_format.identity_from(prefs),
     )
     folder = application.write(app, item, job)
     return {"job_id": job_id, "folder": str(folder), "generator": app.generator}
@@ -347,7 +456,7 @@ def apply_job(ctx: TaskContext, job_id: str) -> dict:
     cfg = settings.load_settings()
     folder = application.folder_of(entry)
     files = application.read_files(entry)
-    pdf = cv_pdf.ensure_cv_pdf(folder, files["cv"], entry.get("title") or "CV", config.CV_PDF_NAME)
+    pdf = cv_export.ensure(folder, files["cv"], "pdf", title=entry.get("title") or "CV", full_name=cfg["full_name"])
     profile = effective_profile()
     cfg = {**cfg, "years_hint": profile.get("years_experience") or ""}
 
@@ -591,8 +700,12 @@ def send_message(
             if attach_cv:
                 files = application.read_files(entry)
                 attachments = [
-                    cv_pdf.ensure_cv_pdf(
-                        application.folder_of(entry), files["cv"], entry.get("title") or "CV", config.CV_PDF_NAME
+                    cv_export.ensure(
+                        application.folder_of(entry),
+                        files["cv"],
+                        "pdf",
+                        title=entry.get("title") or "CV",
+                        full_name=cfg["full_name"],
                     )
                 ]
             ctx.check()

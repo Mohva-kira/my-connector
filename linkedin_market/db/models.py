@@ -91,7 +91,7 @@ ACTIVITY_KINDS = (
     "error",
 )
 # Plafond d'éléments par type selon la prudence (I-07, E-3) ; doit rester aligné sur ``config.CAUTION_LEVELS``.
-CAUTION_MAX_ITEMS = {"prudent": 15, "normal": 30, "agressif": 60}
+CAUTION_MAX_ITEMS = {"prudent": 100, "normal": 100, "agressif": 100}
 
 
 def _sql_list(values: tuple[str, ...]) -> str:
@@ -187,6 +187,8 @@ class UserSettings(Base):
     message_daily_max: Mapped[int] = mapped_column(server_default=text("15"))
     contact_email: Mapped[str] = empty_text()
     contact_phone: Mapped[str] = empty_text()
+    full_name: Mapped[str] = empty_text()  # en-tête du CV (ATS) ; vide = omis
+    linkedin_url: Mapped[str] = empty_text()  # https://www.linkedin.com/in/… ; vide = omis
     signature: Mapped[str] = empty_text()
     home_location: Mapped[str] = empty_text()  # lieu de l'utilisateur pour les prompts Claude (E-18) ; vide = aucun
     timezone: Mapped[str] = empty_text()  # fuseau IANA ; vide = aucun

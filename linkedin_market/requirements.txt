@@ -15,6 +15,7 @@ numpy>=1.26,<3
 # Lecture du CV PDF et génération des dossiers PDF
 pypdf>=4,<6
 fpdf2>=2.8,<3
+python-docx>=1.1,<2      # export Word du CV (format ATS)
 # Lecture du fichier .env
 python-dotenv>=1,<2
 # PostgreSQL 18 (vague 1) : SQLAlchemy 2, driver psycopg 3, migrations Alembic

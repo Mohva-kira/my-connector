@@ -11,7 +11,7 @@ from __future__ import annotations
 import unicodedata
 from zoneinfo import ZoneInfo
 
-from . import config, logmask, nlp
+from . import config, cv_format, logmask, nlp
 from .db.repositories import profile as profile_repo
 from .db.repositories import settings as settings_repo
 from .db.repositories import user_transaction
@@ -29,6 +29,8 @@ DEFAULT_SETTINGS: dict = {
     "message_daily_max": 15,
     "contact_email": "",  # email/téléphone saisis dans « Candidature simplifiée »
     "contact_phone": "",
+    "full_name": "",  # en-tête du CV (cv_format.apply_identity) avec email, téléphone, lieu et linkedin_url
+    "linkedin_url": "",
     "signature": "",
     "home_location": "",  # lieu de l'utilisateur (prompts Claude, E-18) ; vide = non communiqué
     "timezone": "",  # fuseau IANA (ex. Europe/Paris) ; vide = non communiqué
@@ -45,6 +47,7 @@ DEFAULT_PROFILE_SETTINGS: dict = {
 }
 
 HOME_LOCATION_MAX = 80
+FULL_NAME_MAX = 80
 _PROFILE_SOURCES = ("auto", "file", "linkedin")
 _INTERPRETERS = ("claude", "local")  # « none » refusé à l'écriture (E-7, I-11)
 
@@ -105,15 +108,22 @@ def _check_max_items(max_items: int | None, caution: str) -> None:
         raise SettingsError(f"max_items ne peut pas dépasser {cap} en prudence « {caution} ».")
 
 
-def _home_location(value) -> str:
-    """Lieu : espaces de bord retirés, espaces internes réduits, ≤ 80, sans saut de ligne ni caractère de contrôle."""
+def _single_line(value, name: str, limit: int) -> str:
+    """Espaces de bord retirés, espaces internes réduits, ≤ ``limit``, sans saut de ligne ni caractère de contrôle."""
     text = str(value or "")
     if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in text):
-        raise SettingsError("home_location ne doit contenir ni saut de ligne ni caractère de contrôle.")
+        raise SettingsError(f"{name} ne doit contenir ni saut de ligne ni caractère de contrôle.")
     text = " ".join(text.split())
-    if len(text) > HOME_LOCATION_MAX:
-        raise SettingsError(f"home_location ne peut pas dépasser {HOME_LOCATION_MAX} caractères.")
+    if len(text) > limit:
+        raise SettingsError(f"{name} ne peut pas dépasser {limit} caractères.")
     return text
+
+
+def _linkedin_url(value) -> str:
+    url = str(value or "").strip()
+    if url and not cv_format.is_linkedin_url(url):
+        raise SettingsError("linkedin_url doit être l'URL de ton profil (https://www.linkedin.com/in/...) ou vide.")
+    return url
 
 
 def _timezone(value) -> str:
@@ -163,7 +173,11 @@ def validate_settings(update: dict, current: dict | None = None) -> dict:
             if value and not logmask.EMAIL_ADDRESS.match(value):
                 raise SettingsError("contact_email doit être une adresse email valide.")
         elif key == "home_location":
-            value = _home_location(value)
+            value = _single_line(value, key, HOME_LOCATION_MAX)
+        elif key == "full_name":
+            value = _single_line(value, key, FULL_NAME_MAX)
+        elif key == "linkedin_url":
+            value = _linkedin_url(value)
         elif key == "timezone":
             value = _timezone(value)
         elif key == "answers":

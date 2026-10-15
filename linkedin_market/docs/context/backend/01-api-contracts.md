@@ -236,6 +236,8 @@ Réglages et règles de `settings.validate_settings()` :
 | `message_daily_max` | `15` | entier 0–200 | `message_daily_max doit être compris entre 0 et 200.` |
 | `contact_email` | `""` | chaîne, `strip()` ; vide admis, sinon `logmask.EMAIL_ADDRESS` (G-12) | `422 contact_email doit être une adresse email valide.` |
 | `contact_phone`, `signature` | `""` | chaîne, `strip()` | — |
+| `full_name` `[ACTUEL]` (CV ATS, 2026-10-15) | `""` | comme `home_location`, ≤ 80 caractères ; en-tête du CV, jamais envoyé à Claude | `full_name ne peut pas dépasser 80 caractères.` ; `full_name ne doit contenir ni saut de ligne ni caractère de contrôle.` |
+| `linkedin_url` `[ACTUEL]` (CV ATS, 2026-10-15) | `""` | vide ou `^https://([a-z]{2,3}\.)?linkedin\.com/in/[^/?#\s]+/?$` (`cv_format.is_linkedin_url`) | `linkedin_url doit être l'URL de ton profil (https://www.linkedin.com/in/...) ou vide.` |
 | `linkedin_skill_sync` | `true` | `bool(value)` | — |
 | `home_location` `[ACTUEL]` vague 6 | `""` | chaîne, `strip()`, espaces internes réduits, sans retour à la ligne ni caractère de contrôle, ≤ 80 caractères ; vide admis | `home_location ne peut pas dépasser 80 caractères.` ; `home_location ne doit contenir ni saut de ligne ni caractère de contrôle.` |
 | `timezone` `[ACTUEL]` vague 6 | `""` | vide admis, sinon nom de fuseau IANA connu de `zoneinfo.ZoneInfo` (ex. `Africa/Abidjan`, `Europe/Paris`, `UTC`) | `timezone doit être un fuseau horaire IANA valide (ex. Europe/Paris) ou vide.` |
@@ -392,9 +394,10 @@ remplie (409).
 | Méthode & chemin | Corps | Succès | Erreurs |
 | :--- | :--- | :--- | :--- |
 | `GET /api/applications` | — | `200` liste (plus récente préparation d'abord) | — |
-| `GET /api/applications/{job_id}` | — | `200` entrée + `cv`, `message`, `advice`, `offer` + `statuses` | `404 Aucune candidature préparée pour cette offre.` ; `500 Dossier de candidature hors du répertoire de données.` |
+| `GET /api/applications/{job_id}` | — | `200` entrée + `cv`, `message`, `advice`, `offer` + `statuses` + `ats_issues: string[]` (`cv_format.validate_cv`, vide = conforme ; `[ACTUEL]` 2026-10-15) | `404 Aucune candidature préparée pour cette offre.` ; `500 Dossier de candidature hors du répertoire de données.` |
 | `PATCH /api/applications/{job_id}` | `ApplicationPatch` | `200` comme `GET` | `404` ; `422 Statut inconnu. Valeurs : préparée, contactée, postulée, entretien, refusée, abandonnée, externe, échec.` ; `422` liste (contact invalide) |
 | `GET /api/applications/{job_id}/cv.html` | — | `200 text/html` sandboxé | `404` candidature ; `404 CV introuvable.` |
+| `GET /api/applications/{job_id}/cv.{fmt}` `[ACTUEL]` (2026-10-15) | `fmt` ∈ `pdf`, `docx` | `200` fichier au format ATS (`cv_export.ensure`, généré si absent ou plus ancien que `cv.md`), `Content-Disposition: attachment; filename="<Prénom-Nom>-CV-<Titre>.<fmt>"` | `404` candidature ; `404 CV introuvable.` (CV vide) ; `422` autre `fmt` |
 | `POST /api/applications/{job_id}/apply` | — | `202` tâche `apply` | `404` ; `409 Une candidature est déjà en cours pour cette offre.` ; `409 Cette candidature est déjà au statut « postulée ».` ; `409` identifiants / blocage ; `429 Plafond quotidien atteint (10 candidatures par jour) : réessaie demain ou relève-le dans les paramètres.` ; `428` consentement LinkedIn (§ 5.8.1) |
 | `POST /api/applications/{job_id}/contacts/lookup` | — | `202` tâche `contacts` | `404` ; `409 Une recherche de contacts est déjà en cours pour cette offre.` ; `409` identifiants / blocage ; `428` consentement LinkedIn (§ 5.8.1) |
 | `GET /api/applications/{job_id}/message-draft?to=` | — | `[ACTUEL]` (vague 4) `200 {"subject": "Candidature — <titre ≤ 100>", "body": "<message.txt>\n\n<signature>", "footer", "origin", "opposed"}` (§ 5.7.1) | `404` |
@@ -402,7 +405,7 @@ remplie (409).
 | `POST /api/smtp/test` | `TestMail {to: str \| null}` | `200 {"channel": "email", "to": "me@example.com", "subject": "Test my-connector", "attachments": []}` | `503 SMTP non configuré : renseigne SMTP_HOST et SMTP_FROM dans le fichier .env.` ; `503 <SMTP_SECURITY refusé, G-5>` (via `applications._require_smtp()`, partagé avec `/messages`) ; `422 Le test n'est autorisé que vers ton adresse de contact ou l'expéditeur SMTP.` ; `502 <OutreachError>` |
 
 `ApplicationPatch` (tous facultatifs) : `cv`, `message`, `advice` (`str`, réécrivent `cv.md`/`message.txt`/
-`conseils.md` ; changer `cv` régénère `cv.html` et supprime `cv.pdf`), `status` (statut libre, **seule** voie de
+`conseils.md` ; changer `cv` régénère `cv.html` et supprime les exports `*.pdf` / `*.docx`, régénérés à la demande), `status` (statut libre, **seule** voie de
 régression, I-03 ; ajoute un historique `kind="status"`), `contacts: list[Contact]` (remplace la liste).
 
 `Contact` (C-4/C-5, vague 1) : `full_name: str = ""`, `profile_url: str = ""` (vide ou `^https://([a-z]{2,3}\.)?linkedin\.com/in/[^/?#\s]+`,
@@ -417,7 +420,7 @@ sinon « L'URL doit être un profil LinkedIn (https://www.linkedin.com/in/...). 
 | `to` | `str` | requis | Email (`outreach._EMAIL`, sans `,;<>`) ou URL de profil LinkedIn. |
 | `subject` | `str` | `""` | Email : non vide, sans saut de ligne. Ignoré pour LinkedIn. |
 | `body` | `str` | requis | Non vide (vérifié à l'envoi). LinkedIn hors relation de 1er degré : tronqué à 300 caractères (note de connexion). |
-| `attach_cv` | `bool` | `true` | Email : joint `cv.pdf` (généré si absent). |
+| `attach_cv` | `bool` | `true` | Email : joint le CV PDF `<Prénom-Nom>-CV-<Titre>.pdf` (généré si absent, `cv_export.ensure`). |
 | `confirm` | `bool` | `false` | Doit valoir `true` (I-04). |
 
 Ordre des contrôles de `POST …/messages` (le premier qui échoue répond ; `[ACTUEL]` depuis la vague 2, G-6/E-11) :
@@ -443,7 +446,7 @@ Au début de la tâche (`services.send_message`), la réservation et le plafond 
 (`_confirm_reservation()`, `FOR UPDATE` sur `user_settings`) : un plafond abaissé entre la réservation et
 l'exécution lève `activity.QuotaExceeded` et marque la réservation `échec`, sans envoi.
 
-Résultat de tâche : email `{"channel": "email", "to": "jane@acme.com", "subject": "Candidature — Senior Python Developer", "attachments": ["cv.pdf"]}` ;
+Résultat de tâche : email `{"channel": "email", "to": "jane@acme.com", "subject": "Candidature — Senior Python Developer", "attachments": ["Ada-Lovelace-CV-Senior-Python-Developer.pdf"]}` ;
 LinkedIn `{"channel": "linkedin", "mode": "message" | "connexion", "to": "https://www.linkedin.com/in/jane-doe/", "truncated": false}`. Si l'envoi LinkedIn échoue **après** le clic sur « Envoyer » sans confirmation visible
 (page qui ne se vide pas, exception pendant l'attente), l'exception `outreach.UncertainDelivery` laisse la
 réservation `confirmé` avec `error` renseigné (« à vérifier » côté UI) au lieu de `échec` : elle compte toujours

@@ -67,7 +67,10 @@ def fast(monkeypatch, tmp_path):
     monkeypatch.setattr(
         config,
         "CAUTION_LEVELS",
-        {name: config.Caution(name, level.max_items, 0.0, 0.0) for name, level in config.CAUTION_LEVELS.items()},
+        {
+            name: config.Caution(name, level.max_items, 0.0, 0.0, batch_pause=0.0)
+            for name, level in config.CAUTION_LEVELS.items()
+        },
     )
     monkeypatch.setattr(session, "login", lambda *a, **k: None)
     root = tmp_path / "project"
@@ -188,11 +191,11 @@ def test_annulation_au_milieu_d_une_page(client, manager, fast, monkeypatch, acc
 # ------------------------------------------------------------------------ G-3
 def test_scrape_applique_le_plafond_de_la_prudence(fast, monkeypatch, accept_risks):
     accept_risks()
-    driver = FakeLinkedIn(list(range(4000001, 4000021)))  # 20 offres affichées
+    driver = FakeLinkedIn(list(range(4000001, 4000121)))  # 120 offres affichées
     use_driver(monkeypatch, driver)
     outcome = pipeline.scrape(SearchRequest(keyword="python", caution="prudent", max_items=200), False)
     assert outcome.blocked is False
-    assert driver.detail_gets == 15 and len(storage.load_items("python")) == 15
+    assert driver.detail_gets == 100 and len(storage.load_items("python")) == 100
 
 
 # ------------------------------------------------------------------------ G-7

@@ -74,6 +74,25 @@ def start_run(request: Request, body: RunBody) -> dict:
     return task.public()
 
 
+class UpdateBody(BaseModel):
+    sources: list[str] = Field(default_factory=lambda: ["linkedin"])
+
+
+@router.post("/runs/update", status_code=202)
+def start_update(request: Request, body: UpdateBody | None = None) -> dict:
+    """« Mettre à jour » : relance la collecte et l'analyse avec la recherche de la dernière analyse.
+
+    Mêmes contrôles et même tâche que ``POST /runs`` ; l'historique dédoublonne, seules les nouvelles offres s'ajoutent.
+    """
+    try:
+        previous = services.require_results()
+    except services.NoAnalysisError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    saved = previous.get("request", {})
+    fields = {k: saved[k] for k in ("keyword", "location", "remote_only", "caution", "max_items") if k in saved}
+    return start_run(request, RunBody(scrape=True, sources=(body or UpdateBody()).sources, **fields))
+
+
 @router.post("/runs/rescore", status_code=202)
 def start_rescore(request: Request) -> dict:
     tasks = tasks_of(request)
@@ -95,9 +114,10 @@ def list_jobs(
     source: str | None = None,
 ) -> dict:
     results = services.latest_results()
-    if results is None:
+    live = services.live_snapshot()  # offres déjà scorées par une collecte en cours (affichage progressif)
+    if results is None and not (live and live["rows"]):
         return {"report": None, "jobs": []}
-    rows = [r for r in services.jobs_overview(results) if r["score"] >= min_score]
+    rows = [r for r in services.jobs_overview(results, live) if r["score"] >= min_score]
     if source:
         rows = [r for r in rows if r["source_code"] == source]  # filtre exact ; code inconnu : liste vide
     if label == "pertinente":
@@ -115,28 +135,33 @@ def list_jobs(
         rows = [r for r in rows if needle in nlp.normalize(f"{r['title']} {r['company']} {r['location']}")]
     for row in rows:
         row.pop("summary", None)
+    provisional = sum(1 for r in rows if r.get("provisional"))
+    if results is None:
+        return {"report": None, "keyword": live["keyword"], "provisional": provisional, "jobs": rows}
     return {
         "report": results["_report"],
         "generated_at": results["generated_at"],
         "keyword": results["request"]["keyword"],
         "model": results["model"],
         "min_labels": results.get("min_labels", matching.MIN_LABELS),
+        "provisional": provisional,
         "jobs": rows,
     }
 
 
 @router.get("/jobs/{job_id}")
 def job_detail(job_id: str) -> dict:
-    try:
-        results = services.require_results()
-    except services.NoAnalysisError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    job = services.find_job(results, job_id)
-    if job is None:
-        raise HTTPException(404, "Offre introuvable.")
+    live = services.live_snapshot()
+    results = services.latest_results()
+    job = services.find_job(results, job_id) if results else None
+    if job is None and not (live and job_id in live["rows"]):
+        raise HTTPException(
+            404, "Offre introuvable." if results or live else "Aucune analyse disponible : lance d'abord une analyse."
+        )
     item = storage.find_item(job_id)
-    row = next(r for r in services.jobs_overview(results) if r["id"] == job_id)
-    return {**row, "text": (item.text[:8000] if item else ""), "owned_skills": results["profile"]["skills"]}
+    row = next(r for r in services.jobs_overview(results, live) if r["id"] == job_id)
+    owned = results["profile"]["skills"] if results else [s for s in row.get("matched_skills", [])]
+    return {**row, "text": (item.text[:8000] if item else ""), "owned_skills": owned}
 
 
 class LabelBody(BaseModel):

@@ -157,13 +157,13 @@ def test_g2_retry_after_messages(client, prepared, monkeypatch, frozen_clock, ac
 
 # ----------------------------------------------------------------- G-3, G-11
 def test_g3_run_max_items_plafonne_par_la_prudence(client):
-    body = {"keyword": "x", "scrape": False, "caution": "prudent", "max_items": 16}
+    body = {"keyword": "x", "scrape": False, "caution": "prudent", "max_items": 101}
     response = client.post("/api/runs", json=body)
     assert response.status_code == 422
-    assert response.json()["detail"] == "max_items ne peut pas dépasser 15 en prudence « prudent »."
+    assert response.json()["detail"] == "max_items ne peut pas dépasser 100 en prudence « prudent »."
     settings.save_settings({"caution": "normal"})
-    response = client.post("/api/runs", json={"keyword": "x", "scrape": False, "max_items": 31})
-    assert response.json()["detail"] == "max_items ne peut pas dépasser 30 en prudence « normal »."
+    response = client.post("/api/runs", json={"keyword": "x", "scrape": False, "max_items": 101})
+    assert response.json()["detail"] == "max_items ne peut pas dépasser 100 en prudence « normal »."
 
 
 def test_g3_defauts_et_min_defensif():

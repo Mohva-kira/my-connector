@@ -10,6 +10,7 @@ gradient.
 
 ```bash
 .venv/bin/python -m linkedin_market            # prompt de saisie
+.venv/bin/python -m linkedin_market --update          # met à jour la dernière recherche (nouvelles offres), sans question
 .venv/bin/python -m linkedin_market -k "Data Engineer" --caution prudent
 .venv/bin/python -m linkedin_market -k "Data Engineer" --no-scrape --label 10   # réanalyse + annotation
 ```
@@ -43,16 +44,16 @@ profil et de `/details/skills/`). Format JSON :
 
 1. **Session** : cookies conservés 72 h après la dernière connexion par
    identifiants, puis supprimés et écrasés à la connexion suivante.
-2. **Collecte** (`scraper.py`) : offres (`f_WT=2` full remote, 30 derniers
-   jours), posts (dernier mois, triés par date), profils (recherche
-   personnes). Volume et pauses selon le niveau `prudent` (15) /
-   `normal` (30) / `agressif` (60). Arrêt immédiat sur checkpoint/authwall.
+2. **Collecte** (`scraper.py`) : offres (`f_WT=2` full remote, 60 derniers
+   jours, 100 par défaut, lues par lots de 15 : chaque lot est enregistré et scoré pendant une pause de 2 min, on attend la fin du traitement s'il est plus long), posts (dernier mois, triés par date), profils (recherche
+   personnes). Volume et pauses selon le niveau `prudent` /
+   `normal` / `agressif` (100 offres chacun ; la prudence règle les pauses entre pages). Arrêt immédiat sur checkpoint/authwall.
 3. **Historique** (`history.jsonl`) : cumulé d'une exécution à l'autre, il
    rend la mesure des tendances plus fiable avec le temps.
 4. **Extraction locale** (`nlp.py`) : n-grammes, TF-IDF NumPy, vocabulaire
    de compétences, séniorité, années, télétravail.
 5. **Tendances** (`trends.py`) : termes fréquents, compétences par source,
-   croissance 0-15 j vs 15-30 j, série hebdomadaire.
+   croissance 0-30 j vs 30-60 j, série hebdomadaire.
 6. **Matching** (`matching.py`) : 8 critères par offre, régression
    logistique par descente de gradient (L2, classes repondérées). Poids a
    priori jusqu'à 6 annotations des deux types ; ensuite modèle appris,
@@ -80,7 +81,9 @@ profil et de `/details/skills/`). Format JSON :
 
    Pour chaque offre choisie (`1,3`, `2-4`, `tous`), un dossier
    `applications/<date>-<entreprise>-<poste>/` contient `cv.html`
-   (imprimable en PDF), `cv.md`, `message.txt` (message de candidature),
+   (imprimable), `cv.md` (CV au format ATS : renseigne ton nom et ton
+   profil LinkedIn dans Paramètres → Coordonnées du CV ; exports PDF et
+   Word nommés `Prénom-Nom-CV-Poste` depuis l'interface), `message.txt` (message de candidature),
    `conseils.md` (écarts à traiter) et `offre.txt`. Le CV et l'offre
    s'ouvrent dans le navigateur ; **en ligne de commande, tu postules
    toi-même** (l'outil n'envoie rien). L'interface web, elle, peut postuler et
@@ -117,7 +120,7 @@ Développement du front : `python -m linkedin_market.web --dev` puis `npm run de
 Tests : `.venv/bin/python -m pytest linkedin_market/tests`.
 
 Pages : **Tableau de bord** (quotas du jour, entonnoir, activité, tâches en direct), **Offres**
-(annotation 👍/👎, entraînement, recalcul des scores, préparation d'une candidature),
+(bouton **Mettre à jour**, annotation 👍/👎, entraînement, recalcul des scores, préparation d'une candidature),
 **Candidatures** (message, CV et conseils éditables, statut, **Postuler**, contacts, **écrire à
 l'entreprise**), **Marché** (tendances et écart de compétences), **Compétences** (ajouter/retirer
 des compétences, suggestions du marché, « Recalculer les scores » — tes fichiers `profil.*` ne sont

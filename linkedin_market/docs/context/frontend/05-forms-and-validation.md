@@ -65,6 +65,8 @@ page). Succès : Notice « Paramètres enregistrés. » ; erreur : `ErrorBox` (e
 | Messages / jour | `message_daily_max` | `number min=0 max=200`, vide → **0** | entier **0–200** | idem |
 | Email de contact | `contact_email` | `type="email"` (non bloquant) | chaîne, `strip()`, **aucun contrôle de format** | — |
 | Téléphone | `contact_phone` | texte | chaîne, `strip()` | — |
+| Nom complet (carte « Coordonnées du CV ») `[ACTUEL]` 2026-10-15 | `full_name` | texte | ≤ 80, une ligne, sans caractère de contrôle | « full_name ne peut pas dépasser 80 caractères. » / « full_name ne doit contenir ni saut de ligne ni caractère de contrôle. » |
+| Profil LinkedIn (carte « Coordonnées du CV ») `[ACTUEL]` 2026-10-15 | `linkedin_url` | `type="url"` | vide ou `https://…linkedin.com/in/…` | « linkedin_url doit être l'URL de ton profil (https://www.linkedin.com/in/...) ou vide. » |
 | Ajouter à mon profil LinkedIn chaque compétence… | `linkedin_skill_sync` | case | `bool()` | — |
 | Signature des emails | `signature` | `textarea` 3 lignes | chaîne, `strip()` | — |
 | Réponses mémorisées (« Oublier ») | `answers` | liste + bouton | objet ; clé normalisée tronquée à 200, réponse à 500 caractères | « answers doit être un objet question -> réponse. » |
@@ -329,7 +331,8 @@ vérifier sur la version installée ; les champs numériques HTML renvoient des 
 
 - `[ACTUEL]` **aucun upload** dans l'interface. Les fichiers sources restent sur disque, déposés par
   l'utilisateur : `profil.json/.md/.txt` ou `cv.pdf` à la racine du projet (état affiché « Fichier de profil :
-  trouvé / aucun » dans Paramètres). La pièce jointe des emails est le CV **généré** (`cv_pdf.ensure_cv_pdf`) à
+  trouvé / aucun » dans Paramètres). La pièce jointe des emails est le CV **généré** au format ATS (`cv_export.ensure`, fichier
+  `<Prénom-Nom>-CV-<Titre>.pdf`) à
   partir du CV Markdown du dossier, choisie par la case « Joindre le CV (PDF) » ; l'utilisateur ne choisit pas de
   fichier.
 - `[CIBLE]` si un import de CV est ajouté : type MIME `application/pdf` uniquement (vérifié aussi côté serveur par

@@ -30,6 +30,7 @@ def _chrome() -> webdriver.Chrome:
     from selenium.webdriver.chrome.service import Service
 
     options = Options()
+    options.page_load_strategy = "eager"  # LinkedIn ne finit jamais d'émettre « load » (flux, pubs) : DOM prêt suffit
     if config.browser_binary():
         options.binary_location = config.browser_binary()
     if config.headless():
@@ -45,6 +46,7 @@ def _firefox() -> webdriver.Firefox:
     from selenium.webdriver.firefox.service import Service
 
     options = Options()
+    options.page_load_strategy = "eager"  # LinkedIn ne finit jamais d'émettre « load » (flux, pubs) : DOM prêt suffit
     if config.browser_binary():
         options.binary_location = config.browser_binary()
     if config.headless():

@@ -3,7 +3,7 @@
 ## Le projet en bref
 Outil **open source auto-hébergé** d'analyse du marché freelance et d'aide à la candidature : collecte d'offres,
 posts et profils (LinkedIn, France Travail, Malt, WTTJ ; import manuel Indeed : `[ACTUEL]` depuis la vague 5),
-tendances sur 30 jours, matching appris sur les annotations, dossiers de candidature, prospection B2B confirmée.
+tendances sur 60 jours, matching appris sur les annotations, dossiers de candidature, prospection B2B confirmée.
 **Une instance = un utilisateur**, sur son poste, avec **son** compte et ses données. Deux points d'entrée qui
 appellent les mêmes fonctions de `pipeline.py` : CLI `python -m linkedin_market` et interface web locale
 `python -m linkedin_market.web` (FastAPI + SPA React sur **http://127.0.0.1:8765**, jamais exposée ailleurs).
@@ -95,7 +95,7 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
   remplis ; toute autre question passe par `TaskContext.ask()`. Cases à cocher jamais cochées d'office.
 - **I-06** Checkpoint, authwall, CAPTCHA, perte de session ⇒ **arrêt immédiat**, événement `blocked`, repos de 6 h.
   **Aucun contournement** : seule la vérification manuelle par l'utilisateur dans la fenêtre visible est permise.
-- **I-07** Plafonds de prudence (`prudent` 15 / `normal` 30 / `agressif` 60 éléments par type) et plafonds
+- **I-07** Plafonds de prudence (100 éléments par type pour `prudent`, `normal` et `agressif` depuis le 2026-10-15 ; collecte LinkedIn des offres par lots de 15, pause de 2 min par lot) et plafonds
   quotidiens (`apply_daily_max`, `message_daily_max`) jamais dépassés ; contrôle à l'API **et** au début de la
   tâche, `[ACTUEL]` depuis la vague 2 : `max_items` ≤ plafond de la prudence choisie (422 à l'API/réglages,
   garde défensive `pipeline.capped()`), prudence par défaut `prudent` (`CHECK` en base depuis la vague 1). Plafond
@@ -112,7 +112,9 @@ Ils s'appliquent à **tout** point d'entrée : CLI, API, tâches, scripts, tests
   l'interprétation n'envoie que des agrégats ; le mode local produit toujours une interprétation. Génération de CV
   par Claude (E-6, décidé le 2026-10-09) : profil de l'utilisateur + texte de l'offre **après**
   `nlp.redact_third_parties` (noms de tous les contacts de l'utilisateur, emails, téléphones, URL de profils de personnes
-  remplacés par `[personne]`) `[ACTUEL]` depuis la vague 6 ; le profil de l'utilisateur n'est jamais rédigé.
+  remplacés par `[personne]`) `[ACTUEL]` depuis la vague 6 ; le profil de l'utilisateur n'est jamais rédigé. Les
+  coordonnées du CV au format ATS (`full_name`, email, téléphone, lieu, `linkedin_url`) sont posées par
+  `cv_format.apply_identity` après la génération : Claude ne les reçoit pas.
 - **I-12** Prospection B2B (CPCE L.34-5, CNIL) : destinataire joint dans ses fonctions, objet lié à son offre,
   origine de l'adresse et moyen de désinscription simple et gratuit dans chaque message `[ACTUEL]` depuis la
   vague 4 : pied imposé ajouté par le serveur (`outreach.compose_footer`, jamais saisi par l'utilisateur) +

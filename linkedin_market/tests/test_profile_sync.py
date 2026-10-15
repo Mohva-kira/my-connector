@@ -50,3 +50,14 @@ def test_existing_skill_is_not_added_again(driver):
 def test_linkedin_error_is_reported(driver):
     with pytest.raises(profile_sync.ProfileSyncError, match="nombre maximum"):
         profile_sync.add_skill(driver, "terraform", CAUTION, resolve=_resolver("#full"), timeout=3)
+
+
+def test_navigation_timeout_is_readable():
+    from selenium.common.exceptions import TimeoutException
+
+    class SlowDriver:
+        def get(self, url):
+            raise TimeoutException("Navigation timed out after 60000 ms")
+
+    with pytest.raises(profile_sync.ProfileSyncError, match="trop de temps"):
+        profile_sync.add_skill(SlowDriver(), "kubernetes", CAUTION)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 
 from . import config, nlp
@@ -78,7 +78,13 @@ def _wait(predicate, timeout: float, check: Callable[[], None]):
 
 
 def _open(driver, url: str, caution: config.Caution) -> None:
-    driver.get(url)
+    try:
+        driver.get(url)
+    except TimeoutException:
+        raise ProfileSyncError(
+            "LinkedIn met trop de temps à répondre (60 s) : vérifie ta connexion "
+            "et la fenêtre du navigateur, puis réessaie."
+        ) from None
     human_pause(caution, 0.6)
     if any(p in driver.current_url for p in _BLOCKED):
         raise PermissionError(f"LinkedIn a interrompu la navigation ({driver.current_url}).")

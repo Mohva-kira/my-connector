@@ -156,7 +156,8 @@ réponses des recruteurs arrivent dans la boîte mail ou la messagerie LinkedIn 
 | Drivers | Selenium Manager ; `chromedriver` / `geckodriver` du `PATH` prioritaires (Firefox snap) |
 | Choix | `LINKEDIN_BROWSER` : `auto` (Chrome puis Firefox), `chrome`, `firefox` ; `LINKEDIN_BROWSER_BINARY` |
 | Fenêtre | visible par défaut (`LINKEDIN_HEADLESS=0`, recommandé : permet la vérification manuelle) ; 1366×900 (Chrome) |
-| Chargement de page | `set_page_load_timeout(60)` |
+| Chargement de page | `set_page_load_timeout(60)` et `page_load_strategy = "eager"` (Chrome et Firefox) `[ACTUEL]` : LinkedIn n'émet jamais l'événement « load » ; les scrapers attendent leurs éléments par des waits. `profile_sync._open` et `contacts.lookup` convertissent la `TimeoutException` de `driver.get` en `ProfileSyncError` / `RuntimeError` « LinkedIn met trop de temps à répondre (60 s)… » `[ACTUEL]` (`tests/test_profile_sync.py::test_navigation_timeout_is_readable`) |
+| Point ouvert (non confirmé) | « Formulaire d'ajout de compétence introuvable » : l'URL `/edit/forms/skills/new/` a peut-être changé côté LinkedIn ; à vérifier en fenêtre visible, sélecteurs non modifiés |
 | Échec de démarrage | `RuntimeError("Aucun navigateur utilisable (LINKEDIN_BROWSER=…) : …")` ⇒ tâche `échec` |
 | Rythme | `human_pause(caution, facteur)` entre les pages |
 | Options interdites | aucune option masquant l'automatisation (R-7) ; `tests/test_browser.py` le vérifie `[ACTUEL]` |

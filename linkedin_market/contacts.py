@@ -11,7 +11,7 @@ import logging
 import re
 from collections.abc import Callable
 
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from . import config, logmask
 from .browser import human_pause
@@ -119,7 +119,13 @@ def find_hiring_team(
     Le journal (``log_fn``) ne reçoit que des initiales et des adresses masquées (E-12) ; les valeurs complètes
     sont renvoyées pour l'historique de la candidature.
     """
-    driver.get(job_url)
+    try:
+        driver.get(job_url)
+    except TimeoutException:
+        raise RuntimeError(
+            "LinkedIn met trop de temps à répondre (60 s) : vérifie ta connexion "
+            "et la fenêtre du navigateur, puis réessaie."
+        ) from None
     human_pause(caution, 0.6)
     if any(p in driver.current_url for p in ("/checkpoint", "/authwall", "/login", "/uas/")):
         raise PermissionError(f"LinkedIn a interrompu la navigation ({driver.current_url}).")

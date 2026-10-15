@@ -87,6 +87,7 @@ function useWatchUnauthorized() {
 /** Libellé de l'action interrompue, déduit de la requête d'origine. */
 const ACTION_LABELS: [RegExp, string][] = [
   [/^\/runs$/, "Lancer l'analyse"],
+  [/^\/runs\/update$/, "Mettre à jour"],
   [/^\/applications\/[^/]+\/apply$/, "Lancer la candidature"],
   [/^\/applications\/[^/]+\/contacts\/lookup$/, "Chercher les recruteurs de l'offre"],
   [/^\/applications\/[^/]+\/messages$/, "Relire le message"],

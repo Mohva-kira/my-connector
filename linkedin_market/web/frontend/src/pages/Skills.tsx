@@ -138,7 +138,7 @@ export default function Skills() {
             <p className="mt-3 text-xs text-text-muted">N'ajoute que ce que tu maîtrises réellement : ces compétences servent aussi à rédiger tes CV et sont ajoutées à ton profil LinkedIn.</p>
           </Card>
 
-          <Card title="En hausse sur 30 jours">
+          <Card title="En hausse sur 60 jours">
             {profile.suggestions.rising.length === 0 ? <p className="text-sm text-text-muted">Rien de notable.</p> : (
               <div className="flex flex-wrap gap-2">
                 {profile.suggestions.rising.map((s) => (

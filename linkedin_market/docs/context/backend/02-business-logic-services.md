@@ -31,7 +31,7 @@ Fonctions de cas d'usage, toutes de signature `(ctx: TaskContext, …) -> dict` 
 | `rescore(ctx)` | `RecalculerScores` | analyse existante ; lit `home_location` / `timezone` dans les réglages | nouveau rapport (reprend l'interprétation précédente) |
 | `train_model(ctx)` | `EntrainerModele` | ≥ 6 annotations, deux classes ; lit `home_location` / `timezone` dans les réglages | `matching_models` (version + 1, active), nouveau rapport |
 | `prepare_application(ctx, job_id)` | `PreparerCandidature` | offre dans le dernier rapport **et** dans l'historique | dossier, `applications` |
-| `apply_job(ctx, job_id)` | `PostulerEasyApply` | plafond `apply`, blocage | `cv.pdf`, `applications` + `application_events`, `labels`, `activity apply` |
+| `apply_job(ctx, job_id)` | `PostulerEasyApply` | plafond `apply`, blocage | CV PDF (`cv_export`), `applications` + `application_events`, `labels`, `activity apply` |
 | `lookup_contacts(ctx, job_id)` | `ChercherRecruteurs` | blocage | `company_contacts` fusionnés, historique |
 | `send_message(ctx, job_id, …)` | `EnvoyerMessage` | plafond messages ; blocage (canal LinkedIn) | `activity message_*`, historique, statut `contactée` |
 | `import_linkedin_profile(ctx)` | `ImporterProfilLinkedIn` | blocage | `candidate_profiles.text` |
@@ -88,7 +88,7 @@ Calculs purs (sans réseau) :
 | `contacts.py`, `profile_sync.py`, `outreach.send_linkedin_message` | LinkedIn | `PermissionError` (blocage), `OutreachError`, `ProfileSyncError` |
 | `outreach.send_email` | SMTP de l'utilisateur | `OutreachError` |
 | `interpreter.ClaudeInterpreter` | API Anthropic | toute exception du SDK, `RuntimeError("Claude a refusé la requête.")` |
-| `cv_pdf.py` | — (génération locale de `cv.pdf`) | — |
+| `cv_format.py`, `cv_pdf.py`, `cv_docx.py`, `cv_export.py` `[ACTUEL]` (2026-10-15) | — (CV au format ATS : schéma Markdown et titres FR/EN, en-tête de contact posé après la génération, `validate_cv` ; rendus PDF fpdf2 avec Liberation Sans embarquée `assets/fonts`, OFL, et DOCX python-docx ; fichiers `<Prénom-Nom>-CV-<Titre>.<fmt>`) | — |
 | `sources/france_travail.py` `[ACTUEL]` | API Offres d'emploi v2 | `SourceFetchError` (l'analyse continue sans cette source ; distincte de `consent.SourceUnavailable`) |
 | `sources/malt.py`, `sources/wttj.py`, `sources/base.py` `[ACTUEL]` | Malt, WTTJ (navigateur, lecture seule) | blocage : `BrowserJobSource.blocked` ⇒ source arrêtée, événement `blocked` ; `pipeline.collect` orchestre les sources, `pipeline.guard_source_rest` nomme la source en repos |
 

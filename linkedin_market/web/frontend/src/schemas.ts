@@ -8,7 +8,7 @@ import type { Job, ManualItemBody, ModelInfo, Report, Settings, SuppressionBody 
 export const CAUTIONS = ["prudent", "normal", "agressif"] as const;
 export type Caution = (typeof CAUTIONS)[number];
 /** Plafond d'éléments par type selon la prudence (`Caution.max_items`). */
-export const CAUTION_MAX: Record<Caution, number> = { prudent: 15, normal: 30, agressif: 60 };
+export const CAUTION_MAX: Record<Caution, number> = { prudent: 100, normal: 100, agressif: 100 };
 /** Prudence par défaut décidée (E-3). */
 export const DEFAULT_CAUTION: Caution = "prudent";
 
@@ -18,6 +18,8 @@ export const maxItemsCapMessage = (caution: Caution) =>
 
 /** Même expression que `outreach._EMAIL` côté serveur (G-12). */
 export const EMAIL_RE = /^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$/;
+/** Profil LinkedIn de l'utilisateur pour l'en-tête du CV : comme `cv_format.is_linkedin_url` côté serveur. */
+const CV_LINKEDIN_RE = /^https:\/\/([a-z]{2,3}\.)?linkedin\.com\/in\/[^/?#\s]+\/?$/;
 
 const cautionSchema = z.enum(CAUTIONS, { error: "caution doit être l'un de : prudent, normal, agressif." });
 const interpreterSchema = z.enum(["claude", "local"], { error: "interpreter doit être l'un de : claude, local." });
@@ -74,6 +76,11 @@ export const settingsSchema = z.object({
   // Vide admis ; sinon adresse valide (G-12, message serveur exact).
   contact_email: z.string().trim().refine((v) => v === "" || EMAIL_RE.test(v), { error: "contact_email doit être une adresse email valide." }),
   contact_phone: z.string().trim(),
+  full_name: z.string().trim()
+    .refine((v) => Array.from(v.replace(/\s+/g, " ")).length <= 80, { error: "full_name ne peut pas dépasser 80 caractères." })
+    // eslint-disable-next-line no-control-regex
+    .refine((v) => !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(v), { error: "full_name ne doit contenir ni saut de ligne ni caractère de contrôle." }),
+  linkedin_url: z.string().trim().refine((v) => v === "" || CV_LINKEDIN_RE.test(v), { error: "linkedin_url doit être l'URL de ton profil (https://www.linkedin.com/in/...) ou vide." }),
   signature: z.string().trim(),
   linkedin_skill_sync: z.boolean(),
   answers: z.record(z.string(), z.string(), { error: "answers doit être un objet question -> réponse." }),

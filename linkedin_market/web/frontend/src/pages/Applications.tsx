@@ -51,10 +51,18 @@ function Dossier({ app }: { app: ApplicationDetail }) {
         title={`CV adapté (${app.generator === "claude" ? "rédigé par Claude" : "assemblé localement"})`}
         actions={<div className="flex gap-2">
           <Button small variant="ghost" onClick={() => setPreview((v) => !v)}>{preview ? "Modifier" : "Aperçu"}</Button>
-          <a className="rounded-md border border-border-default px-2.5 py-1 text-xs hover:bg-bg-secondary" target="_blank" rel="noopener noreferrer" href={authedUrl(`/applications/${enc(app.id)}/cv.html`)}>Version imprimable / PDF</a>
+          <a className="rounded-md border border-border-default px-2.5 py-1 text-xs hover:bg-bg-secondary" target="_blank" rel="noopener noreferrer" href={authedUrl(`/applications/${enc(app.id)}/cv.html`)}>Version imprimable</a>
+          <a className="rounded-md border border-border-default px-2.5 py-1 text-xs hover:bg-bg-secondary" href={authedUrl(`/applications/${enc(app.id)}/cv.pdf`)} download>PDF</a>
+          <a className="rounded-md border border-border-default px-2.5 py-1 text-xs hover:bg-bg-secondary" href={authedUrl(`/applications/${enc(app.id)}/cv.docx`)} download>Word</a>
           <Button small variant="primary" disabled={!dirtyCv} loading={save.isPending} onClick={() => save.mutate({ cv })}>Enregistrer</Button>
         </div>}
       >
+        <div className="mb-2">
+          {app.ats_issues.length === 0
+            ? <Badge tone="success">Conforme ATS</Badge>
+            : <Notice tone="warning"><span className="font-medium">Format ATS à corriger :</span><ul className="mt-1 list-disc pl-5">{app.ats_issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></Notice>}
+        </div>
+        {dirtyCv && <p className="mb-2 text-xs text-text-muted">Enregistre le CV pour mettre à jour le contrôle ATS et les fichiers PDF / Word.</p>}
         {preview
           ? <div className="prose-md max-h-[28rem] overflow-auto rounded-md border border-border-subtle p-4 text-sm"><ReactMarkdown remarkPlugins={[remarkGfm]}>{cv}</ReactMarkdown></div>
           : <textarea className={`${inputClass} font-mono`} rows={18} value={cv} onChange={(e) => setCv(e.target.value)} aria-label="CV en Markdown" />}
@@ -146,6 +154,9 @@ function Contacts({ app }: { app: ApplicationDetail }) {
   const [composing, setComposing] = useState<{ contact?: Contact } | null>(null);
   const [opposing, setOpposing] = useState<Contact | null>(null);
   const consent = useConsentGuard();
+  // Destinataire par défaut : premier contact enregistré avec un email (sinon un profil LinkedIn), hors opposés.
+  const usable = app.contacts.filter((c) => !c.opposed);
+  const defaultRecipient = usable.find((c) => c.email) ?? usable.find((c) => c.profile_url);
   const dirty = JSON.stringify(rows) !== JSON.stringify(app.contacts);
   const linkedin = sourceOfRef(app.id) === "linkedin";
 
@@ -154,7 +165,7 @@ function Contacts({ app }: { app: ApplicationDetail }) {
       <Button small onClick={() => consent.guard("linkedin", () => lookup.mutate(undefined, { onSuccess: track }))} loading={lookup.isPending} disabled={!linkedin || !status?.credentials_configured || !!status?.blocked}
         title={linkedin ? undefined : "La recherche de recruteurs n'existe que pour les offres LinkedIn."}>Chercher les recruteurs de l'offre</Button>
       <Button small onClick={() => setRows([...rows, { full_name: "", profile_url: "", email: null, source: "manuel" }])}>Ajouter un contact</Button>
-      <Button small variant="primary" onClick={() => setComposing({})}>Écrire à l'entreprise</Button>
+      <Button small variant="primary" onClick={() => setComposing({ contact: defaultRecipient })}>Écrire à l'entreprise</Button>
     </div>}>
       <ErrorBox error={save.error ?? lookup.error} />
       {composing && <ComposeModal app={app} contact={composing.contact} onClose={() => setComposing(null)} />}

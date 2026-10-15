@@ -68,7 +68,7 @@ export function useDebouncedValue<T>(value: T, delay = 300): T {
 }
 
 /** Offres filtrées : recherche `q` avec anti-rebond de 300 ms, liste précédente gardée pendant le chargement. */
-export function useJobs(filters: Record<string, string>) {
+export function useJobs(filters: Record<string, string>, live = false) {
   const q = useDebouncedValue(filters.q ?? "", 300);
   const effective = { ...filters, ...(filters.q !== undefined ? { q } : {}) };
   const query = new URLSearchParams(Object.entries(effective).filter(([, v]) => v !== "")).toString();
@@ -76,6 +76,8 @@ export function useJobs(filters: Record<string, string>) {
     queryKey: ["jobs", query],
     queryFn: () => api<JobsResponse>(`/jobs${query ? `?${query}` : ""}`),
     placeholderData: keepPreviousData,
+    // Collecte en cours : les offres déjà scorées apparaissent au fil des lots.
+    refetchInterval: live ? 4000 : undefined,
   });
 }
 

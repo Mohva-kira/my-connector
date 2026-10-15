@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import logging
+import math
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from . import activity, config, consent, matching, sources, storage, trends
 from . import profile as profile_mod
 from .db.repositories import sources as sources_repo
 from .db.repositories import user_transaction
-from .models import Profile, SearchRequest
+from .models import Item, Profile, SearchRequest
 
 log = logging.getLogger("linkedin_market")
 
@@ -34,6 +37,130 @@ class ScrapeOutcome:
     profile_text: str = ""
     blocked: bool = False
     items: int = 0  # éléments enregistrés (offres, posts et profils)
+
+
+# Horloge et attente de ``BatchRunner`` (remplaçables dans les tests).
+_clock = time.monotonic
+_tick = time.sleep
+
+
+class BatchRunner:
+    """Traite chaque lot d'offres lu par le scraper pendant la pause entre deux lots.
+
+    Le lot est enregistré puis scoré dans un thread, pendant que le thread principal attend ``caution.batch_pause``
+    (2 min). Si le traitement dure plus longtemps, on attend sa fin avant de reprendre la navigation ; après le
+    dernier lot, on attend seulement la fin du traitement. L'annulation est testée chaque seconde et le thread est
+    toujours attendu avant de la relever : le lot déjà lu est donc enregistré. Un échec d'enregistrement arrête la
+    collecte ; un échec de scoring est journalisé sans l'arrêter.
+    """
+
+    def __init__(
+        self,
+        caution: config.Caution,
+        check: Callable[[], None],
+        *,
+        score: Callable[[list[Item]], str] | None = None,
+        progress: Callable[[str], None] | None = None,
+        on_state: Callable[[dict], None] | None = None,
+        expected: int = 0,
+    ):
+        self.caution = caution
+        self._on_state = on_state or (lambda state: None)
+        self.total_batches = max(1, math.ceil(expected / caution.batch_size)) if expected else 0
+        self._check = check
+        self._score = score
+        self._progress = progress or (lambda message: log.info("%s", message))
+        self.batches = 0
+        self.saved = 0
+        self._error: Exception | None = None
+
+    def _work(self, batch: list[Item]) -> None:
+        try:
+            storage.append_items(batch)
+        except Exception as exc:  # noqa: BLE001 - relevée par le thread principal après la pause
+            self._error = exc
+            return
+        self.saved += len(batch)
+        if not self._score:
+            return
+        try:
+            self._progress(self._score(batch))
+        except Exception as exc:  # noqa: BLE001 - le scoring d'un lot ne doit pas arrêter la collecte
+            log.warning("Scoring du lot impossible : %s", exc.__class__.__name__)
+
+    def __call__(self, batch: list[Item], last: bool) -> None:
+        self.batches += 1
+        self._error = None
+        worker = threading.Thread(target=self._work, args=(batch,), daemon=True)
+        started = _clock()
+        worker.start()
+        pause_until = None if last else (datetime.now(UTC) + timedelta(seconds=self.caution.batch_pause)).isoformat()
+        self._state("traitement", batch, pause_until)
+        self._progress(f"Lot {self.batches} : {len(batch)} offres lues, enregistrement et scoring en cours.")
+        try:
+            while True:
+                self._check()
+                busy = worker.is_alive()
+                if not busy and (last or _clock() - started >= self.caution.batch_pause):
+                    break
+                if busy:
+                    worker.join(timeout=1.0)
+                else:
+                    _tick(1.0)
+        finally:
+            worker.join()  # même annulé, le lot lu est enregistré avant de repartir
+        if self._error:
+            raise RuntimeError("Enregistrement du lot impossible : la collecte est arrêtée.") from self._error
+        self._state("reprise" if not last else "terminé", batch, None)
+        if not last:
+            self._progress(f"Lot {self.batches} traité : reprise de la collecte.")
+
+    def _state(self, state: str, batch: list[Item], pause_until: str | None) -> None:
+        """État structuré du lot en cours pour l'indicateur d'avancement (compte à rebours jusqu'à ``pause_until``)."""
+        self._on_state(
+            {
+                "state": state,  # traitement (enregistrement + scoring + pause) | reprise | terminé
+                "batch": self.batches,
+                "batches": max(self.total_batches, self.batches),
+                "batch_size": len(batch),
+                "read": self.saved if state != "traitement" else self.saved + len(batch),
+                "pause_until": pause_until,
+                "pause_seconds": self.caution.batch_pause,
+            }
+        )
+
+
+def batch_scorer(
+    request: SearchRequest,
+    home_location: str,
+    timezone: str,
+    on_scored: Callable[[list[dict]], None] | None = None,
+) -> Callable[[list[Item]], str]:
+    """Scoring d'un lot d'offres avec le profil et le modèle courants (profil construit au premier lot).
+
+    ``on_scored`` reçoit les offres scorées du lot dès qu'elles le sont (affichage progressif).
+    """
+    state: dict[str, Profile | None] = {}
+
+    def score(batch: list[Item]) -> str:
+        if "profile" not in state:
+            try:
+                state["profile"] = build_profile(request)
+            except ProfileMissingError:
+                state["profile"] = None
+        prof = state["profile"]
+        if prof is None:
+            return f"{len(batch)} offres enregistrées (scoring après la collecte : profil LinkedIn pas encore lu)."
+        features = matching.build_features(
+            [i for i in batch if i.kind == "job"], prof, request.keyword, home_location, timezone
+        )
+        scored = matching.score_jobs(features, matching.MatchingModel.load())
+        if on_scored and scored:
+            on_scored(scored)
+        best = f", meilleur score {scored[0]['score']} %" if scored else ""
+        return f"{len(batch)} offres enregistrées et scorées{best}."
+
+    return score
 
 
 # Statuts d'une source dans le résultat d'une collecte (``backend/01`` § 5.8.2).
@@ -91,6 +218,9 @@ def scrape(
     on_manual_check: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     on_ready: Callable[[], None] | None = None,
+    score_batch: Callable[[list[Item]], str] | None = None,
+    progress: Callable[[str], None] | None = None,
+    on_state: Callable[[dict], None] | None = None,
 ) -> ScrapeOutcome:
     """Collecte LinkedIn ajoutée à l'historique ; texte du profil si demandé, et blocage éventuel.
 
@@ -119,7 +249,15 @@ def scrape(
         login(driver, interactive=interactive, on_manual_check=on_manual_check)
         if on_ready:
             on_ready()  # connexion (et vérification manuelle éventuelle) terminée
-        scraper = LinkedInScraper(driver, request, check=check)
+        runner = BatchRunner(
+            config.CAUTION_LEVELS[request.caution],
+            check,
+            score=score_batch,
+            progress=progress,
+            on_state=on_state,
+            expected=request.max_items,
+        )
+        scraper = LinkedInScraper(driver, request, check=check, on_batch=runner)
         saved = 0
         if want_profile:
             log.info("Lecture de ton profil LinkedIn...")
@@ -138,9 +276,12 @@ def scrape(
                     storage.append_items(scraper.partial)
                     log.info("Collecte annulée : %d %s déjà lus enregistrés.", len(scraper.partial), label)
                 raise
-            storage.append_items(items)
-            saved += len(items)
-            log.info("%d %s enregistrés.", len(items), label)
+            if label == "offres":
+                saved += runner.saved  # déjà enregistrées lot par lot (``BatchRunner``)
+            else:
+                storage.append_items(items)
+                saved += len(items)
+            log.info("%d %s enregistrés.", runner.saved if label == "offres" else len(items), label)
             if scraper.blocked or scraper._blocked():
                 break
         if scraper.blocked:
@@ -218,6 +359,9 @@ def collect(
     on_manual_check: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     on_ready: Callable[[], None] | None = None,
+    score_batch: Callable[[list[Item]], str] | None = None,
+    progress: Callable[[str], None] | None = None,
+    on_state: Callable[[dict], None] | None = None,
 ) -> CollectOutcome:
     """Collecte les sources demandées, dans l'ordre, et ajoute les éléments à l'historique (vague 5).
 
@@ -253,6 +397,9 @@ def collect(
                 on_manual_check=on_manual_check,
                 should_stop=should_stop,
                 on_ready=on_ready,
+                score_batch=score_batch,
+                progress=progress,
+                on_state=on_state,
             )
             outcome.profile_text = result.profile_text
             report = SourceReport(code, result.items)

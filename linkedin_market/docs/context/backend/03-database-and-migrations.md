@@ -190,7 +190,9 @@ linkedin_market/migrations/
     ├── 0002_contact_opposed_at.py  # [ACTUEL] vague 4 : company_contacts.opposed_at timestamptz NULL (I-13)
     ├── 0003_enable_new_sources.py  # [ACTUEL] vague 5 : sources.enabled = true (france_travail, malt, wttj, indeed)
     ├── 0004_retention_and_settings.py  # [ACTUEL] vague 6 : user_settings.home_location / timezone (TEXT NOT NULL DEFAULT ''), ck_tasks_kind accepte 'purge'
-    └── 0005_<objet>.py        # évolutions de schéma suivantes
+    ├── 0005_max_items_100.py  # [ACTUEL] plafond max_items porté à 100 pour les trois prudences
+    ├── 0006_cv_identity.py    # [ACTUEL] user_settings.full_name / linkedin_url (TEXT NOT NULL DEFAULT ''), en-tête du CV ATS
+    └── 0007_<objet>.py        # évolutions de schéma suivantes
 linkedin_market/db/import_json.py   # import idempotent des fichiers linkedin_market_data/ (pas une révision Alembic)
 ```
 - Identifiants de révision **séquentiels sur 4 chiffres** (`alembic revision --rev-id 0002 -m "…"`,

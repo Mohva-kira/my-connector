@@ -6,7 +6,7 @@ import types
 import pytest
 from fastapi.testclient import TestClient
 
-from linkedin_market import application, interpreter, report, settings
+from linkedin_market import application, cv_format, interpreter, report, settings
 from linkedin_market.models import Item, Profile
 from linkedin_market.web import services
 from linkedin_market.web.app import create_app
@@ -98,6 +98,51 @@ def test_cv_et_message_locaux():
         assert "Freelance en full remote, disponible" in empty.cv and "full remote, je peux" in empty.message
 
 
+def test_cv_local_au_format_ats():
+    profile = Profile(
+        text="Lead Developer\nSUPINFO\njanv. 2019 - sept. 2021\nAPIs.\nFormation\nSUPINFO\nMaster\n2014 - 2019",
+        origin="profil.txt",
+        title="Dev",
+        skills=["python", "docker"],
+    )
+    identity = cv_format.Identity(
+        "Ada Lovelace", "ada@example.com", linkedin_url="https://www.linkedin.com/in/ada", location="Lyon"
+    )
+    app = application.generate(profile, ITEM, JOB, {}, "local", home_location="Lyon", identity=identity)
+    assert app.cv.startswith("# Ada Lovelace\n**Dev**\nLyon · ada@example.com · [linkedin.com/in/ada]")
+    headings = [line for line in app.cv.splitlines() if line.startswith("## ")]
+    assert headings == [
+        "## Profil",
+        "## Compétences",
+        "## Expérience professionnelle",
+        "## Formation",
+        "## Disponibilité",
+    ]
+    assert "- **Clés pour ce poste** : Python" in app.cv and "- **Autres compétences** : Docker" in app.cv
+    assert "*01/2019 – 09/2021*" in app.cv
+    assert cv_format.validate_cv(app.cv) == [] and "Format ATS" not in app.advice
+
+
+def test_cv_local_suit_la_langue_de_l_offre():
+    item = Item(
+        kind="job",
+        id="job:1",
+        url="https://x/1",
+        title="Dev",
+        text="We are looking for a Python developer with experience to join our team. You will build the APIs.",
+        keyword="python",
+    )
+    app = application.generate(PROFILE, item, JOB, {}, "local")
+    headings = [line for line in app.cv.splitlines() if line.startswith("## ")]
+    assert headings == ["## Summary", "## Skills", "## Professional Experience", "## Availability"]
+
+
+def test_ecarts_ats_signales_dans_les_conseils():
+    """Sans coordonnées dans Paramètres, le CV n'est pas conforme : l'écart est signalé, rien n'est inventé."""
+    app = application.generate(PROFILE, ITEM, JOB, {}, "local")
+    assert "- Format ATS : Coordonnées absentes" in app.advice
+
+
 # -------------------------------------------------------------------- timeout
 def test_anthropic_timeout_120(monkeypatch):
     received = {}
@@ -107,8 +152,17 @@ def test_anthropic_timeout_120(monkeypatch):
             received.update(kwargs)
 
     monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=FakeAnthropic))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "factice")
     claude = interpreter.ClaudeInterpreter()
     assert received == {"timeout": 120.0} and claude.client is not None  # max_retries inchangé (non passé)
+
+
+def test_cle_anthropic_absente_message_actionnable(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY absente"):
+        interpreter.ClaudeInterpreter()
+    assert interpreter.interpret(SUMMARY, "claude")[1] == "local"
 
 
 # ------------------------------------------------------------------ réglages

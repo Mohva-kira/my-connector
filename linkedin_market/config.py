@@ -38,7 +38,6 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 PROFILE_SETTINGS_FILE = DATA_DIR / "profile_settings.json"
 ACTIVITY_FILE = DATA_DIR / "activity.jsonl"
 TASKS_FILE = DATA_DIR / "tasks.jsonl"
-CV_PDF_NAME = "cv.pdf"
 
 # Score à partir duquel une offre non annotée est proposée pour candidater.
 APPLY_MIN_SCORE = 70.0
@@ -46,7 +45,7 @@ APPLY_MIN_SCORE = 70.0
 APPLY_MAX_LIST = 10
 
 SESSION_TTL_HOURS = 72
-TREND_WINDOW_DAYS = 30
+TREND_WINDOW_DAYS = 60  # deux mois ; ``rising_terms`` compare 0-30 j à 30-60 j
 
 # Fichiers de profil recherchés à la racine du projet, par ordre de priorité.
 PROFILE_FILE_CANDIDATES = (
@@ -72,12 +71,14 @@ class Caution:
     max_items: int  # par source (offres, posts, profils)
     min_delay: float  # pause aléatoire entre deux pages (secondes)
     max_delay: float
+    batch_size: int = 15  # offres lues par lot : chaque lot est enregistré et scoré pendant la pause
+    batch_pause: float = 120.0  # pause entre deux lots (secondes) ; on attend la fin du traitement s'il est plus long
 
 
 CAUTION_LEVELS = {
-    "prudent": Caution("prudent", 15, 6.0, 14.0),
-    "normal": Caution("normal", 30, 4.0, 9.0),
-    "agressif": Caution("agressif", 60, 2.5, 6.0),
+    "prudent": Caution("prudent", 100, 6.0, 14.0),
+    "normal": Caution("normal", 100, 4.0, 9.0),
+    "agressif": Caution("agressif", 100, 2.5, 6.0),
 }
 DEFAULT_CAUTION = "prudent"  # E-3
 

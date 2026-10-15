@@ -67,7 +67,7 @@ C4Container
     Container(domain, "Noyau métier", "Python : pipeline, nlp, trends, matching, application, outreach", "Règles et invariants I-01…I-16")
     Container(browser, "Navigateur piloté", "Selenium 4 + Chrome / Firefox", "Session de l'utilisateur sur LinkedIn, Malt, WTTJ")
     ContainerDb(db, "Base de données", "PostgreSQL 18", "Données métier, tâches, journal d'activité")
-    ContainerDb(files, "Fichiers locaux", "linkedin_market_data/", "Rapports HTML, dossiers de candidature, cv.pdf")
+    ContainerDb(files, "Fichiers locaux", "linkedin_market_data/", "Rapports HTML, dossiers de candidature, CV PDF / DOCX")
   }
 
   System_Ext(ext, "Sources & services externes", "LinkedIn, France Travail, Malt, WTTJ, Claude, SMTP")
@@ -93,7 +93,7 @@ C4Container
 | Entrées | `__main__.py`, `web/__main__.py`, `web/app.py`, `web/routers/*` | Parsing CLI / HTTP, validation Pydantic, codes HTTP. Aucune règle métier. |
 | Orchestration | `pipeline.py`, `web/services.py`, `web/tasks.py`, `web/guards.py` | Enchaîner les étapes, gérer annulation, saisies et vérifications manuelles, plafonds et blocages. |
 | Domaine | `nlp.py`, `trends.py`, `matching.py`, `profile.py`, `application.py`, `report.py`, `interpreter.py`, `settings.py` | Calculs et règles, sans I/O réseau. |
-| Intégrations | `browser.py`, `session.py`, `scraper.py`, `apply_bot.py`, `contacts.py`, `outreach.py`, `profile_sync.py`, `cv_pdf.py` ; `sources/` (France Travail, Malt, WTTJ) `[ACTUEL]` | Accès aux systèmes externes ; lèvent des exceptions métier lisibles (`BlockedError`, `OutreachError`, `ProfileSyncError`). |
+| Intégrations | `browser.py`, `session.py`, `scraper.py`, `apply_bot.py`, `contacts.py`, `outreach.py`, `profile_sync.py`, `cv_pdf.py`, `cv_docx.py`, `cv_export.py` ; `sources/` (France Travail, Malt, WTTJ) `[ACTUEL]` | Accès aux systèmes externes ; lèvent des exceptions métier lisibles (`BlockedError`, `OutreachError`, `ProfileSyncError`). |
 | Persistance | `storage.py`, `activity.py`, `config.py` ; `db/models.py`, `db/session.py`, `db/repositories/*`, `db/import_json.py`, `db/bootstrap.py`, `migrations/` (Alembic) `[ACTUEL]` | Lecture / écriture des données ; seul endroit autorisé à toucher la base ou `DATA_DIR`. |
 
 Règle de dépendance : `Entrées → Orchestration → Domaine / Intégrations → Persistance`. Le domaine n'importe

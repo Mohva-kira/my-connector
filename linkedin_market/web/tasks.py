@@ -88,6 +88,12 @@ class TaskContext:
         if self._cancel.is_set():
             raise TaskCancelled("Tâche annulée.")
 
+    def set_progress(self, progress: dict) -> None:
+        """Avancement structuré (étapes, lot en cours, compte à rebours) lu par l'interface dans ``meta.progress``."""
+        with self._manager._lock:
+            self.task.meta = {**self.task.meta, "progress": progress}
+        self._manager._save(self.task)
+
     def set_status(self, status: str) -> None:
         with self._manager._lock:
             self.task.status = status

@@ -77,3 +77,19 @@ def test_option_not_in_choices_fails_cleanly(driver, workdir):
     with pytest.raises(apply_bot.ApplyError, match="absente des choix"):
         run(driver, "easy_apply.html", hooks, workdir)
     assert driver.execute_script("return window.__submitted") is False
+
+
+def test_dialog_inside_shadow_dom_is_found(driver, workdir):
+    # LinkedIn rend la fenêtre de candidature dans un Shadow DOM ouvert (#interop-outlet).
+    hooks = FakeHooks({"years of experience": "10", "legally authorized": "Yes"})
+    result = run(driver, "easy_apply_shadow.html", hooks, workdir)
+    assert result.state == "postulée"
+    review = next(a for a in hooks.asked if a["field"] == "confirm_submit")["review"]
+    assert "Years: 10" in review and "Authorized: Yes" in review
+    assert any("CV téléversé" in line for line in hooks.logs)
+    assert driver.execute_script("return window.__submitted") is True
+
+
+def test_dialog_not_opening_reports_what_was_clicked(driver, workdir):
+    with pytest.raises(apply_bot.ApplyError, match=r"clic sur <button> « Easy Apply to this job »"):
+        run(driver, "easy_apply_noop.html", FakeHooks(), workdir)

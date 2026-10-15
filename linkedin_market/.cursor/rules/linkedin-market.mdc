@@ -43,6 +43,7 @@ Le CLAUDE.md et le dossier `context/` à la racine du dépôt concernent `servic
   tâche `purge` `[ACTUEL]` (vague 6) : jamais `suppression_list`, `reports` ni `applications`.
 - I-11 : aucune donnée de tiers identifiable envoyée à Claude ; l'interprète local produit toujours un texte ;
   CV par Claude : profil de l'utilisateur + offre après `nlp.redact_third_parties` (E-6, `[ACTUEL]` vague 6, noms de tous les contacts) ;
+  coordonnées du CV (format ATS, `cv_format.apply_identity`) posées après la génération, jamais envoyées à Claude ;
   lieu et fuseau issus des réglages `home_location` / `timezone`, jamais codés en dur (E-18).
 - I-12, I-13, I-14 : prospection B2B conforme CPCE L.34-5 / CNIL (objet lié à l'offre, origine de l'adresse,
   désinscription) ; `suppression_list` bloque tout envoi ; contacts purgés à 3 ans (purge `[ACTUEL]`).

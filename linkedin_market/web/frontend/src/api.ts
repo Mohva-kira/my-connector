@@ -114,6 +114,21 @@ export interface Task {
   finished_at: string | null;
 }
 
+/** `meta.progress` d'une tâche `run` : étapes et lot en cours (compte à rebours jusqu'à `pause_until`). */
+export interface RunProgressInfo {
+  steps: { key: string; label: string; state: "attente" | "en cours" | "terminée" }[];
+  batch: {
+    state: "traitement" | "reprise" | "terminé";
+    batch: number;
+    batches: number;
+    batch_size: number;
+    read: number;
+    pause_until: string | null;
+    pause_seconds: number;
+  } | null;
+  scored: number;
+}
+
 export const FINAL_STATUSES: TaskStatus[] = ["terminée", "échec", "annulée"];
 
 /** `result` d'une tâche `run` terminée (E-4 option A, G-10) : `blocked` si LinkedIn a interrompu la collecte. */
@@ -185,6 +200,10 @@ export interface Settings {
   message_daily_max: number;
   contact_email: string;
   contact_phone: string;
+  /** En-tête du CV (format ATS) ; vide = omis. */
+  full_name: string;
+  /** `https://www.linkedin.com/in/…` ou vide. */
+  linkedin_url: string;
   signature: string;
   linkedin_skill_sync: boolean;
   answers: Record<string, string>;
@@ -214,6 +233,8 @@ export interface Job {
   /** Extraits de l'en-tête LinkedIn des anciennes collectes (« il y a 1 jour », « Plus de 100 candidatures »). */
   posted_label?: string;
   applicants?: string;
+  /** Offre déjà scorée par une collecte en cours, pas encore dans un rapport. */
+  provisional?: boolean;
 }
 
 export interface ModelInfo {
@@ -230,6 +251,8 @@ export interface JobsResponse {
   keyword?: string;
   model?: ModelInfo;
   min_labels?: number;
+  /** Nombre d'offres provisoires (collecte en cours). */
+  provisional?: number;
   jobs: Job[];
 }
 
@@ -304,6 +327,8 @@ export interface ApplicationDetail extends ApplicationRow {
   advice: string;
   offer: string;
   statuses: string[];
+  /** Écarts au format ATS du CV (`cv_format.validate_cv`) ; vide = conforme. */
+  ats_issues: string[];
 }
 
 export interface Profile {

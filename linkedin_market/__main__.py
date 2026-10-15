@@ -17,7 +17,19 @@ import sys
 import webbrowser
 from typing import NoReturn
 
-from . import activity, application, config, consent, interpreter, matching, report, retention, settings, storage
+from . import (
+    activity,
+    application,
+    config,
+    consent,
+    cv_format,
+    interpreter,
+    matching,
+    report,
+    retention,
+    settings,
+    storage,
+)
 from . import profile as profile_mod
 from .db.bootstrap import prepare_database
 from .models import Profile, SearchRequest
@@ -28,6 +40,7 @@ from .pipeline import (
     ProfileMissingError,
     SourceRefused,
     analyse,
+    batch_scorer,
     build_profile,
     check_cli_sources,
     collect,
@@ -201,6 +214,7 @@ def prepare_applications(
             known_names=names,
             home_location=prefs["home_location"],
             timezone=prefs["timezone"],
+            identity=cv_format.identity_from(prefs),
         )
         folder = application.write(app, item, job)
         print(
@@ -262,13 +276,31 @@ def _refuse(exc: Exception) -> NoReturn:
     raise exc
 
 
+def apply_update(args: argparse.Namespace) -> None:
+    """``--update`` : reprend la recherche de la dernière analyse (mot-clé, lieu, prudence) sans poser de question."""
+    reports = storage.list_reports()
+    previous = storage.load_report(reports[0]["name"]) if reports else None
+    if not previous:
+        sys.exit("Aucune analyse à mettre à jour : lance d'abord une analyse avec --keyword.")
+    saved = previous.get("request", {})
+    args.keyword = args.keyword or saved.get("keyword")
+    if args.location is None:
+        args.location = saved.get("location", "")
+    args.onsite = args.onsite or not saved.get("remote_only", True)
+    args.caution = args.caution or saved.get("caution")
+    args.max_items = args.max_items or saved.get("max_items")
+    args.no_interactive = True
+    args.no_scrape = False
+    log.info("Mise à jour de « %s » : nouvelle collecte puis réanalyse.", args.keyword)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="linkedin_market", description=__doc__.split("\n")[0])
     p.add_argument("--keyword", "-k", help="mot-clé du poste visé")
     p.add_argument("--location", help="localisation des offres (défaut : monde entier)")
     p.add_argument("--onsite", action="store_true", help="ne pas filtrer sur le full remote")
     p.add_argument("--caution", choices=list(config.CAUTION_LEVELS), help="niveau anti-blocage")
-    p.add_argument("--max-items", type=int, help="éléments par source (défaut selon la prudence)")
+    p.add_argument("--max-items", type=int, help="éléments par source (défaut : 100)")
     p.add_argument("--profile-source", choices=["auto", "file", "linkedin"], default="auto")
     p.add_argument(
         "--skills",
@@ -289,6 +321,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "FRANCE_TRAVAIL_CLIENT_SECRET dans .env ; Indeed s'importe à la main depuis l'interface web. "
             "Une source bloquée est mise au repos 6 h. Sans effet avec --no-scrape."
         ),
+    )
+    p.add_argument(
+        "--update",
+        action="store_true",
+        help="mettre à jour : relance la collecte avec la recherche de la dernière analyse, sans question",
     )
     p.add_argument("--no-scrape", action="store_true", help="réanalyser l'historique sans collecter de source")
     p.add_argument("--label", type=int, default=None, help="nombre d'offres à annoter (0 = aucune)")
@@ -319,6 +356,8 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as exc:  # noqa: BLE001 - une purge en échec ne doit pas empêcher l'analyse
         log.warning("Purge de rétention impossible : %s", exc.__class__.__name__)
     prefs = settings.load_settings()
+    if args.update:
+        apply_update(args)
     if not args.no_scrape:
         try:
             check_cli_sources(args.sources)  # avant toute saisie : refus immédiat, code de sortie non nul
@@ -333,7 +372,12 @@ def main(argv: list[str] | None = None) -> None:
             or (request.profile_source == "auto" and profile_mod.find_profile_file() is None)
         )
         try:
-            outcome = collect(request, args.sources, want_profile)
+            outcome = collect(
+                request,
+                args.sources,
+                want_profile,
+                score_batch=batch_scorer(request, prefs["home_location"], prefs["timezone"]),
+            )
         except (consent.SourceConsentRequired, activity.BlockedByLinkedIn, VerificationNotDoneError) as exc:
             _refuse(exc)  # révoqué ou mis au repos entre la vérification et la collecte
         linkedin_text = outcome.profile_text

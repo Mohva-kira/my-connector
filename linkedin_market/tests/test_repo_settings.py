@@ -50,10 +50,10 @@ def test_aller_retour_reglages_et_reponses():
 
 
 def test_max_items_plafonne_par_la_prudence(client):
-    response = client.put("/api/settings", json={"caution": "prudent", "max_items": 16})
+    response = client.put("/api/settings", json={"caution": "prudent", "max_items": 101})
     assert response.status_code == 422
-    assert response.json()["detail"] == "max_items ne peut pas dépasser 15 en prudence « prudent »."
-    assert client.put("/api/settings", json={"caution": "agressif", "max_items": 60}).status_code == 200
+    assert response.json()["detail"] == "max_items ne peut pas dépasser 100 en prudence « prudent »."
+    assert client.put("/api/settings", json={"caution": "agressif", "max_items": 100}).status_code == 200
     # Revenir en prudent avec max_items = 60 est refusé, le réglage reste intact.
     assert client.put("/api/settings", json={"caution": "prudent"}).status_code == 422
     assert client.get("/api/settings").json()["caution"] == "agressif"

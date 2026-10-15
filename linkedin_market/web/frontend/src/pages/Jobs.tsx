@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Job, ManualItemCreated, SOURCE_LABEL, SourceCode, Task, api, enc, sourceLabel } from "../api";
+import { FINAL_STATUSES, Job, ManualItemCreated, SOURCE_LABEL, SourceCode, Task, api, enc, sourceLabel } from "../api";
 import { Icon } from "../components/icons";
 import { ManualImportModal } from "../components/ManualImportModal";
 import { RunModal } from "../components/RunModal";
+import { RunProgress } from "../components/RunProgress";
 import { useTaskUi } from "../components/TaskDrawer";
-import { useAction, useJob, useJobs, useLabelJob, useSources } from "../hooks";
+import { useAction, useJob, useJobs, useLabelJob, useSources, useTasks } from "../hooks";
 import { Badge, Button, Card, Empty, ErrorBox, Modal, Notice, PageHeader, formatDate, inputClass, scoreTone, statusTone } from "../ui";
 
 export function JobDetailModal({ id, onClose }: { id: string; onClose: () => void }) {
@@ -84,7 +85,9 @@ export default function Jobs() {
     status: params.get("status") ?? FILTER_DEFAULTS.status,
     source: params.get("source") ?? FILTER_DEFAULTS.source,
   };
-  const { data, error, isLoading } = useJobs(filters);
+  const { data: tasks } = useTasks();
+  const activeRun = tasks?.find((t) => t.kind === "run" && !FINAL_STATUSES.includes(t.status));
+  const { data, error, isLoading } = useJobs(filters, !!activeRun);
   const { track } = useTaskUi();
   const [open, setOpen] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -102,6 +105,7 @@ export default function Jobs() {
   const label = useLabelJob();
   const train = useAction(() => api<Task>("/model/train", { method: "POST" }), [["tasks"]]);
   const rescore = useAction(() => api<Task>("/runs/rescore", { method: "POST" }), [["tasks"]]);
+  const update = useAction(() => api<Task>("/runs/update", { method: "POST" }), [["tasks"]]);
 
   const model = data?.model;
   const nLabels = model?.n_labels ?? 0;
@@ -121,6 +125,7 @@ export default function Jobs() {
         actions={<>
           <Button onClick={() => { setImported(null); setImporting(true); }}>Importer une offre</Button>
           <Button onClick={() => rescore.mutate(undefined, { onSuccess: track })} loading={rescore.isPending}>Recalculer les scores</Button>
+          <Button onClick={() => update.mutate(undefined, { onSuccess: track })} loading={update.isPending} disabled={!data?.keyword} title="Relance la collecte avec la dernière recherche et ajoute les nouvelles offres">Mettre à jour</Button>
           <Button variant="primary" onClick={() => setRunning(true)}>Lancer une analyse</Button>
         </>}
       />
@@ -133,6 +138,7 @@ export default function Jobs() {
           </Notice>
         </div>
       )}
+      {activeRun && <RunProgress task={activeRun} />}
       <ErrorBox error={error ?? label.error ?? train.error ?? rescore.error} />
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -186,6 +192,7 @@ export default function Jobs() {
                     <button className="text-left font-medium hover:text-accent-primary" onClick={() => setOpen(job.id)}>{job.title || "Sans titre"}</button>
                     <div className="flex flex-wrap items-center gap-1.5 text-xs text-text-secondary">
                       <Badge>{sourceLabel(job.source_code)}</Badge>
+                      {job.provisional && <Badge tone="info">Nouveau</Badge>}
                       <span>{[job.company, job.location].filter(Boolean).join(" · ")}</span>
                     </div>
                   </td>

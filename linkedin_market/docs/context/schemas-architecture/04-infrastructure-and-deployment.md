@@ -35,7 +35,7 @@ Il n'y a ni *staging* ni production hébergée : la « mise en production » est
 | Node.js | 22 LTS minimum, 24 vérifié (build du frontend uniquement) | `npm ci && npm run build` dans `web/frontend` (`tsc --noEmit && vite build`) |
 | Navigateur | Chrome / Chromium ou Firefox récent | Selenium Manager télécharge le driver adapté. |
 | PostgreSQL `[ACTUEL]` | **18** | Paquet système **ou** `docker compose --env-file .env -f linkedin_market/compose.yaml up -d db` depuis la racine. |
-| Dépendances Python clés | `selenium>=4.50,<5`, `fastapi>=0.115,<1`, `uvicorn[standard]>=0.32,<1`, `anthropic>=1.9,<2`, `numpy>=1.26,<3`, `pypdf>=4,<6`, `fpdf2>=2.8,<3`, `python-dotenv>=1,<2`, `sqlalchemy>=2.0,<2.2`, `psycopg[binary]>=3.2,<4`, `alembic>=1.18,<2`, `cryptography>=44,<51` (Fernet) ; dev : `ruff`, `pytest`, `httpx` | `linkedin_market/requirements.txt` `[ACTUEL]` (dev : `linkedin_market/requirements-dev.txt`, qui inclut le premier) |
+| Dépendances Python clés | `selenium>=4.50,<5`, `fastapi>=0.115,<1`, `uvicorn[standard]>=0.32,<1`, `anthropic>=1.9,<2`, `numpy>=1.26,<3`, `pypdf>=4,<6`, `fpdf2>=2.8,<3`, `python-docx>=1.1,<2` (export Word du CV), `python-dotenv>=1,<2`, `sqlalchemy>=2.0,<2.2`, `psycopg[binary]>=3.2,<4`, `alembic>=1.18,<2`, `cryptography>=44,<51` (Fernet) ; dev : `ruff`, `pytest`, `httpx` | `linkedin_market/requirements.txt` `[ACTUEL]` (dev : `linkedin_market/requirements-dev.txt`, qui inclut le premier) |
 
 `compose.yaml` cible (base seule, l'application reste lancée par Python pour garder le navigateur visible) :
 

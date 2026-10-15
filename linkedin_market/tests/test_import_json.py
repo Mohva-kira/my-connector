@@ -140,7 +140,7 @@ def test_conversions_reglages_e3_e7(legacy):
     import_json.import_legacy_files(legacy)
     values = settings.load_settings()
     assert values["interpreter"] == "local"  # none -> local (E-7)
-    assert values["max_items"] is None  # 40 > 15 en prudent -> NULL (E-3)
+    assert values["max_items"] == 40  # 40 <= 100 en prudent : conservé (E-3)
     assert (values["caution"], values["apply_daily_max"], values["linkedin_skill_sync"]) == ("prudent", 8, False)
     assert settings.find_answer("Authorized to work?") == "Yes"
     overrides = settings.load_profile_settings()

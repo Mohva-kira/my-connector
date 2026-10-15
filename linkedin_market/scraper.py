@@ -153,7 +153,15 @@ class LinkedInScraper:
     construits par la méthode de collecte en cours (conservés si elle est interrompue).
     """
 
-    def __init__(self, driver, request: SearchRequest, *, check: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        driver,
+        request: SearchRequest,
+        *,
+        check: Callable[[], None] | None = None,
+        on_batch: Callable[[list[Item], bool], None] | None = None,
+    ):
+        self.on_batch = on_batch  # appelé par lot d'offres lues : (offres du lot, dernier lot ?)
         self.driver = driver
         self.request = request
         self.caution = config.CAUTION_LEVELS.get(request.caution, config.CAUTION_LEVELS[config.DEFAULT_CAUTION])
@@ -211,8 +219,9 @@ class LinkedInScraper:
         job_ids = job_ids[: self.request.max_items]
         log.info("%d offres trouvées, lecture du détail...", len(job_ids))
 
-        items = self.partial = []
-        for job_id in job_ids:
+        items: list[Item] = []
+        self.partial = []  # offres lues et pas encore remises à ``on_batch``
+        for index, job_id in enumerate(job_ids):
             url = f"https://www.linkedin.com/jobs/view/{job_id}/"
             if not self._get(url):
                 break
@@ -224,7 +233,6 @@ class LinkedInScraper:
                     "#job-details",
                     ".jobs-box__html-content",
                     ".jobs-description",
-                    "article",
                 ],
             )
             top_card = _text(
@@ -245,21 +253,32 @@ class LinkedInScraper:
             title, page_company = parse_job_page_title(self.driver.title)
             title = title or _short(h1, 150)
             company = page_company or _short(company, 100)
-            items.append(
-                Item(
-                    kind="job",
-                    id=f"job:{job_id}",
-                    url=url,
-                    title=_clean(title),
-                    text=nlp.strip_linkedin_chrome(description),
-                    keyword=self.request.keyword,
-                    company=_clean(company),
-                    location=_clean(top_card.split("·")[0])[:120],
-                    posted_at=parse_relative_date(top_card[:400], self.now) or self.now.date().isoformat(),
-                    scraped_at=self.now.isoformat(),
-                )
+            job = Item(
+                kind="job",
+                id=f"job:{job_id}",
+                url=url,
+                title=_clean(title),
+                text=nlp.strip_linkedin_chrome(description),
+                keyword=self.request.keyword,
+                company=_clean(company),
+                location=_clean(top_card.split("·")[0])[:120],
+                posted_at=parse_relative_date(top_card[:400], self.now) or self.now.date().isoformat(),
+                scraped_at=self.now.isoformat(),
             )
+            items.append(job)
+            self.partial.append(job)
+            if self.on_batch and len(self.partial) >= self.caution.batch_size and index < len(job_ids) - 1:
+                self._flush(last=False)
+        if self.on_batch and self.partial:
+            self._flush(last=True)
         return items
+
+    def _flush(self, *, last: bool) -> None:
+        """Remet le lot en cours à ``on_batch`` (enregistrement, scoring, pause) puis le vide."""
+        batch = list(self.partial)
+        self.partial.clear()
+        if self.on_batch:
+            self.on_batch(batch, last)
 
     # ------------------------------------------------------------ posts
     def posts(self) -> list[Item]:

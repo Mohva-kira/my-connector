@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Protocol
 
 from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.common.by import By
 
 from . import config, nlp, settings
 from .browser import human_pause
@@ -97,25 +96,44 @@ class ApplyResult:
 
 
 # --------------------------------------------------------------- JavaScript
-_JS_BUTTONS = """
+# LinkedIn rend la fenêtre de candidature dans un Shadow DOM ouvert (hôte ``#interop-outlet``) :
+# ``document.querySelectorAll`` ne la voit pas, d'où cette recherche qui descend dans les shadow roots ouverts.
+_JS_DEEP = """
+const deepAll = (root, sel) => {
+  const out = Array.from(root.querySelectorAll(sel));
+  for (const el of root.querySelectorAll('*')) if (el.shadowRoot) out.push(...deepAll(el.shadowRoot, sel));
+  return out;
+};
+"""
+
+_JS_BUTTONS = (
+    _JS_DEEP
+    + """
 const words = arguments[0];
 const root = arguments[1] || document;
 const out = [];
-for (const el of root.querySelectorAll('button, [role="button"]')) {
+// Le bouton « Candidature simplifiée » peut être un lien vers le formulaire (…/apply/…).
+for (const el of deepAll(root, 'button, [role="button"], a[href*="/apply"]')) {
   if (!el.getClientRects().length || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
   const text = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || '')).toLowerCase().replace(/\\s+/g, ' ').trim();
   if (words.some(w => text.includes(w))) out.push(el);
 }
 return out;
 """  # noqa: E501 - script JavaScript embarqué
+)
 
-_JS_DIALOG = """
-for (const el of document.querySelectorAll('[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal')) {
+_JS_DIALOG = (
+    _JS_DEEP
+    + """
+for (const el of deepAll(document, '[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal')) {
   const cs = getComputedStyle(el);
   if (cs.display !== 'none' && cs.visibility !== 'hidden' && el.getClientRects().length) return el;
 }
 return null;
 """
+)
+
+_JS_FIND = _JS_DEEP + "return deepAll(document, '[data-lm-key=\"' + arguments[0] + '\"]')[0] || null;"
 
 # Décrit les champs visibles d'une étape ; marque chaque élément (data-lm-key) pour le retrouver côté Selenium.
 _JS_FIELDS = """
@@ -166,7 +184,18 @@ for (const el of root.querySelectorAll('input, select, textarea')) {
 return fields;
 """  # noqa: E501 - script JavaScript embarqué
 
-_JS_TEXT = "return (arguments[0] || document.body).innerText || '';"
+# Texte d'un élément, ou de la page entière y compris le contenu des Shadow DOM ouverts.
+_JS_TEXT = (
+    _JS_DEEP
+    + """
+if (arguments[0]) return arguments[0].innerText || '';
+const parts = [document.body.innerText || ''];
+for (const host of deepAll(document, '*')) {
+  if (host.shadowRoot) for (const child of host.shadowRoot.children) parts.push(child.innerText || '');
+}
+return parts.join('\\n');
+"""
+)
 
 
 # ------------------------------------------------------------------- outils
@@ -200,6 +229,20 @@ class EasyApply:
 
     def _page_text(self) -> str:
         return (self.driver.execute_script(_JS_TEXT, None) or "").lower()
+
+    def _describe(self, element) -> str:
+        """Résumé court de l'élément cliqué (balise, libellé, lien) pour diagnostiquer un échec."""
+        try:
+            return self.driver.execute_script(
+                "const el = arguments[0];"
+                "const label = (el.getAttribute('aria-label') || el.innerText || '').replace(/\\s+/g, ' ').trim();"
+                "const href = el.getAttribute('href');"
+                "return '<' + el.tagName.toLowerCase() + '> « ' + label.slice(0, 60) + ' »'"
+                " + (href ? ' → ' + href.split('?')[0] : '');",
+                element,
+            )
+        except WebDriverException:
+            return "élément inconnu"
 
     def _click(self, element) -> None:
         try:
@@ -242,7 +285,10 @@ class EasyApply:
         return reply
 
     def _find(self, key: str):
-        return self.driver.find_element(By.CSS_SELECTOR, f'[data-lm-key="{key}"]')
+        element = self.driver.execute_script(_JS_FIND, key)
+        if element is None:
+            raise ApplyError(f"Champ introuvable dans la fenêtre de candidature ({key}).")
+        return element
 
     def _fill_field(self, field: dict) -> None:
         kind = field["kind"]
@@ -379,10 +425,16 @@ class EasyApply:
             return ApplyResult("externe", "Pas de candidature simplifiée : postule sur le site de l'entreprise.")
 
         self.hooks.log("Ouverture de la candidature simplifiée…")
+        clicked = self._describe(buttons[0])
         self._click(buttons[0])
         dialog = self._wait(self._dialog, self.step_timeout)
         if dialog is None:
-            raise ApplyError("La fenêtre de candidature ne s'est pas ouverte (page inattendue).")
+            if self._blocked():
+                raise BlockedError(f"LinkedIn a interrompu la navigation ({driver.current_url}).")
+            raise ApplyError(
+                "La fenêtre de candidature ne s'est pas ouverte (page inattendue) : "
+                f"clic sur {clicked}, page actuelle {driver.current_url.split('?')[0]}."
+            )
 
         try:
             return self._steps(job)

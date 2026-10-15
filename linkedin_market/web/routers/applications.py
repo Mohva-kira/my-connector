@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
-from ... import activity, application, config, consent, outreach, settings
+from ... import activity, application, config, consent, cv_export, cv_format, outreach, settings
 from .. import services
 from ..guards import quota_exceeded, require_browser_ready, require_credentials, require_not_blocked
 from ..services import tidy
@@ -43,7 +43,12 @@ def get_application(job_id: str) -> dict:
         files = application.read_files(entry)
     except ValueError as exc:
         raise HTTPException(500, str(exc)) from exc
-    return {**_clean(entry), **files, "statuses": list(application.STATUSES)}
+    return {
+        **_clean(entry),
+        **files,
+        "statuses": list(application.STATUSES),
+        "ats_issues": cv_format.validate_cv(files["cv"]) if files["cv"] else [],
+    }
 
 
 class Contact(BaseModel):
@@ -110,6 +115,23 @@ def cv_html(job_id: str):
         media_type="text/html",
         headers={"Content-Security-Policy": "sandbox allow-scripts allow-modals allow-popups"},
     )
+
+
+@router.get("/applications/{job_id}/cv.{fmt}")
+def cv_file(job_id: str, fmt: Literal["pdf", "docx"]):
+    """CV au format ATS, généré à la demande et nommé « Prénom-Nom-CV-Titre.<fmt> »."""
+    entry = _entry(job_id)
+    try:
+        folder = application.folder_of(entry)
+        cv = application.read_files(entry)["cv"]
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    if not cv.strip():
+        raise HTTPException(404, "CV introuvable.")
+    path = cv_export.ensure(
+        folder, cv, fmt, title=entry.get("title") or "CV", full_name=settings.load_settings()["full_name"]
+    )
+    return FileResponse(path, media_type=cv_export.MEDIA_TYPES[fmt], filename=path.name)
 
 
 @router.post("/applications/{job_id}/apply", status_code=202)

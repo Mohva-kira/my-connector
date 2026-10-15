@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Protocol
 
 from . import config
@@ -80,6 +81,11 @@ class ClaudeInterpreter:
     name = "claude"
 
     def __init__(self) -> None:
+        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip():
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY absente : ajoute-la dans le .env à la racine du dépôt "
+                "(celui de services/email_analyzer n'est pas lu), ou passe LINKEDIN_INTERPRETER=local"
+            )
         import anthropic  # import local : dépendance optionnelle en mode « local »
 
         self._anthropic = anthropic

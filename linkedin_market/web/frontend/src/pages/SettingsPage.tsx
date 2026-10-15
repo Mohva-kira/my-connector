@@ -153,6 +153,14 @@ export default function SettingsPage() {
           </div>
         </Card>
 
+        <Card title="Coordonnées du CV">
+          <div className="space-y-3">
+            <p className="text-sm text-text-secondary">En tête de chaque CV adapté, avec l'email, le téléphone et ton lieu ; jamais envoyées à Claude.</p>
+            <Field label="Nom complet" hint="Prénom NOM" error={errors.full_name}><input className={inputClass} value={form.full_name} onChange={(e) => set("full_name", e.target.value)} /></Field>
+            <Field label="Profil LinkedIn" hint="https://www.linkedin.com/in/…" error={errors.linkedin_url}><input className={inputClass} type="url" value={form.linkedin_url} onChange={(e) => set("linkedin_url", e.target.value)} /></Field>
+          </div>
+        </Card>
+
         <Card title="Plafonds et candidatures">
           <div className="space-y-3">
             <Field label="Score minimal pour proposer une offre" hint="Pourcentage, 70 par défaut" error={errors.apply_min_score}><input className={inputClass} type="number" min={0} max={100} value={shown(form.apply_min_score)} onChange={(e) => set("apply_min_score", num(e.target.value))} /></Field>

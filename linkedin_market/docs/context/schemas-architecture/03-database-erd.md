@@ -65,6 +65,8 @@ erDiagram
         int message_daily_max "0-200, défaut 15"
         text contact_email
         text contact_phone
+        text full_name "en-tête du CV ATS, vide par défaut (révision 0006)"
+        text linkedin_url "URL /in/ ou vide (révision 0006)"
         text signature
         boolean linkedin_skill_sync "défaut true"
         text home_location "vide par défaut (vague 6, révision 0004)"
